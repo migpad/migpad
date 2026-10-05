@@ -1,11 +1,14 @@
-//! The element that paints a document: prepaint lays out the visible lines, paint draws them.
+//! The element that paints a document: prepaint lays out the visible lines, paint draws them and
+//! the selection and the caret, and listens to the mouse.
 
 use gpui::{
-    App, Bounds, ContentMask, DispatchPhase, Element, ElementId, Entity, GlobalElementId, InspectorElementId,
-    IntoElement, LayoutId, Pixels, ScrollWheelEvent, Style, TextAlign, Window, fill, relative, rgb,
+    App, Bounds, ContentMask, CursorStyle, DispatchPhase, Element, ElementId, Entity, GlobalElementId, HitboxBehavior,
+    InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
+    ScrollWheelEvent, Style, TextAlign, Window, fill, relative, rgb,
 };
 
-use crate::view::{EditorView, Layout, colors};
+use crate::layout::Layout;
+use crate::view::{EditorView, colors};
 
 pub(crate) struct EditorElement {
     view: Entity<EditorView>,
@@ -59,7 +62,9 @@ impl Element for EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Layout {
-        self.view.update(cx, |view, cx| view.layout(bounds, window, cx))
+        let mut layout = self.view.update(cx, |view, cx| view.layout(bounds, window, cx));
+        layout.hitbox = Some(window.insert_hitbox(layout.geometry.text_area, HitboxBehavior::Normal));
+        layout
     }
 
     fn paint(
@@ -72,25 +77,55 @@ impl Element for EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        window.paint_quad(fill(layout.bounds, rgb(colors::BACKGROUND)));
-        window.paint_quad(fill(layout.gutter, rgb(colors::GUTTER)));
-        window.with_content_mask(Some(ContentMask { bounds: layout.text_area }), |window| {
-            for line in &layout.lines {
-                let _ = line.shaped.paint(line.origin, layout.line_height, TextAlign::Left, None, window, cx);
+        let geometry = layout.geometry;
+        window.paint_quad(fill(geometry.bounds, rgb(colors::BACKGROUND)));
+        window.paint_quad(fill(geometry.gutter, rgb(colors::GUTTER)));
+        window.with_content_mask(Some(ContentMask { bounds: geometry.text_area }), |window| {
+            for &rect in &layout.selection {
+                window.paint_quad(fill(rect, rgb(layout.selection_color)));
+            }
+            for (line, origin) in &layout.lines {
+                let _ = line.paint(*origin, layout.line_height, TextAlign::Left, None, window, cx);
+            }
+            if let Some(caret) = layout.caret {
+                window.paint_quad(fill(caret, rgb(colors::CARET)));
             }
         });
         for (number, origin) in &layout.numbers {
             let _ = number.paint(*origin, layout.line_height, TextAlign::Left, None, window, cx);
         }
-        window.paint_quad(fill(layout.track, rgb(colors::TRACK)));
-        if let Some(thumb) = layout.thumb {
+        window.paint_quad(fill(geometry.track, rgb(colors::TRACK)));
+        if let Some(thumb) = geometry.thumb {
             window.paint_quad(fill(thumb, rgb(colors::THUMB)));
         }
+        if let Some(hitbox) = &layout.hitbox {
+            window.set_cursor_style(CursorStyle::IBeam, hitbox);
+        }
 
+        // Moves and releases are heard outside the element too: a drag goes on past its edges.
         let view = self.view.clone();
-        window.on_mouse_event(move |event: &ScrollWheelEvent, phase, _, cx| {
+        window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
+            if phase == DispatchPhase::Bubble && event.button == MouseButton::Left && bounds.contains(&event.position) {
+                view.update(cx, |view, cx| view.mouse_down(event, window, cx));
+                cx.stop_propagation();
+            }
+        });
+        let view = self.view.clone();
+        window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+            if phase == DispatchPhase::Bubble {
+                view.update(cx, |view, cx| view.mouse_move(event, window, cx));
+            }
+        });
+        let view = self.view.clone();
+        window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+            if phase == DispatchPhase::Bubble && event.button == MouseButton::Left {
+                view.update(cx, |view, _| view.mouse_up());
+            }
+        });
+        let view = self.view.clone();
+        window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
             if phase == DispatchPhase::Bubble && bounds.contains(&event.position) {
-                view.update(cx, |view, cx| view.scroll(event, cx));
+                view.update(cx, |view, cx| view.scroll(event, window, cx));
             }
         });
     }

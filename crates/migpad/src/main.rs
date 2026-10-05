@@ -3,6 +3,8 @@
 // Release builds on Windows are GUI applications: no console window.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod debug_input;
+
 use std::path::{Path, PathBuf};
 
 use gpui::{App, AppContext, Bounds, Entity, Focusable, TitlebarOptions, WindowBounds, WindowOptions, px, size};
@@ -12,6 +14,7 @@ use migpad_editor::EditorView;
 fn main() {
     let path = std::env::args_os().nth(1).map(PathBuf::from);
     gpui_platform::application().run(move |cx: &mut App| {
+        migpad_editor::init(cx);
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
                 cx.quit();
@@ -31,12 +34,14 @@ fn main() {
             titlebar: Some(TitlebarOptions { title: Some(title.into()), ..Default::default() }),
             ..Default::default()
         };
-        cx.open_window(options, |window, cx| {
-            let view = cx.new(|cx| EditorView::new(document.clone(), window, cx));
-            window.focus(&view.focus_handle(cx), cx);
-            view
-        })
-        .expect("failed to open the main window");
+        let window = cx
+            .open_window(options, |window, cx| {
+                let view = cx.new(|cx| EditorView::new(document.clone(), window, cx));
+                window.focus(&view.focus_handle(cx), cx);
+                view
+            })
+            .expect("failed to open the main window");
+        debug_input::play(window.into(), cx);
         cx.activate(true);
     });
 }
