@@ -1,4 +1,5 @@
-//! Encoding detection: the byte order mark, then valid UTF-8, then a statistical guess.
+//! Encoding detection: the byte order mark, then valid or mostly valid UTF-8, then a statistical
+//! guess.
 
 use chardetng::{EncodingDetector, Iso2022JpDetection, Utf8Detection};
 
@@ -29,7 +30,7 @@ pub fn detect(sample: &[u8], complete: bool, tld: Option<&str>) -> Detected {
         Ok(_) => true,
         Err(error) => !complete && error.error_len().is_none(),
     };
-    if utf8 {
+    if utf8 || mostly_utf8(sample) {
         return Detected { encoding: Encoding::UTF_8, bom: false };
     }
     let mut detector = EncodingDetector::new(Iso2022JpDetection::Deny);
@@ -46,6 +47,19 @@ pub fn detect(sample: &[u8], complete: bool, tld: Option<&str>) -> Detected {
     // chardetng only guesses supported encodings; UTF-8 would keep the bytes as they are anyway.
     let encoding = Encoding::from_encoding_rs(guess).unwrap_or(Encoding::UTF_8);
     Detected { encoding, bom: false }
+}
+
+/// Whether `sample` is UTF-8 with a few broken places: its valid non-ASCII characters outnumber
+/// its invalid parts four to one. Read as UTF-8, such a file keeps its bytes and shows the broken
+/// places as U+FFFD, while a legacy encoding would garble all of its non-ASCII text. Text in
+/// legacy encodings seldom forms valid UTF-8 sequences, so it stays far below this.
+fn mostly_utf8(sample: &[u8]) -> bool {
+    let (mut valid, mut invalid) = (0, 0);
+    for chunk in sample.utf8_chunks() {
+        valid += chunk.valid().chars().filter(|c| !c.is_ascii()).count();
+        invalid += usize::from(!chunk.invalid().is_empty());
+    }
+    valid >= 4 * invalid.max(1)
 }
 
 #[cfg(test)]
@@ -85,7 +99,8 @@ mod tests {
         let cut = &bytes[..bytes.len() - 7]; // inside "ч" of "чаю.\n"
         assert!(std::str::from_utf8(cut).is_err());
         assert_eq!(detect(cut, false, None).encoding, Encoding::UTF_8);
-        assert_ne!(detect(cut, true, None).encoding, Encoding::UTF_8, "a whole file must be valid");
+        // A whole file cut off like this is still mostly UTF-8.
+        assert_eq!(detect(cut, true, None).encoding, Encoding::UTF_8);
     }
 
     #[test]
@@ -105,6 +120,43 @@ mod tests {
         let text = "Їжак з'їв ґрунт, і все - Євген.\n".repeat(20);
         let (bytes, _, _) = encoding_rs::KOI8_U.encode(&text);
         assert_eq!(detect(&bytes, true, Some("ua")).encoding, legacy("KOI8-U"));
+    }
+
+    #[test]
+    fn mostly_valid_utf8_is_utf8() {
+        let sample = [
+            "Привет, мир! Кириллица и ёлка.\n".as_bytes(),
+            b"Invalid bytes: [\xFF\xFE] and a cut sequence [\xE2\x82] end\n",
+            "日本語のテキスト、カタカナ\n".as_bytes(),
+        ]
+        .concat();
+        assert_eq!(detect(&sample, true, Some("ru")), Detected { encoding: Encoding::UTF_8, bom: false });
+    }
+
+    #[test]
+    fn legacy_text_is_not_mostly_utf8() {
+        let texts = [
+            ("windows-1251", PANGRAM),
+            ("KOI8-R", PANGRAM),
+            ("IBM866", PANGRAM),
+            ("Shift_JIS", "日本語のテキストとカタカナ、ひらがなの例文です。\n"),
+            ("EUC-JP", "日本語のテキストとカタカナ、ひらがなの例文です。\n"),
+            ("GBK", "这是一个中文文本示例，用来测试编码检测。\n"),
+            ("Big5", "這是一個中文文本示範，用來測試編碼偵測。\n"),
+            ("EUC-KR", "이것은 인코딩 감지를 시험하기 위한 한국어 예문입니다.\n"),
+        ];
+        for (name, text) in texts {
+            let text = text.repeat(20);
+            let (bytes, _, unmappable) = legacy(name).0.encode(&text);
+            assert!(!unmappable, "{name}");
+            assert!(!mostly_utf8(&bytes), "{name}");
+            assert_ne!(detect(&bytes, true, None).encoding, Encoding::UTF_8, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_single_latin1_byte_is_not_utf8() {
+        assert_eq!(detect(b"caf\xe9 au lait", true, None).encoding, legacy("windows-1252"));
     }
 
     #[test]
