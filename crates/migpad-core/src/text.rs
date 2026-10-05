@@ -122,7 +122,7 @@ fn char_len<S: TextStore + ?Sized>(text: &S, pos: usize) -> usize {
 }
 
 /// Whether `byte` continues a UTF-8 sequence rather than starting one.
-fn is_continuation(byte: u8) -> bool {
+pub(crate) fn is_continuation(byte: u8) -> bool {
     byte & 0xC0 == 0x80
 }
 
