@@ -1,0 +1,5 @@
+# LF line endings in the repository and in working copies on every OS.
+* text=auto eol=lf
+
+# Test data is compared byte for byte: keep its line endings (CRLF, CR) and encodings as they are.
+**/tests/data/** -text

@@ -1,0 +1,23 @@
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0-dev"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/migpad/migpad"
+publish = false
+
+[workspace.dependencies]
+migpad-core = { path = "crates/migpad-core" }
+migpad-editor = { path = "crates/migpad-editor" }
+migpad-ui = { path = "crates/migpad-ui" }
+
+# GPUI, the UI framework of the Zed editor: community snapshot gpui-pre 0.3.7 (zed@1a28cff), pinned exactly.
+gpui = { package = "gpui-pre", version = "=0.3.7" }
+# Without `font-kit` there is no text on macOS; without `wayland` and `x11` there is no window on Linux.
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.7", features = ["font-kit", "wayland", "x11"] }
+
+[profile.release]
+lto = "thin"

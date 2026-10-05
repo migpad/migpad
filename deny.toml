@@ -1,0 +1,61 @@
+# cargo-deny: licenses, banned crates, sources and security advisories of the dependency tree.
+# https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+# The platforms MigPad ships on.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+]
+
+[advisories]
+# Vulnerabilities fail the check anywhere in the tree. Unmaintained crates fail it only
+# as direct dependencies: transitive ones come with GPUI and are updated together with it.
+unmaintained = "workspace"
+
+[licenses]
+# Permissive licenses compatible with MIT. MPL-2.0 is weak file-level copyleft: allowed for
+# unmodified dependencies, whose source code stays available.
+allow = [
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "bzip2-1.0.6",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Zlib",
+]
+
+[bans]
+# GPUI brings several versions of some crates; nothing to act on yet.
+multiple-versions = "allow"
+# MigPad never goes online: no HTTP clients, TLS or WebSocket libraries.
+deny = [
+    "async-tungstenite",
+    "attohttpc",
+    "curl",
+    "curl-sys",
+    "h2",
+    "hyper",
+    "isahc",
+    "native-tls",
+    "openssl",
+    "openssl-sys",
+    "quinn",
+    "reqwest",
+    "rustls",
+    "surf",
+    "tungstenite",
+    "ureq",
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
