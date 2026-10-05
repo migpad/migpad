@@ -1,6 +1,7 @@
 //! Documents: the text with its line index, the format of its file and the state of the file
 //! on disk.
 
+pub mod journal;
 mod load;
 
 use std::fmt;
@@ -15,6 +16,62 @@ use crate::encoding::{Encoding, Losses};
 use crate::history::{Edit, EditKind, History, Selection, Transaction};
 use crate::line_ending::LineEnding;
 use crate::text::{GapBuffer, LineIndex, MAX_LEN, TextStore};
+
+/// A random identifier of a document; it names the journal file and stays the same when the
+/// document is renamed or saved under another name.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DocumentId([u8; 16]);
+
+impl DocumentId {
+    /// A new identifier: random, and unique within the process even when made at the same time.
+    pub fn random() -> Self {
+        use std::hash::{BuildHasher, Hasher};
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        // `RandomState` is seeded by the system's random number generator.
+        let state = std::collections::hash_map::RandomState::new();
+        let time = SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+        let count = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let mut bytes = [0u8; 16];
+        for (half, out) in bytes.as_chunks_mut::<8>().0.iter_mut().enumerate() {
+            let mut hasher = state.build_hasher();
+            hasher.write_u128(time.as_nanos());
+            hasher.write_u32(std::process::id());
+            hasher.write_u64(count);
+            hasher.write_usize(half);
+            *out = hasher.finish().to_le_bytes();
+        }
+        DocumentId(bytes)
+    }
+}
+
+impl fmt::Display for DocumentId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.iter().try_for_each(|byte| write!(f, "{byte:02x}"))
+    }
+}
+
+impl fmt::Debug for DocumentId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
+}
+
+impl std::str::FromStr for DocumentId {
+    type Err = ();
+
+    /// Parses the 32 hex digits that [`Display`](fmt::Display) writes.
+    fn from_str(s: &str) -> Result<Self, ()> {
+        if s.len() != 32 || !s.is_ascii() {
+            return Err(());
+        }
+        let mut bytes = [0u8; 16];
+        for (byte, pair) in bytes.iter_mut().zip(s.as_bytes().as_chunks::<2>().0) {
+            *byte = u8::from_str_radix(std::str::from_utf8(pair).map_err(|_| ())?, 16).map_err(|_| ())?;
+        }
+        Ok(DocumentId(bytes))
+    }
+}
 
 /// The text store of documents; a store that reads large files in parts may replace it later.
 pub type Text = GapBuffer;

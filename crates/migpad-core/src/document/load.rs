@@ -298,24 +298,8 @@ mod tests {
     use std::fs;
 
     use super::*;
+    use crate::testing::TempFile;
     use crate::text::TextStore;
-
-    /// A file in the temporary directory, removed when dropped.
-    struct TempFile(PathBuf);
-
-    impl TempFile {
-        fn new(name: &str, bytes: &[u8]) -> Self {
-            let path = std::env::temp_dir().join(format!("migpad-test-{}-{name}", std::process::id()));
-            fs::write(&path, bytes).unwrap();
-            TempFile(path)
-        }
-    }
-
-    impl Drop for TempFile {
-        fn drop(&mut self) {
-            let _ = fs::remove_file(&self.0);
-        }
-    }
 
     /// Limits that make files of a few hundred bytes partial, and large from 1000 bytes.
     const SMALL: Limits = Limits { preview: 64, chunk: 50, large: 1000, max: 5000 };

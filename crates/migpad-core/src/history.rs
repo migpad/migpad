@@ -120,6 +120,25 @@ impl History {
         merged
     }
 
+    /// Records a transaction again from the journal, where `merged` tells whether it joined
+    /// the last step; time plays no part. Returns `false` if it cannot join that step.
+    pub fn replay(&mut self, transaction: Transaction, kind: EditKind, merged: bool) -> bool {
+        self.bytes -= self.undone.drain(..).map(|t| t.size()).sum::<usize>();
+        if merged {
+            let Some(step) = self.done.back_mut() else { return false };
+            if !join(&mut step.transaction, &transaction, kind) {
+                return false;
+            }
+            self.bytes += transaction.size();
+        } else {
+            self.bytes += transaction.size();
+            self.done.push_back(Step { transaction, kind, time: Instant::now() });
+        }
+        self.trim();
+        self.sealed = true;
+        true
+    }
+
     /// Ends the last step: the next edit starts a new one. The editor calls it when the caret
     /// moves on its own or the document loses focus.
     pub fn seal(&mut self) {
@@ -155,44 +174,15 @@ impl History {
     /// Joins `transaction` to the last step if it continues typing or deleting there.
     fn merge(&mut self, transaction: &Transaction, kind: EditKind, now: Instant) -> bool {
         let Some(step) = self.done.back_mut() else { return false };
-        let ([edit], [last]) = (transaction.edits.as_slice(), step.transaction.edits.as_mut_slice()) else {
-            return false;
-        };
-        if kind == EditKind::Other
-            || kind != step.kind
+        if kind != step.kind
             || now.saturating_duration_since(step.time) >= MERGE_PAUSE
             || transaction.before != step.transaction.after
+            || !join(&mut step.transaction, transaction, kind)
         {
             return false;
         }
-        let joined = match kind {
-            // Typing right after the text typed so far.
-            EditKind::Typing if edit.deleted.is_empty() && edit.pos == last.pos + last.inserted.len() => {
-                last.inserted.extend_from_slice(&edit.inserted);
-                true
-            }
-            // Backspace right before the text deleted so far.
-            EditKind::Deleting
-                if edit.inserted.is_empty()
-                    && last.inserted.is_empty()
-                    && edit.pos + edit.deleted.len() == last.pos =>
-            {
-                last.deleted.splice(0..0, edit.deleted.iter().copied());
-                last.pos = edit.pos;
-                true
-            }
-            // Delete at the same place.
-            EditKind::Deleting if edit.inserted.is_empty() && last.inserted.is_empty() && edit.pos == last.pos => {
-                last.deleted.extend_from_slice(&edit.deleted);
-                true
-            }
-            _ => false,
-        };
-        if joined {
-            step.transaction.after = transaction.after;
-            step.time = now;
-        }
-        joined
+        step.time = now;
+        true
     }
 
     /// Drops the oldest steps beyond the limits, but never the last one.
@@ -202,6 +192,40 @@ impl History {
             self.bytes -= step.transaction.size();
         }
     }
+}
+
+/// Appends the single edit of `transaction` to the single edit of `step` if it continues typing
+/// or deleting there.
+fn join(step: &mut Transaction, transaction: &Transaction, kind: EditKind) -> bool {
+    let ([edit], [last]) = (transaction.edits.as_slice(), step.edits.as_mut_slice()) else {
+        return false;
+    };
+    let joined = match kind {
+        // Typing right after the text typed so far.
+        EditKind::Typing if edit.deleted.is_empty() && edit.pos == last.pos + last.inserted.len() => {
+            last.inserted.extend_from_slice(&edit.inserted);
+            true
+        }
+        // Backspace right before the text deleted so far.
+        EditKind::Deleting
+            if edit.inserted.is_empty() && last.inserted.is_empty() && edit.pos + edit.deleted.len() == last.pos =>
+        {
+            last.deleted.splice(0..0, edit.deleted.iter().copied());
+            last.pos = edit.pos;
+            true
+        }
+        // Delete at the same place.
+        EditKind::Deleting if edit.inserted.is_empty() && last.inserted.is_empty() && edit.pos == last.pos => {
+            last.deleted.extend_from_slice(&edit.deleted);
+            true
+        }
+        // Other edits never join.
+        _ => false,
+    };
+    if joined {
+        step.after = transaction.after;
+    }
+    joined
 }
 
 impl Default for History {
