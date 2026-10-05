@@ -125,6 +125,12 @@ impl Document {
         &self.lines
     }
 
+    /// The whole text as one slice, for searching. Moves the gap of the buffer to the end, which
+    /// takes time proportional to the text after it; the text does not change.
+    pub fn contiguous_text(&mut self) -> &[u8] {
+        self.text.make_contiguous()
+    }
+
     /// Whether the file is large enough to turn off the features that would slow it down.
     pub fn is_large(&self) -> bool {
         self.large
