@@ -5,5 +5,6 @@
 
 pub mod document;
 pub mod encoding;
+pub mod history;
 pub mod line_ending;
 pub mod text;
