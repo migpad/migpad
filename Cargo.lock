@@ -3252,6 +3252,7 @@ dependencies = [
  "encoding_rs",
  "libc",
  "memchr",
+ "regex",
  "windows-sys 0.61.2",
 ]
 
