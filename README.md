@@ -19,4 +19,4 @@ macOS, Linux (X11 and Wayland) and Windows from a single Rust codebase built on 
 
 ## License
 
-Not chosen yet; it will be decided before the first public release.
+MigPad is released under the [MIT License](LICENSE).
