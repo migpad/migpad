@@ -151,7 +151,7 @@ impl EntityInputHandler for EditorView {
         let range = self.ime_range_bytes(&range_utf16, cx);
         let doc = self.document.read(cx);
         let line = doc.lines().line_of(range.start);
-        let row = ScreenLine::new(doc.text(), doc.lines(), line, self.scroll_x, None, &self.metrics, window);
+        let row = ScreenLine::new(doc.text(), doc.lines(), line, &self.line_style(), window);
         // Where the range is now, not in the last frame: input methods ask as soon as they change it.
         let line_height = self.metrics.line_height;
         let top = self.geometry.text_area.top() + px(((line as f64 - self.scroll_top) * f64::from(line_height)) as f32);
@@ -173,8 +173,7 @@ impl EntityInputHandler for EditorView {
         if doc.lines().line_of(start) != line {
             return None;
         }
-        let pos =
-            ScreenLine::new(doc.text(), doc.lines(), line, self.scroll_x, None, &self.metrics, window).boundary_at(x);
+        let pos = ScreenLine::new(doc.text(), doc.lines(), line, &self.line_style(), window).boundary_at(x);
         (start..=start + bytes.len()).contains(&pos).then(|| to_utf16(&bytes, pos - start))
     }
 

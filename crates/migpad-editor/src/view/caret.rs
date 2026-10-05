@@ -63,7 +63,7 @@ impl EditorView {
                     _ => page,
                 };
                 let line = lines.line_of(head);
-                let row = |line| ScreenLine::new(text, lines, line, self.scroll_x, None, &self.metrics, window);
+                let row = |line| ScreenLine::new(text, lines, line, &self.line_style(), window);
                 let x = self.goal_x.unwrap_or_else(|| row(line).x_of(head));
                 goal_x = Some(x);
                 let target = (line as isize + by).clamp(0, lines.count() as isize - 1) as usize;
@@ -105,7 +105,7 @@ impl EditorView {
         }
 
         let doc = self.document.read(cx);
-        let row = ScreenLine::new(doc.text(), doc.lines(), line, self.scroll_x, None, &self.metrics, window);
+        let row = ScreenLine::new(doc.text(), doc.lines(), line, &self.line_style(), window);
         let margin = MARGIN * self.metrics.char_width;
         let x = row.x_of(head);
         let left = head < row.shown.start || x < self.scroll_x + margin;
@@ -129,12 +129,12 @@ impl EditorView {
         let (text, lines) = (doc.text(), doc.lines());
         let (range, _) = lines.line_range(text, line);
         // Lay out enough of the text before `pos` to span `offset` at a column and four bytes per
-        // character, and find the character `offset` pixels before `pos`. A long line puts the
-        // character at the left edge as many bytes from its start as there are columns scrolled.
+        // character, and find the character `offset` pixels before `pos`: scrolled to its column,
+        // a long line shows it at the left edge.
         let columns = (offset / self.metrics.char_width).ceil() as usize + 1;
         let from = text.floor_char_boundary(pos.saturating_sub(4 * columns).max(range.start), range.start);
-        let before = ScreenLine::part(text, range.clone(), from..pos, None, &self.metrics, window);
+        let before = ScreenLine::part(text, range.clone(), from..pos, &self.line_style(), window);
         let edge = before.boundary_at(before.right() - offset);
-        (edge - range.start) as f64 * self.metrics.char_width
+        self.columns.column_of(text, &range, edge) as f64 * self.metrics.char_width
     }
 }

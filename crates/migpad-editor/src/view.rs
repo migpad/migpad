@@ -15,14 +15,17 @@ use gpui::{
 };
 use migpad_core::document::Document;
 use migpad_core::history::Selection;
+use migpad_core::text::TextStore;
 
 pub(crate) use caret::Motion;
 pub(crate) use edit::Deletion;
 use mouse::Drag;
 
+use crate::columns::Columns;
 use crate::element::EditorElement;
+use crate::indent;
 use crate::keymap::{self, CONTEXT};
-use crate::layout::{Geometry, Layout, Metrics, ScreenLine};
+use crate::layout::{Geometry, Layout, LineStyle, Metrics, ScreenLine, TAB_WIDTH};
 use crate::movement;
 
 /// Space between the gutter and the text.
@@ -44,6 +47,12 @@ pub(crate) mod colors {
     /// The selection of a view without focus or in an inactive window.
     pub const SELECTION_INACTIVE: u32 = 0xdcdcdc;
     pub const CARET: u32 = 0x1f1f1f;
+    /// Marks of what is otherwise invisible: whitespace, control characters.
+    pub const MARK: u32 = 0xb0b0b0;
+    pub const GUIDE: u32 = 0xe2e2e2;
+    /// Labels of line breaks: LF, CRLF, CR.
+    pub const LABEL: u32 = 0xffffff;
+    pub const LABEL_BACKGROUND: u32 = 0xbcbcbc;
 }
 
 /// The view of a document in a window.
@@ -63,6 +72,11 @@ pub struct EditorView {
     text_width: f64,
     /// The widest line laid out last time, which limits scrolling to the right.
     widest: f64,
+    /// Columns of the long lines, found as they are laid out.
+    columns: Columns,
+    /// Whether spaces, tabs and line breaks are marked.
+    show_whitespace: bool,
+    show_indent_guides: bool,
     /// Where the parts of the view were in the last layout, for the mouse.
     geometry: Geometry,
     selection: Selection,
@@ -99,6 +113,9 @@ impl EditorView {
             view_lines: 1.0,
             text_width: 0.0,
             widest: 0.0,
+            columns: Columns::new(TAB_WIDTH),
+            show_whitespace: false,
+            show_indent_guides: false,
             geometry: Geometry::default(),
             selection: Selection::default(),
             marked: None,
@@ -115,8 +132,40 @@ impl EditorView {
         &self.document
     }
 
+    /// Whether spaces, tabs and line breaks are marked.
+    pub fn shows_whitespace(&self) -> bool {
+        self.show_whitespace
+    }
+
+    pub fn set_show_whitespace(&mut self, show: bool, cx: &mut Context<Self>) {
+        self.show_whitespace = show;
+        cx.notify();
+    }
+
+    /// Whether levels of indentation are marked by vertical lines.
+    pub fn shows_indent_guides(&self) -> bool {
+        self.show_indent_guides
+    }
+
+    pub fn set_show_indent_guides(&mut self, show: bool, cx: &mut Context<Self>) {
+        self.show_indent_guides = show;
+        cx.notify();
+    }
+
+    /// How the lines of the view are laid out now.
+    fn line_style(&self) -> LineStyle<'_> {
+        LineStyle {
+            metrics: &self.metrics,
+            columns: &self.columns,
+            scroll_x: self.scroll_x,
+            whitespace: self.show_whitespace,
+            underline: self.marked.as_ref(),
+        }
+    }
+
     /// Keeps the selection where the caret can be once the text has changed under it.
     fn document_changed(&mut self, cx: &mut Context<Self>) {
+        self.columns.clear();
         let doc = self.document.read(cx);
         let snap = |pos| movement::snap(doc.text(), doc.lines(), pos);
         self.selection = Selection { anchor: snap(self.selection.anchor), head: snap(self.selection.head) };
@@ -216,6 +265,14 @@ impl EditorView {
         let last = count.min(first + self.page_lines + 2);
         let scroll_x = self.scroll_x;
         let screen_x = |x: f64| text_left + px((x - scroll_x) as f32);
+        let style = self.line_style();
+        let guides = self.show_indent_guides.then(|| {
+            let levels = indent::guide_levels(text, lines, first..last, TAB_WIDTH);
+            let indents: Vec<Option<usize>> = (first..last)
+                .map(|line| indent::indentation(text, lines.line_range(text, line).0, TAB_WIDTH))
+                .collect();
+            (levels, indent::indent_step(&indents, TAB_WIDTH))
+        });
         let Selection { anchor, head } = self.selection;
         let (start, end) = (anchor.min(head), anchor.max(head));
         let mut layout = Layout {
@@ -226,13 +283,39 @@ impl EditorView {
             selection: Vec::new(),
             selection_color: if active { colors::SELECTION } else { colors::SELECTION_INACTIVE },
             caret: None,
+            guides: Vec::new(),
+            labels: Vec::new(),
             hitbox: None,
         };
         let mut widest: f64 = 0.0;
         for (i, line) in (first..last).enumerate() {
             let y = top + line_height * i as f32;
-            let row = ScreenLine::new(text, lines, line, scroll_x, self.marked.as_ref(), metrics, window);
+            let row = ScreenLine::new(text, lines, line, &style, window);
             widest = widest.max(row.right());
+            if let Some((levels, step)) = &guides {
+                // A guide at the start of each level the line is indented past.
+                for column in (0..levels[i]).step_by(*step) {
+                    let x = screen_x(column as f64 * metrics.char_width).round();
+                    layout.guides.push(Bounds::new(point(x, y), size(px(1.), line_height)));
+                }
+            }
+            let eol = lines.line_range(text, line).1;
+            if self.show_whitespace && eol > 0 && row.range.end <= row.shown.end {
+                let label = match (eol, text.byte(row.range.end)) {
+                    (2, _) => "CRLF",
+                    (_, b'\r') => "CR",
+                    _ => "LF",
+                };
+                let run = metrics.run(label.len(), colors::LABEL);
+                let font_size = metrics.font_size * 0.75;
+                let shaped = window.text_system().shape_line(label.into(), font_size, &[run], None);
+                let x = screen_x(row.x_of(row.range.end)) + px(3.);
+                let background = Bounds::from_corners(
+                    point(x - px(2.), y + px(2.)),
+                    point(x + shaped.width() + px(2.), y + line_height - px(2.)),
+                );
+                layout.labels.push((shaped, point(x, y), background));
+            }
             if start < end && start <= row.range.end && end > row.range.start {
                 let from = row.x_of(start.max(row.range.start));
                 // A selected line break shows as a sliver after the end of the line.

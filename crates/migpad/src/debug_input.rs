@@ -8,6 +8,7 @@
 //! - a keystroke, such as `down`, `shift-end` or `cmd-a`;
 //! - `type:TEXT`: text from the system, as typed or committed by an input method;
 //! - `mark:TEXT`: text an input method composes, and `unmark` to take it as it is;
+//! - `action:NAME`: an action by its name, such as `action:editor::ToggleWhitespace`;
 //! - `click:X,Y`, or `click:X,Y,N` for N clicks;
 //! - `press:X,Y`, `move:X,Y` with the button held, `release:X,Y`;
 //! - `wait:MS`.
@@ -33,6 +34,7 @@ enum Step {
     Type(String),
     Mark(String),
     Unmark,
+    Action(String),
     Mouse(Vec<PlatformInput>),
     Wait(Duration),
 }
@@ -63,6 +65,12 @@ pub fn play(window: WindowHandle<EditorView>, cx: &mut App) {
                 Some(Step::Unmark) => {
                     let _ = window.update(cx, |view, window, cx| view.unmark_text(window, cx));
                 }
+                Some(Step::Action(name)) => {
+                    let _ = events.update(cx, |_, window, cx| match cx.build_action(&name, None) {
+                        Ok(action) => window.dispatch_action(action, cx),
+                        Err(error) => eprintln!("MIGPAD_DEBUG_INPUT: {error}"),
+                    });
+                }
                 Some(Step::Mouse(input)) => {
                     for event in input {
                         let _ = events.update(cx, |_, window, cx| window.dispatch_event(event, cx));
@@ -89,6 +97,9 @@ fn parse(step: &str) -> Option<Step> {
     }
     if step == "unmark" {
         return Some(Step::Unmark);
+    }
+    if let Some(name) = step.strip_prefix("action:") {
+        return Some(Step::Action(name.to_owned()));
     }
     let (modifiers, mouse) = match step.strip_prefix("shift-") {
         Some(rest) if rest.starts_with("click:") || rest.starts_with("press:") => (Modifiers::shift(), rest),
