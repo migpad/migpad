@@ -3250,7 +3250,9 @@ version = "0.1.0-dev"
 dependencies = [
  "chardetng",
  "encoding_rs",
+ "libc",
  "memchr",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -7,6 +7,7 @@ pub mod document;
 pub mod encoding;
 pub mod history;
 pub mod line_ending;
+mod platform;
 pub mod text;
 
 #[cfg(test)]
