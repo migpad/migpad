@@ -1,6 +1,6 @@
 # MigPad
 
-A fast cross-platform text editor for macOS, Linux and Windows, inspired by [AkelPad](https://akelpad.sourceforge.net/) (an independent project, not affiliated with it). The name comes from the Russian «миг», "an instant".
+A fast cross-platform text editor for macOS, Linux and Windows, inspired by [AkelPad](https://akelpad.sourceforge.net/) (an independent project, not affiliated with it).
 
 > **Status:** early design stage, no code yet.
 
