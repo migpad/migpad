@@ -3,6 +3,7 @@
 //!
 //! The core knows nothing about GPUI or windows, so it is tested and benchmarked on its own.
 
+pub mod document;
 pub mod encoding;
 pub mod line_ending;
 pub mod text;
