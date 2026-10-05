@@ -8,7 +8,7 @@
 //! - a keystroke, such as `down`, `shift-end` or `cmd-a`;
 //! - `type:TEXT`: text from the system, as typed or committed by an input method;
 //! - `mark:TEXT`: text an input method composes, and `unmark` to take it as it is;
-//! - `action:NAME`: an action by its name, such as `action:editor::ToggleWhitespace`;
+//! - `action:NAME`: an action by its name, such as `action:view::ToggleInvisibles`;
 //! - `click:X,Y`, or `click:X,Y,N` for N clicks;
 //! - `press:X,Y`, `move:X,Y` with the button held, `release:X,Y`;
 //! - `wait:MS`.
@@ -22,7 +22,8 @@ use gpui::{
     AnyWindowHandle, App, EntityInputHandler, Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, Pixels, PlatformInput, Point, WindowHandle, point, px,
 };
-use migpad_editor::EditorView;
+
+use crate::workspace::Workspace;
 
 /// The pause before the first step, while the window shows its first frame.
 const START: Duration = Duration::from_millis(500);
@@ -40,7 +41,8 @@ enum Step {
 }
 
 /// Plays the steps of `MIGPAD_DEBUG_INPUT`, if it is set, in `window`; release builds ignore it.
-pub fn play(window: WindowHandle<EditorView>, cx: &mut App) {
+/// Text goes to the document of the window.
+pub fn play(window: WindowHandle<Workspace>, cx: &mut App) {
     if !cfg!(debug_assertions) {
         return;
     }
@@ -55,15 +57,21 @@ pub fn play(window: WindowHandle<EditorView>, cx: &mut App) {
                     let _ = events.update(cx, |_, window, cx| window.dispatch_keystroke(keystroke, cx));
                 }
                 Some(Step::Type(text)) => {
-                    let _ = window.update(cx, |view, window, cx| view.replace_text_in_range(None, &text, window, cx));
+                    let _ = window.update(cx, |workspace, window, cx| {
+                        workspace.editor().update(cx, |view, cx| view.replace_text_in_range(None, &text, window, cx))
+                    });
                 }
                 Some(Step::Mark(text)) => {
-                    let _ = window.update(cx, |view, window, cx| {
-                        view.replace_and_mark_text_in_range(None, &text, None, window, cx)
+                    let _ = window.update(cx, |workspace, window, cx| {
+                        workspace
+                            .editor()
+                            .update(cx, |view, cx| view.replace_and_mark_text_in_range(None, &text, None, window, cx))
                     });
                 }
                 Some(Step::Unmark) => {
-                    let _ = window.update(cx, |view, window, cx| view.unmark_text(window, cx));
+                    let _ = window.update(cx, |workspace, window, cx| {
+                        workspace.editor().update(cx, |view, cx| view.unmark_text(window, cx))
+                    });
                 }
                 Some(Step::Action(name)) => {
                     let _ = events.update(cx, |_, window, cx| match cx.build_action(&name, None) {

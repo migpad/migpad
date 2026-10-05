@@ -3,18 +3,29 @@
 // Release builds on Windows are GUI applications: no console window.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod commands;
 mod debug_input;
+mod modules;
+mod strings;
+mod workspace;
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use gpui::{App, AppContext, Bounds, Entity, Focusable, TitlebarOptions, WindowBounds, WindowOptions, px, size};
 use migpad_core::document::{Document, OpenAs, Opened, open};
 use migpad_editor::EditorView;
 
+use crate::strings::Language;
+use crate::workspace::Workspace;
+
 fn main() {
-    let path = std::env::args_os().nth(1).map(PathBuf::from);
+    let path = file_argument(std::env::args_os().skip(1));
     gpui_platform::application().run(move |cx: &mut App| {
+        strings::set_language(Language::of_system());
         migpad_editor::init(cx);
+        commands::init(&modules::all(), cx);
+        commands::update_menus(None, cx);
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
                 cx.quit();
@@ -36,14 +47,32 @@ fn main() {
         };
         let window = cx
             .open_window(options, |window, cx| {
-                let view = cx.new(|cx| EditorView::new(document.clone(), window, cx));
-                window.focus(&view.focus_handle(cx), cx);
-                view
+                let editor = cx.new(|cx| EditorView::new(document.clone(), window, cx));
+                let workspace = cx.new(|cx| Workspace::new(editor, window, cx));
+                window.focus(&workspace.focus_handle(cx), cx);
+                workspace
             })
             .expect("failed to open the main window");
         debug_input::play(window, cx);
         cx.activate(true);
     });
+}
+
+/// The file to open: the first argument that is not an option. An option such as
+/// `-AppleLanguages '(en)'`, which sets a user default of macOS, is passed over with its value;
+/// after `--` the argument is a file even if it starts with `-`.
+fn file_argument(args: impl IntoIterator<Item = OsString>) -> Option<PathBuf> {
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        if arg == "--" {
+            return args.next().map(PathBuf::from);
+        }
+        if !arg.as_encoded_bytes().starts_with(b"-") {
+            return Some(PathBuf::from(arg));
+        }
+        args.next();
+    }
+    None
 }
 
 /// Opens the file into `document`: a large one shows its beginning at once and the whole text
@@ -72,5 +101,23 @@ fn load(path: &Path, document: &Entity<Document>, cx: &mut App) {
             .detach();
         }
         Err(error) => eprintln!("{}: {error}", path.display()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file(args: &[&str]) -> Option<PathBuf> {
+        file_argument(args.iter().map(OsString::from))
+    }
+
+    #[test]
+    fn the_file_is_the_first_argument_that_is_not_an_option() {
+        assert_eq!(file(&["notes.txt"]), Some("notes.txt".into()));
+        assert_eq!(file(&["-AppleLanguages", "(en)", "заметки.txt", "more.txt"]), Some("заметки.txt".into()));
+        assert_eq!(file(&["--", "-dash.txt"]), Some("-dash.txt".into()));
+        assert_eq!(file(&["-AppleLanguages", "(en)"]), None);
+        assert_eq!(file(&[]), None);
     }
 }

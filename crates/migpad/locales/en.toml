@@ -1,0 +1,29 @@
+# Strings of the interface in English, the base language. The keys are grouped by where the
+# strings show; ru.toml has the same keys, or the build fails.
+
+[app]
+services = "Services"
+hide = "Hide MigPad"
+hide_others = "Hide Others"
+show_all = "Show All"
+quit = "Quit MigPad"
+
+[edit]
+menu = "Edit"
+undo = "Undo"
+redo = "Redo"
+cut = "Cut"
+copy = "Copy"
+paste = "Paste"
+select_all = "Select All"
+
+[view]
+menu = "View"
+word_wrap = "Word Wrap"
+invisibles = "Invisibles"
+indent_guides = "Indent Guides"
+
+[window]
+menu = "Window"
+minimize = "Minimize"
+zoom = "Zoom"

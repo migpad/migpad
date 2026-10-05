@@ -55,6 +55,12 @@ MIGPAD_DEBUG_INPUT="down shift-end click:300,40,2" cargo run -- notes.txt
 
 Steps are keystrokes (`shift-end`, `cmd-a`), text as typed or committed by an input method (`type:TEXT`), text an input method composes (`mark:TEXT`, then `unmark` or `type:TEXT`), `click:X,Y` with an optional number of clicks, `press:X,Y`, `move:X,Y`, `release:X,Y` and `wait:MS`; see `crates/migpad/src/debug_input.rs`. The input bypasses the system (keyboard layouts, input methods, menus), so real keyboards and mice still need a check by hand.
 
+The interface is in the language of the system: Russian on a Russian system, English otherwise. The strings are in `crates/migpad/locales/`; `en.toml` and `ru.toml` have the same keys, or the build fails. On macOS the other language can be tried without changing the system:
+
+```sh
+cargo run -- -AppleLanguages '(en)' notes.txt
+```
+
 Input fields — the single-line mode of the editor view — can be tried in an example window with two fields, as in a find bar:
 
 ```sh

@@ -12,3 +12,7 @@ gpui_platform.workspace = true
 migpad-core.workspace = true
 migpad-editor.workspace = true
 migpad-ui.workspace = true
+sys-locale.workspace = true
+
+[build-dependencies]
+toml_edit.workspace = true
