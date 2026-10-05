@@ -245,7 +245,7 @@ impl Loader {
             decoder.decode(body, false, &mut text);
             (text.into_bytes(), decoder.losses())
         };
-        self.document(text, losses)
+        Document { preview: true, ..self.document(text, losses) }
     }
 
     fn document(&self, text: Vec<u8>, losses: Losses) -> Document {
@@ -378,6 +378,29 @@ mod tests {
             assert_eq!(progress.load(Ordering::Relaxed), bytes.len() as u64, "{name}");
             assert_eq!(doc.format.bom, name == "bom");
         }
+    }
+
+    #[test]
+    fn a_preview_is_neither_edited_nor_saved() {
+        use std::time::Instant;
+
+        use crate::document::{EditError, SaveError};
+        use crate::history::{EditKind, Selection};
+
+        let content = PANGRAM.repeat(5);
+        let file = TempFile::new("partial-read-only", content.as_bytes());
+        let (mut preview, loader) = partial(detect_ru(&file, SMALL).unwrap());
+        let typed = |doc: &mut Document| {
+            doc.edit(&[(0..0, b"x")], Selection::default(), Selection::caret(1), EditKind::Typing, Instant::now())
+        };
+        assert!(preview.is_preview());
+        assert_eq!(typed(&mut preview), Err(EditError::Preview));
+        let format = preview.format;
+        assert!(matches!(preview.save(&file.0, format, false), Err(SaveError::Preview)));
+        assert_eq!(fs::read(&file.0).unwrap(), content.as_bytes(), "the file is as it was");
+        let mut doc = loader.load().unwrap();
+        assert!(!doc.is_preview());
+        assert_eq!(typed(&mut doc), Ok(()));
     }
 
     #[test]

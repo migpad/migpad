@@ -63,7 +63,7 @@ impl EditorView {
                     _ => page,
                 };
                 let line = lines.line_of(head);
-                let row = |line| ScreenLine::new(text, lines, line, self.scroll_x, &self.metrics, window);
+                let row = |line| ScreenLine::new(text, lines, line, self.scroll_x, None, &self.metrics, window);
                 let x = self.goal_x.unwrap_or_else(|| row(line).x_of(head));
                 goal_x = Some(x);
                 let target = (line as isize + by).clamp(0, lines.count() as isize - 1) as usize;
@@ -79,20 +79,23 @@ impl EditorView {
         };
         self.selection = if select { Selection { anchor, head: pos } } else { Selection::caret(pos) };
         self.goal_x = goal_x;
-        self.reveal_caret(window, cx);
-        self.restart_blink(window, cx);
+        // Typing after the caret moved is a new undo step.
+        self.seal_undo_step(cx);
+        self.caret_moved(window, cx);
     }
 
-    pub(crate) fn select_all(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn select_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let len = self.document.read(cx).text().len();
         self.selection = Selection { anchor: 0, head: len };
         self.goal_x = None;
+        self.seal_undo_step(cx);
+        window.invalidate_character_coordinates();
         cx.notify();
     }
 
     /// Scrolls as little as possible to show the caret: its whole line, and a margin to the left
     /// and to the right of it.
-    fn reveal_caret(&mut self, window: &Window, cx: &App) {
+    pub(super) fn reveal_caret(&mut self, window: &Window, cx: &App) {
         let head = self.selection.head;
         let line = self.document.read(cx).lines().line_of(head);
         if (line as f64) < self.scroll_top {
@@ -102,7 +105,7 @@ impl EditorView {
         }
 
         let doc = self.document.read(cx);
-        let row = ScreenLine::new(doc.text(), doc.lines(), line, self.scroll_x, &self.metrics, window);
+        let row = ScreenLine::new(doc.text(), doc.lines(), line, self.scroll_x, None, &self.metrics, window);
         let margin = MARGIN * self.metrics.char_width;
         let x = row.x_of(head);
         let left = head < row.shown.start || x < self.scroll_x + margin;
@@ -130,7 +133,7 @@ impl EditorView {
         // character at the left edge as many bytes from its start as there are columns scrolled.
         let columns = (offset / self.metrics.char_width).ceil() as usize + 1;
         let from = text.floor_char_boundary(pos.saturating_sub(4 * columns).max(range.start), range.start);
-        let before = ScreenLine::part(text, range.clone(), from..pos, &self.metrics, window);
+        let before = ScreenLine::part(text, range.clone(), from..pos, None, &self.metrics, window);
         let edge = before.boundary_at(before.right() - offset);
         (edge - range.start) as f64 * self.metrics.char_width
     }

@@ -41,7 +41,7 @@ fn main() {
                 view
             })
             .expect("failed to open the main window");
-        debug_input::play(window.into(), cx);
+        debug_input::play(window, cx);
         cx.activate(true);
     });
 }

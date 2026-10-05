@@ -2,9 +2,9 @@
 //! the selection and the caret, and listens to the mouse.
 
 use gpui::{
-    App, Bounds, ContentMask, CursorStyle, DispatchPhase, Element, ElementId, Entity, GlobalElementId, HitboxBehavior,
-    InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    ScrollWheelEvent, Style, TextAlign, Window, fill, relative, rgb,
+    App, Bounds, ContentMask, CursorStyle, DispatchPhase, Element, ElementId, ElementInputHandler, Entity, Focusable,
+    GlobalElementId, HitboxBehavior, InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, ScrollWheelEvent, Style, TextAlign, Window, fill, relative, rgb,
 };
 
 use crate::layout::Layout;
@@ -101,6 +101,8 @@ impl Element for EditorElement {
         if let Some(hitbox) = &layout.hitbox {
             window.set_cursor_style(CursorStyle::IBeam, hitbox);
         }
+        let focus = self.view.read(cx).focus_handle(cx);
+        window.handle_input(&focus, ElementInputHandler::new(bounds, self.view.clone()), cx);
 
         // Moves and releases are heard outside the element too: a drag goes on past its edges.
         let view = self.view.clone();

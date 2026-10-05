@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use regex::bytes::{Regex, RegexBuilder};
 
-use crate::document::{Document, TooLong};
+use crate::document::{Document, EditError};
 use crate::history::{EditKind, Selection};
 use crate::text::TextStore;
 
@@ -157,7 +157,7 @@ impl Document {
         replacement: &str,
         selection: Selection,
         now: Instant,
-    ) -> Result<usize, TooLong> {
+    ) -> Result<usize, EditError> {
         let newline = self.format.line_ending.as_bytes();
         let replacements = search.replace_all(self.contiguous_text(), replacement, newline);
         if replacements.is_empty() {

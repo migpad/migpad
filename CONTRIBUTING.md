@@ -53,7 +53,7 @@ Debug builds play input from the `MIGPAD_DEBUG_INPUT` environment variable throu
 MIGPAD_DEBUG_INPUT="down shift-end click:300,40,2" cargo run -- notes.txt
 ```
 
-Steps are keystrokes (`shift-end`, `cmd-a`), `click:X,Y` with an optional number of clicks, `press:X,Y`, `move:X,Y`, `release:X,Y` and `wait:MS`; see `crates/migpad/src/debug_input.rs`. The input bypasses the system (keyboard layouts, input methods, menus), so real keyboards and mice still need a check by hand.
+Steps are keystrokes (`shift-end`, `cmd-a`), text as typed or committed by an input method (`type:TEXT`), text an input method composes (`mark:TEXT`, then `unmark` or `type:TEXT`), `click:X,Y` with an optional number of clicks, `press:X,Y`, `move:X,Y`, `release:X,Y` and `wait:MS`; see `crates/migpad/src/debug_input.rs`. The input bypasses the system (keyboard layouts, input methods, menus), so real keyboards and mice still need a check by hand.
 
 ## Pull requests
 

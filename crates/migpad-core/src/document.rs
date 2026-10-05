@@ -91,6 +91,8 @@ pub struct Document {
     /// The file as it was when it was loaded or last saved.
     pub disk: Option<Fingerprint>,
     large: bool,
+    /// The beginning of a larger file, shown while the rest loads.
+    preview: bool,
     decode_losses: Losses,
     history: History,
     id: DocumentId,
@@ -109,6 +111,7 @@ impl Document {
             path: None,
             disk: None,
             large: false,
+            preview: false,
             decode_losses: Losses::default(),
             history: History::new(),
             id: DocumentId::random(),
@@ -136,6 +139,13 @@ impl Document {
         self.large
     }
 
+    /// Whether this is the beginning of a larger file, shown while the rest loads, see
+    /// [`Opened::Partial`]. A preview can be neither edited nor saved: the loaded text replaces it,
+    /// and saving it would cut the file short.
+    pub fn is_preview(&self) -> bool {
+        self.preview
+    }
+
     /// Bytes of the file that could not be decoded when it was loaded: they became U+FFFD,
     /// so saving would not restore them.
     pub fn decode_losses(&self) -> Losses {
@@ -144,7 +154,7 @@ impl Document {
 
     /// Applies `edits` as one undo step: each replaces a range of the text that the previous ones
     /// left. `before` and `after` are the selections that undo and redo restore. Nothing is applied
-    /// if the text would grow beyond [`MAX_LEN`] on the way.
+    /// to a preview, or if the text would grow beyond [`MAX_LEN`] on the way.
     ///
     /// # Panics
     ///
@@ -156,12 +166,15 @@ impl Document {
         after: Selection,
         kind: EditKind,
         now: Instant,
-    ) -> Result<(), TooLong> {
+    ) -> Result<(), EditError> {
+        if self.preview {
+            return Err(EditError::Preview);
+        }
         let mut len = self.text.len();
         for (range, text) in edits {
             len = len.saturating_sub(range.len()) + text.len();
             if len > MAX_LEN {
-                return Err(TooLong);
+                return Err(EditError::TooLong);
             }
         }
         if edits.is_empty() {
@@ -279,17 +292,25 @@ impl Fingerprint {
     }
 }
 
-/// An edit would make the text longer than [`MAX_LEN`].
+/// Why an edit was not applied; the text is as it was.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct TooLong;
+pub enum EditError {
+    /// The text would be longer than [`MAX_LEN`].
+    TooLong,
+    /// The document is a preview, see [`Document::is_preview`].
+    Preview,
+}
 
-impl fmt::Display for TooLong {
+impl fmt::Display for EditError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "the text would be longer than {MAX_LEN} bytes")
+        match self {
+            EditError::TooLong => write!(f, "the text would be longer than {MAX_LEN} bytes"),
+            EditError::Preview => f.write_str("the file is still loading"),
+        }
     }
 }
 
-impl std::error::Error for TooLong {}
+impl std::error::Error for EditError {}
 
 #[cfg(test)]
 mod tests {

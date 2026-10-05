@@ -43,6 +43,9 @@ fn spanning(origin: &Range<usize>, range: Range<usize>) -> Selection {
 impl EditorView {
     pub(crate) fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
+        // A click takes what an input method composes as it is, and starts a new undo step.
+        self.marked = None;
+        self.seal_undo_step(cx);
         if self.geometry.track.contains(&event.position) {
             self.scrollbar_down(event.position, cx);
             return;
@@ -51,7 +54,7 @@ impl EditorView {
         let (line, x) = self.hit(event.position, cx);
         let doc = self.document.read(cx);
         let (text, lines) = (doc.text(), doc.lines());
-        let row = || ScreenLine::new(text, lines, line, self.scroll_x, &self.metrics, window);
+        let row = || ScreenLine::new(text, lines, line, self.scroll_x, None, &self.metrics, window);
         // A line number selects its line, as does a triple click; a double click selects a word.
         let (unit, range) = if in_gutter || event.click_count >= 3 {
             (Unit::Line, movement::line_with_break(text, lines, line))
@@ -68,6 +71,7 @@ impl EditorView {
         self.drag = Some(Drag::Select { unit, origin, mouse: event.position });
         self.goal_x = None;
         self.restart_blink(window, cx);
+        window.invalidate_character_coordinates();
     }
 
     pub(crate) fn mouse_move(&mut self, event: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -97,7 +101,7 @@ impl EditorView {
 
     /// The line under `position`, kept within the text vertically, and the x of `position` in
     /// pixels from the start of the line.
-    fn hit(&self, position: Point<Pixels>, cx: &App) -> (usize, f64) {
+    pub(super) fn hit(&self, position: Point<Pixels>, cx: &App) -> (usize, f64) {
         let area = self.geometry.text_area;
         let y = f64::from(position.y - area.top()).clamp(0.0, (f64::from(area.size.height) - 1.0).max(0.0));
         let count = self.document.read(cx).lines().count();
@@ -111,7 +115,7 @@ impl EditorView {
         let (line, x) = self.hit(mouse, cx);
         let doc = self.document.read(cx);
         let (text, lines) = (doc.text(), doc.lines());
-        let row = || ScreenLine::new(text, lines, line, self.scroll_x, &self.metrics, window);
+        let row = || ScreenLine::new(text, lines, line, self.scroll_x, None, &self.metrics, window);
         let range = match unit {
             Unit::Char => {
                 let pos = row().boundary_at(x);

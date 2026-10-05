@@ -27,6 +27,9 @@ pub enum SaveError {
     /// The file, or the directory of a new file, may not be written.
     PermissionDenied(io::Error),
     Io(io::Error),
+    /// The document is a preview: saving it would cut the file short, see
+    /// [`Document::is_preview`].
+    Preview,
 }
 
 impl From<io::Error> for SaveError {
@@ -46,6 +49,7 @@ impl fmt::Display for SaveError {
                 write!(f, "{} characters would be lost", encoding.count + decoding.count)
             }
             SaveError::PermissionDenied(error) | SaveError::Io(error) => error.fmt(f),
+            SaveError::Preview => f.write_str("the file is still loading"),
         }
     }
 }
@@ -61,6 +65,9 @@ impl Document {
     /// permissions, owner, ACL and extended attributes of the old one; a file with several hard
     /// links, or in a directory that may not be written, is written in place instead.
     pub fn save(&mut self, path: &Path, format: Format, accept_losses: bool) -> Result<(), SaveError> {
+        if self.preview {
+            return Err(SaveError::Preview);
+        }
         let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
         // Bytes lost in decoding are gone for good once the file they came from is overwritten,
         // in whatever encoding.

@@ -6,6 +6,7 @@ mod element;
 mod keymap;
 mod layout;
 mod movement;
+mod utf16;
 mod view;
 
 pub use view::EditorView;
