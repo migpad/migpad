@@ -91,6 +91,25 @@ pub trait TextStore {
         };
         boundary.max(floor)
     }
+
+    /// The start of the character that byte `pos` belongs to: `pos` itself if a character starts
+    /// there. Unlike [`TextStore::prev_char_boundary`], `pos` may be any offset up to the length of
+    /// the text; `floor` is a character boundary at or before it, such as the start of its line,
+    /// and the search does not look before it.
+    ///
+    /// Characters are split as in [`TextStore::next_char_boundary`].
+    fn floor_char_boundary(&self, pos: usize, floor: usize) -> usize {
+        if pos >= self.len() {
+            return pos;
+        }
+        // The character that contains `pos` starts with a non-continuation byte at most three bytes
+        // back; if that character ends before `pos`, the byte at `pos` stands alone.
+        let start = (pos.saturating_sub(3).max(floor)..=pos).rev().find(|&p| !is_continuation(self.byte(p)));
+        match start {
+            Some(s) if s + char_len(self, s) > pos => s,
+            _ => pos,
+        }
+    }
 }
 
 /// Length of the character at `pos`: a valid UTF-8 sequence, or the maximal invalid part that
@@ -205,7 +224,21 @@ mod tests {
             let want = lossy_boundaries(&bytes);
             assert_eq!(forward(&text), want, "{bytes:02X?}");
             assert_eq!(backward(&text), want, "{bytes:02X?}");
+            for pos in 0..=bytes.len() {
+                let floor = *want.iter().rfind(|&&b| b <= pos).unwrap();
+                assert_eq!(text.floor_char_boundary(pos, 0), floor, "{bytes:02X?} at {pos}");
+            }
         }
+    }
+
+    #[test]
+    fn floor_char_boundary_finds_the_start_of_the_character() {
+        let text = store("a€b".as_bytes());
+        assert_eq!([0, 1, 2, 3, 4, 5].map(|pos| text.floor_char_boundary(pos, 0)), [0, 1, 1, 1, 4, 5]);
+        assert_eq!(text.floor_char_boundary(3, 1), 1);
+        // An invalid part is one character.
+        let text = store(b"x\xE2\x82y");
+        assert_eq!(text.floor_char_boundary(2, 0), 1);
     }
 
     #[test]

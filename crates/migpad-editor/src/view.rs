@@ -1,21 +1,32 @@
-//! The view of a document: scrolling, font metrics and the layout of the visible lines.
+//! The view of a document: the selection and the caret, scrolling, and the layout of the visible
+//! lines.
+
+mod caret;
+mod mouse;
+
+use std::time::Duration;
 
 use gpui::{
-    Bounds, Context, Entity, FocusHandle, Focusable, Font, Hsla, Pixels, Point, Render, ScrollWheelEvent, ShapedLine,
-    Subscription, TextRun, Window, div, point, prelude::*, px, rgb, size,
+    App, Bounds, Context, Entity, FocusHandle, Focusable, Pixels, Render, ScrollWheelEvent, Subscription, Task, Window,
+    div, point, prelude::*, px, size,
 };
 use migpad_core::document::Document;
-use migpad_core::text::TextStore;
+use migpad_core::history::Selection;
 
-use crate::display::{DisplayText, MAX_SHAPED};
+pub(crate) use caret::Motion;
+use mouse::Drag;
+
 use crate::element::EditorElement;
+use crate::keymap::{self, CONTEXT, SelectAll};
+use crate::layout::{Geometry, Layout, Metrics, ScreenLine};
+use crate::movement;
 
-/// Columns between tab stops, until the settings give it.
-const TAB_WIDTH: usize = 8;
-const FONT_SIZE: f32 = 13.0;
 /// Space between the gutter and the text.
 const PAD_LEFT: f32 = 4.0;
 const SCROLLBAR_WIDTH: f32 = 12.0;
+const CARET_WIDTH: f32 = 2.0;
+/// How long the blinking caret is shown, and then hidden.
+const BLINK: Duration = Duration::from_millis(500);
 
 /// Colors of the light theme, until the theme of the interface takes over.
 pub(crate) mod colors {
@@ -25,61 +36,10 @@ pub(crate) mod colors {
     pub const LINE_NUMBER: u32 = 0x8a8a8a;
     pub const TRACK: u32 = 0xf4f4f4;
     pub const THUMB: u32 = 0xc0c0c0;
-}
-
-/// The monospace font of the system.
-fn font_family() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "Menlo"
-    } else if cfg!(target_os = "windows") {
-        "Consolas"
-    } else {
-        "DejaVu Sans Mono"
-    }
-}
-
-pub(crate) struct Metrics {
-    pub font: Font,
-    pub font_size: Pixels,
-    pub line_height: Pixels,
-    /// The advance of a character, for the long lines shaped in windows.
-    pub char_width: f64,
-}
-
-impl Metrics {
-    fn new(window: &Window) -> Self {
-        let font = gpui::font(font_family());
-        let font_size = px(FONT_SIZE);
-        let text_system = window.text_system();
-        let id = text_system.resolve_font(&font);
-        let char_width = text_system.advance(id, font_size, 'm').map(|advance| f64::from(advance.width)).unwrap_or(7.8);
-        let ascent = f32::from(text_system.ascent(id, font_size)).abs().round();
-        let descent = f32::from(text_system.descent(id, font_size)).abs().round();
-        Metrics { font, font_size, line_height: px((ascent + descent).max(FONT_SIZE)), char_width }
-    }
-
-    fn run(&self, len: usize, color: u32) -> TextRun {
-        let color: Hsla = rgb(color).into();
-        TextRun { len, font: self.font.clone(), color, background_color: None, underline: None, strikethrough: None }
-    }
-}
-
-/// The visible part of the document, laid out for painting.
-pub(crate) struct Layout {
-    pub bounds: Bounds<Pixels>,
-    pub gutter: Bounds<Pixels>,
-    pub text_area: Bounds<Pixels>,
-    pub line_height: Pixels,
-    pub lines: Vec<VisibleLine>,
-    pub numbers: Vec<(ShapedLine, Point<Pixels>)>,
-    pub track: Bounds<Pixels>,
-    pub thumb: Option<Bounds<Pixels>>,
-}
-
-pub(crate) struct VisibleLine {
-    pub shaped: ShapedLine,
-    /// Where the shaped text starts, on screen.
-    pub origin: Point<Pixels>,
+    pub const SELECTION: u32 = 0xb4d5fe;
+    /// The selection of a view without focus or in an inactive window.
+    pub const SELECTION_INACTIVE: u32 = 0xdcdcdc;
+    pub const CARET: u32 = 0x1f1f1f;
 }
 
 /// The view of a document in a window.
@@ -92,26 +52,55 @@ pub struct EditorView {
     scroll_top: f64,
     /// Pixels scrolled to the right.
     scroll_x: f64,
+    /// Whole lines that fit in the view.
     page_lines: usize,
+    /// Lines that fit in the view, with a fraction.
+    view_lines: f64,
     text_width: f64,
     /// The widest line laid out last time, which limits scrolling to the right.
     widest: f64,
-    _observe: Subscription,
+    /// Where the parts of the view were in the last layout, for the mouse.
+    geometry: Geometry,
+    selection: Selection,
+    /// Where vertical moves keep the caret, in pixels from the start of a line: past shorter lines
+    /// it comes back to its column.
+    goal_x: Option<f64>,
+    drag: Option<Drag>,
+    /// Scrolls while a selection is dragged past the edges of the text.
+    autoscroll: Option<Task<()>>,
+    /// Whether the blinking caret is shown at the moment.
+    caret_on: bool,
+    blink: Option<Task<()>>,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl EditorView {
     pub fn new(document: Entity<Document>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let observe = cx.observe(&document, |_, _, cx| cx.notify());
+        let focus = cx.focus_handle();
+        let subscriptions = vec![
+            cx.observe(&document, |view, _, cx| view.document_changed(cx)),
+            cx.on_focus(&focus, window, Self::restart_blink),
+            cx.on_blur(&focus, window, Self::restart_blink),
+            cx.observe_window_activation(window, Self::restart_blink),
+        ];
         EditorView {
             document,
-            focus: cx.focus_handle(),
+            focus,
             metrics: Metrics::new(window),
             scroll_top: 0.0,
             scroll_x: 0.0,
             page_lines: 1,
+            view_lines: 1.0,
             text_width: 0.0,
             widest: 0.0,
-            _observe: observe,
+            geometry: Geometry::default(),
+            selection: Selection::default(),
+            goal_x: None,
+            drag: None,
+            autoscroll: None,
+            caret_on: true,
+            blink: None,
+            _subscriptions: subscriptions,
         }
     }
 
@@ -119,8 +108,49 @@ impl EditorView {
         &self.document
     }
 
-    /// Lays out the lines that fit in `bounds`.
+    /// Keeps the selection where the caret can be once the text has changed under it.
+    fn document_changed(&mut self, cx: &mut Context<Self>) {
+        let doc = self.document.read(cx);
+        let snap = |pos| movement::snap(doc.text(), doc.lines(), pos);
+        self.selection = Selection { anchor: snap(self.selection.anchor), head: snap(self.selection.head) };
+        cx.notify();
+    }
+
+    /// Shows the caret and starts its blinking over, if the view has focus in an active window;
+    /// stops the blinking otherwise.
+    fn restart_blink(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.caret_on = true;
+        let blinking = self.focus.is_focused(window) && window.is_window_active();
+        self.blink = blinking.then(|| {
+            cx.spawn(async move |view, cx| {
+                loop {
+                    cx.background_executor().timer(BLINK).await;
+                    let blinked = view.update(cx, |view, cx| {
+                        view.caret_on = !view.caret_on;
+                        cx.notify();
+                    });
+                    if blinked.is_err() {
+                        break;
+                    }
+                }
+            })
+        });
+        cx.notify();
+    }
+
+    fn max_top(&self, count: usize) -> f64 {
+        count.saturating_sub(self.page_lines) as f64
+    }
+
+    /// Scrolls so that `top` is the first visible line, as far as the document allows.
+    fn scroll_to(&mut self, top: f64, cx: &App) {
+        let count = self.document.read(cx).lines().count();
+        self.scroll_top = top.clamp(0.0, self.max_top(count));
+    }
+
+    /// Lays out the lines that fit in `bounds`, with the selection and the caret.
     pub(crate) fn layout(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut Context<Self>) -> Layout {
+        let active = self.focus.is_focused(window) && window.is_window_active();
         let doc = self.document.read(cx);
         let (text, lines) = (doc.text(), doc.lines());
         let count = lines.count();
@@ -134,54 +164,62 @@ impl EditorView {
         );
         let gutter = Bounds::from_corners(bounds.origin, point(bounds.left() + gutter_width, bounds.bottom()));
         let text_area = Bounds::from_corners(point(gutter.right(), bounds.top()), point(track.left(), bounds.bottom()));
-        self.page_lines = ((f64::from(bounds.size.height) / f64::from(line_height)) as usize).max(1);
+        let text_left = text_area.left() + px(PAD_LEFT);
+        self.view_lines = f64::from(bounds.size.height) / f64::from(line_height);
+        self.page_lines = (self.view_lines as usize).max(1);
         self.text_width = f64::from(text_area.size.width) - f64::from(PAD_LEFT);
-        let max_top = count.saturating_sub(self.page_lines) as f64;
+        let max_top = self.max_top(count);
         self.scroll_top = self.scroll_top.clamp(0.0, max_top);
 
         let first = self.scroll_top.floor() as usize;
         let top = bounds.top() - px(((self.scroll_top - first as f64) * f64::from(line_height)) as f32);
         let last = count.min(first + self.page_lines + 2);
-        let text_left = text_area.left() + px(PAD_LEFT) - px(self.scroll_x as f32);
-        let mut visible = Vec::with_capacity(last - first);
-        let mut numbers = Vec::with_capacity(last - first);
+        let scroll_x = self.scroll_x;
+        let screen_x = |x: f64| text_left + px((x - scroll_x) as f32);
+        let Selection { anchor, head } = self.selection;
+        let (start, end) = (anchor.min(head), anchor.max(head));
+        let mut layout = Layout {
+            geometry: Geometry { bounds, gutter, text_area, text_left, track, thumb: None },
+            line_height,
+            lines: Vec::with_capacity(last - first),
+            numbers: Vec::with_capacity(last - first),
+            selection: Vec::new(),
+            selection_color: if active { colors::SELECTION } else { colors::SELECTION_INACTIVE },
+            caret: None,
+            hitbox: None,
+        };
         let mut widest: f64 = 0.0;
         for (i, line) in (first..last).enumerate() {
             let y = top + line_height * i as f32;
-            let (range, _) = lines.line_range(text, line);
-            // A very long line is shaped in a window around the visible part; before the window,
-            // one column per byte is close enough.
-            let (start, column) = if range.len() > MAX_SHAPED {
-                let skip = ((self.scroll_x / metrics.char_width) as usize).saturating_sub(MAX_SHAPED / 4);
-                let wanted = range.start + skip;
-                // The start of the character that the wanted byte belongs to.
-                let start =
-                    if wanted >= range.end { range.end } else { text.prev_char_boundary(wanted + 1, range.start) };
-                (start, start - range.start)
-            } else {
-                (range.start, 0)
-            };
-            let end = if range.end - start > MAX_SHAPED {
-                text.prev_char_boundary(start + MAX_SHAPED + 1, start)
-            } else {
-                range.end
-            };
-            let shown = DisplayText::new(&text.to_vec(start..end), column, TAB_WIDTH);
-            let run = metrics.run(shown.text.len(), colors::TEXT);
-            let shaped = window.text_system().shape_line(shown.text.into(), metrics.font_size, &[run], None);
-            let x = column as f64 * metrics.char_width;
-            widest = widest.max(x + f64::from(shaped.width()));
-            visible.push(VisibleLine { shaped, origin: point(text_left + px(x as f32), y) });
+            let row = ScreenLine::new(text, lines, line, scroll_x, metrics, window);
+            widest = widest.max(row.right());
+            if start < end && start <= row.range.end && end > row.range.start {
+                let from = row.x_of(start.max(row.range.start));
+                // A selected line break shows as a sliver after the end of the line.
+                let to = if end > row.range.end {
+                    row.x_of(row.range.end) + metrics.char_width * 0.5
+                } else {
+                    row.x_of(end)
+                };
+                layout
+                    .selection
+                    .push(Bounds::from_corners(point(screen_x(from), y), point(screen_x(to), y + line_height)));
+            }
+            if active && self.caret_on && (row.shown.start..=row.shown.end).contains(&head) {
+                let x = screen_x(row.x_of(head)).round() - px(CARET_WIDTH / 2.);
+                layout.caret = Some(Bounds::new(point(x, y), size(px(CARET_WIDTH), line_height)));
+            }
+            layout.lines.push((row.shaped, point(screen_x(row.x), y)));
 
             let number = (line + 1).to_string();
             let run = metrics.run(number.len(), colors::LINE_NUMBER);
             let shaped = window.text_system().shape_line(number.into(), metrics.font_size, &[run], None);
             let x = gutter.right() - px(7.) - shaped.width();
-            numbers.push((shaped, point(x, y)));
+            layout.numbers.push((shaped, point(x, y)));
         }
         self.widest = widest;
 
-        let thumb = (count > self.page_lines).then(|| {
+        layout.geometry.thumb = (count > self.page_lines).then(|| {
             let track_height = f64::from(track.size.height);
             let height = (track_height * self.page_lines as f64 / count as f64).max(24.0);
             let offset = (track_height - height) * self.scroll_top / max_top;
@@ -190,27 +228,35 @@ impl EditorView {
                 size(px(SCROLLBAR_WIDTH - 4.), px(height as f32)),
             )
         });
-        Layout { bounds, gutter, text_area, line_height, lines: visible, numbers, track, thumb }
+        self.geometry = layout.geometry;
+        layout
     }
 
-    pub(crate) fn scroll(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
+    pub(crate) fn scroll(&mut self, event: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
         let delta = event.delta.pixel_delta(self.metrics.line_height);
-        self.scroll_top -= f64::from(delta.y) / f64::from(self.metrics.line_height);
+        self.scroll_to(self.scroll_top - f64::from(delta.y) / f64::from(self.metrics.line_height), cx);
         // Scrolling right stops when the widest visible line is half out of view.
         let max_x = (self.widest - self.text_width * 0.5).max(0.0);
         self.scroll_x = (self.scroll_x - f64::from(delta.x)).clamp(0.0, max_x.max(self.scroll_x));
+        // A selection being dragged follows the text under the mouse.
+        self.select_to_mouse(window, cx);
         cx.notify();
     }
 }
 
 impl Focusable for EditorView {
-    fn focus_handle(&self, _: &gpui::App) -> FocusHandle {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
     }
 }
 
 impl Render for EditorView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div().key_context("Editor").track_focus(&self.focus).size_full().child(EditorElement::new(cx.entity()))
+        let view = div()
+            .key_context(CONTEXT)
+            .track_focus(&self.focus)
+            .size_full()
+            .on_action(cx.listener(|view, _: &SelectAll, _, cx| view.select_all(cx)));
+        keymap::on_motions(view, cx).child(EditorElement::new(cx.entity()))
     }
 }
