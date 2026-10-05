@@ -121,8 +121,8 @@ impl EditorView {
     /// An input field: one line of text in a document of its own, without a journal. Enter, Tab
     /// and Escape go on to the element around the field, which binds them in its key context to
     /// what the field is for — find, go to a line — or to moving the focus; the field is a tab
-    /// stop. The commands of the View menu go past it too. Text with line breaks becomes one line:
-    /// breaks at its ends are dropped, and each one inside becomes a space.
+    /// stop. Text with line breaks becomes one line: breaks at its ends are dropped, and each one
+    /// inside becomes a space.
     pub fn single_line(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let document = cx.new(|_| Document::new());
         Self::create(document, true, window, cx)

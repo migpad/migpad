@@ -70,10 +70,7 @@ actions!(
         Redo,
         Copy,
         Cut,
-        Paste,
-        ToggleWhitespace,
-        ToggleIndentGuides,
-        ToggleWordWrap
+        Paste
     ]
 );
 
@@ -92,20 +89,11 @@ pub(crate) fn on_edits(div: Div, cx: &mut Context<EditorView>) -> Div {
         .on_action(cx.listener(|view, _: &Paste, window, cx| view.paste(window, cx)))
 }
 
-/// Handles in `div` the actions that only the view of a document takes. In an input field they go
-/// on to the element around it: the commands of the View menu then reach the document, not the
-/// field that has the focus.
+/// Handles in `div` the actions that only the view of a document takes: line breaks and tabs. In
+/// an input field they go on to the element around it.
 pub(crate) fn on_document_actions(div: Div, cx: &mut Context<EditorView>) -> Div {
     div.on_action(cx.listener(|view, _: &Newline, window, cx| view.newline(window, cx)))
         .on_action(cx.listener(|view, _: &Tab, window, cx| view.type_text("\t", window, cx)))
-        // Commands of the View menu, without keys until the menu exists.
-        .on_action(
-            cx.listener(|view, _: &ToggleWhitespace, _, cx| view.set_show_whitespace(!view.shows_whitespace(), cx)),
-        )
-        .on_action(cx.listener(|view, _: &ToggleIndentGuides, _, cx| {
-            view.set_show_indent_guides(!view.shows_indent_guides(), cx)
-        }))
-        .on_action(cx.listener(|view, _: &ToggleWordWrap, _, cx| view.set_word_wrap(!view.wraps_lines(), cx)))
 }
 
 /// `keys` move the caret; with Shift they select.
@@ -113,8 +101,8 @@ fn motion(keys: &str, to: impl Action, select: impl Action) -> [KeyBinding; 2] {
     [KeyBinding::new(keys, to, Some(CONTEXT)), KeyBinding::new(&format!("shift-{keys}"), select, Some(CONTEXT))]
 }
 
-/// The keys of the editor on this system.
-pub(crate) fn key_bindings() -> Vec<KeyBinding> {
+/// The keys of the editor on this system; the application checks its own keys against them.
+pub fn key_bindings() -> Vec<KeyBinding> {
     let common = [
         motion("left", MoveLeft, SelectLeft),
         motion("right", MoveRight, SelectRight),
