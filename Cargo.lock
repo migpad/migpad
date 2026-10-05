@@ -3236,6 +3236,9 @@ dependencies = [
 [[package]]
 name = "migpad-core"
 version = "0.1.0-dev"
+dependencies = [
+ "memchr",
+]
 
 [[package]]
 name = "migpad-editor"

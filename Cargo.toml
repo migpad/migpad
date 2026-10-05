@@ -19,5 +19,7 @@ gpui = { package = "gpui-pre", version = "=0.3.7" }
 # Without `font-kit` there is no text on macOS; without `wayland` and `x11` there is no window on Linux.
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.7", features = ["font-kit", "wayland", "x11"] }
 
+memchr = "2.8"
+
 [profile.release]
 lto = "thin"
