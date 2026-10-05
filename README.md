@@ -2,7 +2,7 @@
 
 A fast cross-platform text editor for macOS, Linux and Windows, inspired by [AkelPad](https://akelpad.sourceforge.net/) (an independent project, not affiliated with it).
 
-> **Status:** early design stage, no code yet.
+> **Status:** early development, not usable yet.
 
 ## Goals
 
@@ -16,6 +16,10 @@ A fast cross-platform text editor for macOS, Linux and Windows, inspired by [Ake
 ## Platforms
 
 macOS, Linux (X11 and Wayland) and Windows from a single Rust codebase built on GPUI, the UI framework of the Zed editor. The interface will be available in English and Russian.
+
+## Building
+
+See [CONTRIBUTING.md](CONTRIBUTING.md): build requirements, checks and pull requests.
 
 ## License
 
