@@ -11,15 +11,17 @@
 //! Kinds of records:
 //!
 //! - `B`, base: what the following records start from — the path, the format, the fingerprint
-//!   of the file on disk if there is a file, and a snapshot of the text if one was taken; without
-//!   a snapshot, the text of the base is the file;
+//!   of the file on disk if there is a file, the losses of decoding it, where the saved state is
+//!   in the undo history, and a snapshot of the text if one was taken; without a snapshot, the
+//!   text of the base is the file;
 //! - `T`, transaction: its kind, whether it joined the last undo step, the selections before and
 //!   after, and the edits;
 //! - `U`, undo; `R`, redo;
 //! - `F`, format: the format changed without saving.
 //!
 //! Records before the last base only rebuild the undo history, since the base contains their
-//! edits already; records after it are applied to the text of the base as well.
+//! edits already; records after it are applied to the text of the base as well. A rewritten
+//! journal starts with the undo history and ends with a base.
 
 use std::fmt;
 use std::fs::{File, OpenOptions};
@@ -50,9 +52,9 @@ pub struct Journal {
 }
 
 impl Journal {
-    /// Creates the journal file of document `id`, replacing any file at `file_path`, and writes
-    /// the header and the first base.
-    pub fn create(file_path: &Path, id: DocumentId, path: Option<&Path>, base: BaseRef) -> io::Result<Journal> {
+    /// Creates the journal file of document `id`, replacing any file at `file_path`, with just
+    /// the header: a base must follow before any edit.
+    pub fn create(file_path: &Path, id: DocumentId, path: Option<&Path>) -> io::Result<Journal> {
         let mut header = Vec::new();
         header.extend_from_slice(MAGIC);
         header.push(VERSION);
@@ -61,9 +63,7 @@ impl Journal {
         let mut file = OpenOptions::new().write(true).create(true).truncate(true).open(file_path)?;
         file.write_all(&header)?;
         drop(file);
-        let mut journal = Journal::resume(file_path, header.len() as u64)?;
-        journal.write_base(base)?;
-        Ok(journal)
+        Journal::resume(file_path, header.len() as u64)
     }
 
     /// Continues the journal at `file_path` after its first `valid_len` bytes — the whole journal
@@ -83,6 +83,7 @@ impl Journal {
         put_fingerprint(&mut payload, base.disk);
         put_u64(&mut payload, base.decode_losses.count as u64);
         put_u64(&mut payload, base.decode_losses.first.map_or(u64::MAX, |pos| pos as u64));
+        put_u64(&mut payload, base.saved.unwrap_or(u64::MAX));
         match base.snapshot {
             Some(text) => {
                 payload.push(1);
@@ -161,6 +162,9 @@ pub struct BaseRef<'a> {
     pub disk: Option<Fingerprint>,
     /// Saving must still warn about bytes the snapshot lost in decoding.
     pub decode_losses: Losses,
+    /// The position of the saved state in the undo history, if it can be reached; see
+    /// [`History::position`].
+    pub saved: Option<u64>,
     pub snapshot: Option<&'a Text>,
 }
 
@@ -172,6 +176,7 @@ pub enum Record {
         format: Format,
         disk: Option<Fingerprint>,
         decode_losses: Losses,
+        saved: Option<u64>,
         snapshot: Option<Vec<u8>>,
     },
     Transaction {
@@ -297,7 +302,7 @@ impl Document {
     pub fn replay(contents: &Contents, file: Option<Document>) -> Result<Document, ReplayError> {
         let last_base =
             contents.records.iter().rposition(|r| matches!(r, Record::Base { .. })).ok_or(ReplayError::NoBase)?;
-        let Record::Base { path, format, disk, decode_losses, snapshot } = &contents.records[last_base] else {
+        let Record::Base { path, format, disk, decode_losses, saved, snapshot } = &contents.records[last_base] else {
             unreachable!()
         };
         let mut doc = match snapshot {
@@ -308,6 +313,7 @@ impl Document {
             }
             None => file.ok_or(ReplayError::NoFileText)?,
         };
+        doc.id = contents.id;
         doc.path = path.clone();
         doc.format = *format;
         doc.disk = *disk;
@@ -326,6 +332,7 @@ impl Document {
                 return Err(ReplayError::Mismatch);
             }
         }
+        doc.saved_at = saved.and_then(|position| history.state_at(position));
         doc.history = history;
         // The records after it: the text as well.
         for record in &contents.records[last_base + 1..] {
@@ -392,12 +399,16 @@ fn decode(kind: u8, payload: &[u8]) -> Option<Record> {
                 u64::MAX => None,
                 pos => Some(usize::try_from(pos).ok()?),
             };
+            let saved = match cursor.u64()? {
+                u64::MAX => None,
+                position => Some(position),
+            };
             let snapshot = match cursor.u8()? {
                 0 => None,
                 1 => Some(cursor.bytes()?.to_vec()),
                 _ => return None,
             };
-            Record::Base { path, format, disk, decode_losses: Losses { count, first }, snapshot }
+            Record::Base { path, format, disk, decode_losses: Losses { count, first }, saved, snapshot }
         }
         TRANSACTION => {
             let kind = match cursor.u8()? {
@@ -684,6 +695,7 @@ mod tests {
             format: Format::default(),
             disk: None,
             decode_losses: Losses::default(),
+            saved: None,
             snapshot: Some(text.into()),
         }
     }
@@ -692,29 +704,27 @@ mod tests {
     fn write(name: &str, path: Option<&Path>, records: &[Record]) -> (TempFile, DocumentId) {
         let file = TempFile::new(name, b"");
         let id = DocumentId::random();
-        let mut journal: Option<Journal> = None;
+        let mut journal = Journal::create(&file.0, id, path).unwrap();
         for record in records {
             match record {
-                Record::Base { path: base_path, format, disk, decode_losses, snapshot } => {
+                Record::Base { path: base_path, format, disk, decode_losses, saved, snapshot } => {
                     let snapshot = snapshot.clone().map(GapBuffer::from_vec);
                     let base = BaseRef {
                         path: base_path.as_deref(),
                         format: *format,
                         disk: *disk,
                         decode_losses: *decode_losses,
+                        saved: *saved,
                         snapshot: snapshot.as_ref(),
                     };
-                    match &mut journal {
-                        Some(journal) => journal.write_base(base).unwrap(),
-                        None => journal = Some(Journal::create(&file.0, id, path, base).unwrap()),
-                    }
+                    journal.write_base(base).unwrap()
                 }
                 Record::Transaction { transaction, kind, merged } => {
-                    journal.as_mut().unwrap().write_transaction(transaction, *kind, *merged).unwrap()
+                    journal.write_transaction(transaction, *kind, *merged).unwrap()
                 }
-                Record::Undo => journal.as_mut().unwrap().write_undo().unwrap(),
-                Record::Redo => journal.as_mut().unwrap().write_redo().unwrap(),
-                Record::Format(format) => journal.as_mut().unwrap().write_format(*format).unwrap(),
+                Record::Undo => journal.write_undo().unwrap(),
+                Record::Redo => journal.write_redo().unwrap(),
+                Record::Format(format) => journal.write_format(*format).unwrap(),
             }
         }
         (file, id)
@@ -772,6 +782,7 @@ mod tests {
                 format: Format::default(),
                 disk: Some(fingerprint),
                 decode_losses: Losses::default(),
+                saved: Some(1),
                 snapshot: None,
             },
             transaction(11, "", "!", EditKind::Other, false),
@@ -894,6 +905,7 @@ mod tests {
                 },
                 disk: Some(Fingerprint { len: 42, modified, id: None }),
                 decode_losses: Losses { count: 3, first: Some(5) },
+                saved: Some(0),
                 snapshot: Some("abcdef".into()),
             };
             let (file, _) = write("journal-base-fields", None, std::slice::from_ref(&base));

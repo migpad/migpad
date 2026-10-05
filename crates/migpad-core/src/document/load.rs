@@ -9,7 +9,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use super::{Document, Fingerprint, Format, Text};
 use crate::encoding::{Decoder, Detected, Encoding, Losses, detect};
-use crate::history::History;
 use crate::line_ending::LineEnding;
 use crate::text::{GapBuffer, Indexed, Indexer, MAX_LEN};
 
@@ -267,7 +266,7 @@ impl Loader {
             disk: Some(self.disk),
             large: self.large,
             decode_losses: losses,
-            history: History::new(),
+            ..Document::new()
         }
     }
 
