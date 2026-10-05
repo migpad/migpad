@@ -4,7 +4,7 @@
 use gpui::{
     App, Bounds, ContentMask, CursorStyle, DispatchPhase, Element, ElementId, ElementInputHandler, Entity, Focusable,
     GlobalElementId, HitboxBehavior, InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, ScrollWheelEvent, Style, TextAlign, Window, fill, relative, rgb,
+    MouseMoveEvent, MouseUpEvent, Pixels, ScrollWheelEvent, Style, TextAlign, Window, fill, px, relative, rgb,
 };
 
 use crate::layout::Layout;
@@ -84,8 +84,15 @@ impl Element for EditorElement {
             for &rect in &layout.selection {
                 window.paint_quad(fill(rect, rgb(layout.selection_color)));
             }
+            for &guide in &layout.guides {
+                window.paint_quad(fill(guide, rgb(colors::GUIDE)));
+            }
             for (line, origin) in &layout.lines {
                 let _ = line.paint(*origin, layout.line_height, TextAlign::Left, None, window, cx);
+            }
+            for (label, origin, background) in &layout.labels {
+                window.paint_quad(fill(*background, rgb(colors::LABEL_BACKGROUND)).corner_radii(px(3.)));
+                let _ = label.paint(*origin, layout.line_height, TextAlign::Left, None, window, cx);
             }
             if let Some(caret) = layout.caret {
                 window.paint_quad(fill(caret, rgb(colors::CARET)));

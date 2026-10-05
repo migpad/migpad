@@ -7,11 +7,12 @@ use gpui::{Bounds, Font, Hitbox, Hsla, Pixels, Point, ShapedLine, TextRun, Under
 use migpad_core::document::Text;
 use migpad_core::text::{LineIndex, TextStore};
 
+use crate::columns::Columns;
 use crate::display::{DisplayText, MAX_SHAPED, OffsetMap};
 use crate::view::colors;
 
 /// Columns between tab stops, until the settings give it.
-const TAB_WIDTH: usize = 8;
+pub(crate) const TAB_WIDTH: usize = 8;
 const FONT_SIZE: f32 = 13.0;
 
 /// The monospace font of the system.
@@ -64,71 +65,57 @@ pub(crate) struct ScreenLine {
     map: OffsetMap,
 }
 
+/// How a view lays out its lines.
+pub(crate) struct LineStyle<'a> {
+    pub metrics: &'a Metrics,
+    /// Columns of the long lines.
+    pub columns: &'a Columns,
+    /// Pixels scrolled to the right.
+    pub scroll_x: f64,
+    /// Whether spaces and tabs are marked.
+    pub whitespace: bool,
+    /// The bytes an input method composes: underlined.
+    pub underline: Option<&'a Range<usize>>,
+}
+
 impl ScreenLine {
-    /// Lays out `line`; a long one in a window around `scroll_x`, the pixels scrolled to the right.
-    /// The bytes of `underline` are underlined: the text an input method composes.
-    pub fn new(
-        text: &Text,
-        lines: &LineIndex,
-        line: usize,
-        scroll_x: f64,
-        underline: Option<&Range<usize>>,
-        metrics: &Metrics,
-        window: &Window,
-    ) -> Self {
+    /// Lays out `line`; a long one in a window around the part scrolled into view.
+    pub fn new(text: &Text, lines: &LineIndex, line: usize, style: &LineStyle, window: &Window) -> Self {
         let (range, _) = lines.line_range(text, line);
         if range.len() <= MAX_SHAPED {
-            return Self::part(text, range.clone(), range, underline, metrics, window);
+            return Self::part(text, range.clone(), range, style, window);
         }
-        // The character at the left edge of the view is found by counting one column per byte from
-        // the start of the line. The window is shaped around it and placed so that this character
-        // is at the edge, moved left by the part of it scrolled past: the caret and the mouse see
-        // the same positions whatever window is shaped, and scrolling stays smooth.
-        let column = scroll_x / metrics.char_width;
-        let wanted = (range.start as f64 + column).min(range.end as f64) as usize;
-        let edge = text.floor_char_boundary(wanted, range.start);
+        // At the left edge of the view is the character at the column scrolled to. The window is
+        // shaped around it and placed so that this character is at the edge, moved left by the part
+        // of it scrolled past: the caret and the mouse see the same positions whatever window is
+        // shaped, and scrolling stays smooth.
+        let column = style.scroll_x / style.metrics.char_width;
+        let (edge, edge_column, next_column) = style.columns.char_at(text, &range, column as usize);
         let start = text.floor_char_boundary(edge.saturating_sub(MAX_SHAPED / 4).max(range.start), range.start);
         let end = text.floor_char_boundary((start + MAX_SHAPED).min(range.end), start);
-        let mut line = Self::part(text, range.clone(), start..end, underline, metrics, window);
-        let next = text.next_char_boundary(edge, end);
-        let scrolled_past = if next > edge {
-            ((column - (edge - range.start) as f64) / (next - edge) as f64).clamp(0.0, 1.0)
+        let mut line = Self::part(text, range.clone(), start..end, style, window);
+        let scrolled_past = if next_column > edge_column {
+            ((column - edge_column as f64) / (next_column - edge_column) as f64).clamp(0.0, 1.0)
         } else {
             0.0
         };
-        let (from, to) = (line.x_of(edge), line.x_of(next));
-        line.x = scroll_x - (from + scrolled_past * (to - from));
+        let (from, to) = (line.x_of(edge), line.x_of(text.next_char_boundary(edge, end)));
+        line.x = style.scroll_x - (from + scrolled_past * (to - from));
         line
     }
 
     /// Lays out the part `shown` of the line with the bytes `range`.
-    pub fn part(
-        text: &Text,
-        range: Range<usize>,
-        shown: Range<usize>,
-        underline: Option<&Range<usize>>,
-        metrics: &Metrics,
-        window: &Window,
-    ) -> Self {
-        let DisplayText { text: shown_text, map } =
-            DisplayText::new(&text.to_vec(shown.clone()), shown.start - range.start, TAB_WIDTH);
-        let len = shown_text.len();
-        let mut runs = vec![metrics.run(len, colors::TEXT)];
-        if let Some(underline) = underline
-            && underline.start < shown.end
-            && underline.end > shown.start
-        {
+    pub fn part(text: &Text, range: Range<usize>, shown: Range<usize>, style: &LineStyle, window: &Window) -> Self {
+        let column = if shown.start == range.start { 0 } else { style.columns.column_of(text, &range, shown.start) };
+        let DisplayText { text: shown_text, map, marks } =
+            DisplayText::new(&text.to_vec(shown.clone()), column, TAB_WIDTH, style.whitespace);
+        let underline = style.underline.filter(|underline| underline.start < shown.end && underline.end > shown.start);
+        let underline = underline.map(|underline| {
             let at = |pos: usize| map.display_offset(pos.clamp(shown.start, shown.end) - shown.start);
-            let (from, to) = (at(underline.start), at(underline.end));
-            let style = UnderlineStyle { color: Some(rgb(colors::TEXT).into()), thickness: px(1.), wavy: false };
-            runs = vec![
-                metrics.run(from, colors::TEXT),
-                TextRun { underline: Some(style), ..metrics.run(to - from, colors::TEXT) },
-                metrics.run(len - to, colors::TEXT),
-            ];
-            runs.retain(|run| run.len > 0);
-        }
-        let shaped = window.text_system().shape_line(shown_text.into(), metrics.font_size, &runs, None);
+            at(underline.start)..at(underline.end)
+        });
+        let runs = runs(shown_text.len(), &marks, underline, style.metrics);
+        let shaped = window.text_system().shape_line(shown_text.into(), style.metrics.font_size, &runs, None);
         ScreenLine { range, shown, x: 0.0, shaped, map }
     }
 
@@ -172,6 +159,33 @@ impl ScreenLine {
     }
 }
 
+/// The runs of a shown text of `len` bytes: marks in their faint color, and the bytes of
+/// `underline` underlined.
+fn runs(len: usize, marks: &[Range<usize>], underline: Option<Range<usize>>, metrics: &Metrics) -> Vec<TextRun> {
+    let mut cuts: Vec<usize> = marks.iter().flat_map(|mark| [mark.start, mark.end]).collect();
+    cuts.extend(underline.iter().flat_map(|underline| [underline.start, underline.end]));
+    cuts.extend([0, len]);
+    cuts.sort_unstable();
+    cuts.dedup();
+    let style = UnderlineStyle { color: Some(rgb(colors::TEXT).into()), thickness: px(1.), wavy: false };
+    let mut runs: Vec<TextRun> = Vec::new();
+    for piece in cuts.windows(2) {
+        let (from, to) = (piece[0], piece[1]);
+        let marked = marks.get(marks.partition_point(|mark| mark.end <= from)).is_some_and(|mark| mark.start <= from);
+        let mut run = metrics.run(to - from, if marked { colors::MARK } else { colors::TEXT });
+        run.underline = underline.as_ref().is_some_and(|underline| underline.contains(&from)).then_some(style);
+        // Pieces that look the same make one run.
+        match runs.last_mut() {
+            Some(last) if last.color == run.color && last.underline == run.underline => last.len += run.len,
+            _ => runs.push(run),
+        }
+    }
+    if runs.is_empty() {
+        runs.push(metrics.run(0, colors::TEXT));
+    }
+    runs
+}
+
 /// Where the parts of the view are in the window.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Geometry {
@@ -194,6 +208,10 @@ pub(crate) struct Layout {
     pub selection: Vec<Bounds<Pixels>>,
     pub selection_color: u32,
     pub caret: Option<Bounds<Pixels>>,
+    /// Indent guides: thin vertical lines.
+    pub guides: Vec<Bounds<Pixels>>,
+    /// Labels of line breaks: the text, where it starts, and its background.
+    pub labels: Vec<(ShapedLine, Point<Pixels>, Bounds<Pixels>)>,
     /// The text area, for the I-beam mouse cursor; the element adds it.
     pub hitbox: Option<Hitbox>,
 }

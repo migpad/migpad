@@ -58,7 +58,9 @@ actions!(
         Redo,
         Copy,
         Cut,
-        Paste
+        Paste,
+        ToggleWhitespace,
+        ToggleIndentGuides
     ]
 );
 
@@ -77,6 +79,13 @@ pub(crate) fn on_edits(div: Div, cx: &mut Context<EditorView>) -> Div {
         .on_action(cx.listener(|view, _: &Copy, _, cx| view.copy(cx)))
         .on_action(cx.listener(|view, _: &Cut, window, cx| view.cut(window, cx)))
         .on_action(cx.listener(|view, _: &Paste, window, cx| view.paste(window, cx)))
+        // Commands of the View menu, without keys until the menu exists.
+        .on_action(
+            cx.listener(|view, _: &ToggleWhitespace, _, cx| view.set_show_whitespace(!view.shows_whitespace(), cx)),
+        )
+        .on_action(cx.listener(|view, _: &ToggleIndentGuides, _, cx| {
+            view.set_show_indent_guides(!view.shows_indent_guides(), cx)
+        }))
 }
 
 /// `keys` move the caret; with Shift they select.

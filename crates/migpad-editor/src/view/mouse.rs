@@ -54,7 +54,7 @@ impl EditorView {
         let (line, x) = self.hit(event.position, cx);
         let doc = self.document.read(cx);
         let (text, lines) = (doc.text(), doc.lines());
-        let row = || ScreenLine::new(text, lines, line, self.scroll_x, None, &self.metrics, window);
+        let row = || ScreenLine::new(text, lines, line, &self.line_style(), window);
         // A line number selects its line, as does a triple click; a double click selects a word.
         let (unit, range) = if in_gutter || event.click_count >= 3 {
             (Unit::Line, movement::line_with_break(text, lines, line))
@@ -115,7 +115,7 @@ impl EditorView {
         let (line, x) = self.hit(mouse, cx);
         let doc = self.document.read(cx);
         let (text, lines) = (doc.text(), doc.lines());
-        let row = || ScreenLine::new(text, lines, line, self.scroll_x, None, &self.metrics, window);
+        let row = || ScreenLine::new(text, lines, line, &self.line_style(), window);
         let range = match unit {
             Unit::Char => {
                 let pos = row().boundary_at(x);

@@ -50,6 +50,8 @@ impl EditorView {
             edited
         });
         if edited {
+            // Columns of the edited line have moved; the rest are found again as needed.
+            self.columns.clear();
             self.selection = after;
             self.goal_x = None;
             self.caret_moved(window, cx);
@@ -112,6 +114,7 @@ impl EditorView {
             selection
         });
         if let Some(selection) = selection {
+            self.columns.clear();
             let doc = self.document.read(cx);
             let snap = |pos| movement::snap(doc.text(), doc.lines(), pos);
             self.selection = Selection { anchor: snap(selection.anchor), head: snap(selection.head) };
