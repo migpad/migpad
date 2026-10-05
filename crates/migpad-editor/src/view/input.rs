@@ -98,6 +98,7 @@ impl EntityInputHandler for EditorView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let text = self.accepted(text);
         let range = self.ime_target(range_utf16.as_ref(), cx);
         // Text committed by an input method ends its composition, in the same undo step.
         let kind = if self.marked.is_some() { EditKind::Composing } else { EditKind::Typing };
@@ -123,12 +124,16 @@ impl EntityInputHandler for EditorView {
             self.seal_undo_step(cx);
         }
         let start = range.start;
+        let joined = self.accepted(new_text);
+        // Where the input method puts the selection in its text; in an input field that took the
+        // text as a shorter line, at its end.
         let selected = match new_selected_range {
-            Some(selected) => {
-                from_utf16(new_text.as_bytes(), selected.start)..from_utf16(new_text.as_bytes(), selected.end)
+            Some(selected) if joined.len() == new_text.len() => {
+                from_utf16(joined.as_bytes(), selected.start)..from_utf16(joined.as_bytes(), selected.end)
             }
-            None => new_text.len()..new_text.len(),
+            _ => joined.len()..joined.len(),
         };
+        let new_text = &*joined;
         let after = Selection { anchor: start + selected.start, head: start + selected.end };
         if !self.replace(range, new_text.as_bytes(), EditKind::Composing, after, window, cx) {
             self.selection = after;

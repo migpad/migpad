@@ -49,7 +49,10 @@ impl Element for EditorElement {
     ) -> (LayoutId, ()) {
         let mut style = Style::default();
         style.size.width = relative(1.).into();
-        style.size.height = relative(1.).into();
+        style.size.height = match self.view.read(cx).fixed_height() {
+            Some(height) => height.into(),
+            None => relative(1.).into(),
+        };
         (window.request_layout(style, [], cx), ())
     }
 
@@ -80,7 +83,7 @@ impl Element for EditorElement {
         let geometry = layout.geometry;
         window.paint_quad(fill(geometry.bounds, rgb(colors::BACKGROUND)));
         window.paint_quad(fill(geometry.gutter, rgb(colors::GUTTER)));
-        window.with_content_mask(Some(ContentMask { bounds: geometry.text_area }), |window| {
+        window.with_content_mask(Some(ContentMask { bounds: layout.clip }), |window| {
             for &rect in &layout.selection {
                 window.paint_quad(fill(rect, rgb(layout.selection_color)));
             }

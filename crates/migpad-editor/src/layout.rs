@@ -201,6 +201,9 @@ pub(crate) struct Geometry {
 /// The visible part of the document, laid out for painting.
 pub(crate) struct Layout {
     pub geometry: Geometry,
+    /// Where the text shows: the text area; in an input field, the part of it between the
+    /// paddings, so that scrolled text does not run up to the edges of the field.
+    pub clip: Bounds<Pixels>,
     pub line_height: Pixels,
     /// The shaped text of the visible lines, and where each starts.
     pub lines: Vec<(ShapedLine, Point<Pixels>)>,

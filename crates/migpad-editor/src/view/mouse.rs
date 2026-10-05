@@ -136,7 +136,7 @@ impl EditorView {
     }
 
     /// How far the mouse dragging a selection is past the edges of the text, in pixels: negative
-    /// to the left and above.
+    /// to the left and above. An input field, one line high, only scrolls sideways.
     fn overshoot(&self) -> (f64, f64) {
         let Some(Drag::Select { mouse, .. }) = self.drag else { return (0.0, 0.0) };
         let area = self.geometry.text_area;
@@ -149,7 +149,8 @@ impl EditorView {
                 px(0.)
             })
         };
-        (past(mouse.x, area.left(), area.right()), past(mouse.y, area.top(), area.bottom()))
+        let dy = if self.single_line { 0.0 } else { past(mouse.y, area.top(), area.bottom()) };
+        (past(mouse.x, area.left(), area.right()), dy)
     }
 
     /// Scrolls while the selection is dragged past the edges of the text, until it is back.
@@ -180,7 +181,7 @@ impl EditorView {
         let line_height = f64::from(self.metrics.line_height);
         self.scroll_rows((dy / line_height / 4.0).clamp(-5.0, 5.0), cx);
         if !self.wrapping() {
-            let max_x = (self.widest - self.text_width * 0.5).max(self.scroll_x);
+            let max_x = self.max_scroll_x().max(self.scroll_x);
             self.scroll_x = (self.scroll_x + (dx / 4.0).clamp(-40.0, 40.0)).clamp(0.0, max_x);
         }
         self.select_to_mouse(window, cx);

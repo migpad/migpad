@@ -97,7 +97,8 @@ impl EditorView {
         self.caret_moved(window, cx);
     }
 
-    pub(crate) fn select_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Selects the whole text: the owner of an input field may do so when it takes the focus.
+    pub fn select_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let len = self.document.read(cx).text().len();
         self.selection = Selection { anchor: 0, head: len };
         self.goal_x = None;

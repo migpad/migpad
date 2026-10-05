@@ -28,7 +28,7 @@ use mouse::Drag;
 use crate::columns::Columns;
 use crate::element::EditorElement;
 use crate::indent;
-use crate::keymap::{self, CONTEXT};
+use crate::keymap;
 use crate::layout::{Geometry, Layout, LineStyle, Metrics, TAB_WIDTH};
 use crate::movement;
 
@@ -61,10 +61,12 @@ pub(crate) mod colors {
     pub const LABEL_BACKGROUND: u32 = 0xbcbcbc;
 }
 
-/// The view of a document in a window.
+/// The view of a document in a window, or the one line of an input field.
 pub struct EditorView {
     document: Entity<Document>,
     focus: FocusHandle,
+    /// An input field: one line, without line numbers, a scrollbar or wrapping.
+    single_line: bool,
     metrics: Metrics,
     /// The first visible line, with a fraction for smooth scrolling. Lines rather than pixels:
     /// millions of lines times their height do not fit the precision of `Pixels`.
@@ -111,8 +113,23 @@ pub struct EditorView {
 }
 
 impl EditorView {
+    /// The view of `document`.
     pub fn new(document: Entity<Document>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let focus = cx.focus_handle();
+        Self::create(document, false, window, cx)
+    }
+
+    /// An input field: one line of text in a document of its own, without a journal. Enter, Tab
+    /// and Escape go on to the element around the field, which binds them in its key context to
+    /// what the field is for — find, go to a line — or to moving the focus; the field is a tab
+    /// stop. The commands of the View menu go past it too. Text with line breaks becomes one line:
+    /// breaks at its ends are dropped, and each one inside becomes a space.
+    pub fn single_line(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let document = cx.new(|_| Document::new());
+        Self::create(document, true, window, cx)
+    }
+
+    fn create(document: Entity<Document>, single_line: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let focus = cx.focus_handle().tab_stop(single_line);
         let subscriptions = vec![
             cx.observe(&document, |view, _, cx| view.document_changed(cx)),
             cx.on_focus(&focus, window, Self::restart_blink),
@@ -122,6 +139,7 @@ impl EditorView {
         EditorView {
             document,
             focus,
+            single_line,
             metrics: Metrics::new(window),
             scroll_top: 0.0,
             scroll_x: 0.0,
@@ -148,8 +166,20 @@ impl EditorView {
         }
     }
 
+    /// The document of the view; the owner of an input field observes it to hear of edits.
     pub fn document(&self) -> &Entity<Document> {
         &self.document
+    }
+
+    /// The text, invalid UTF-8 as U+FFFD: what an input field holds.
+    pub fn text(&self, cx: &App) -> String {
+        let text = self.document.read(cx).text();
+        String::from_utf8_lossy(&text.to_vec(0..text.len())).into_owned()
+    }
+
+    /// The height of an input field: one line. The view of a document takes what it is given.
+    pub(crate) fn fixed_height(&self) -> Option<Pixels> {
+        self.single_line.then_some(self.metrics.line_height)
     }
 
     /// Whether spaces, tabs and line breaks are marked.
@@ -275,21 +305,28 @@ impl EditorView {
         };
         let line_height = self.metrics.line_height;
         let char_width = self.metrics.char_width;
-        let digits = count.to_string().len().max(3);
-        let gutter_width = px((digits as f64 * char_width + 14.0) as f32);
+        // An input field has neither line numbers nor a scrollbar, and its text keeps off both
+        // edges.
+        let (gutter_width, scrollbar_width, pad_right) = if self.single_line {
+            (px(0.), px(0.), PAD_LEFT)
+        } else {
+            let digits = count.to_string().len().max(3);
+            (px((digits as f64 * char_width + 14.0) as f32), px(SCROLLBAR_WIDTH), 0.0)
+        };
         let track = Bounds::new(
-            point(bounds.right() - px(SCROLLBAR_WIDTH), bounds.top()),
-            size(px(SCROLLBAR_WIDTH), bounds.size.height),
+            point(bounds.right() - scrollbar_width, bounds.top()),
+            size(scrollbar_width, bounds.size.height),
         );
         let gutter = Bounds::from_corners(bounds.origin, point(bounds.left() + gutter_width, bounds.bottom()));
         let text_area = Bounds::from_corners(point(gutter.right(), bounds.top()), point(track.left(), bounds.bottom()));
         let text_left = text_area.left() + px(PAD_LEFT);
-        self.view_lines = f64::from(bounds.size.height) / f64::from(line_height);
+        self.view_lines = if self.single_line { 1.0 } else { f64::from(bounds.size.height) / f64::from(line_height) };
         self.page_lines = (self.view_lines as usize).max(1);
-        self.text_width = f64::from(text_area.size.width) - f64::from(PAD_LEFT);
+        self.text_width = f64::from(text_area.size.width) - f64::from(PAD_LEFT + pad_right);
         // Lines wrap to the whole cells of the text width, one left for the caret; not those of a
-        // large file.
-        let cells = if self.word_wrap && !large { (self.text_width / char_width) as usize } else { 0 };
+        // large file or of an input field.
+        let cells =
+            if self.word_wrap && !large && !self.single_line { (self.text_width / char_width) as usize } else { 0 };
         let cells = if cells > MIN_WRAP_CELLS { cells - 1 } else { 0 };
         if cells != self.wrap_cells {
             self.wrap_cells = cells;
@@ -305,6 +342,14 @@ impl EditorView {
 
         // The rows in view, from the one at the top.
         let (top_row, past) = self.top_row(text, lines);
+        if self.single_line {
+            // The text fills the field: while some of it is scrolled out on the left, its end
+            // stays at the right edge, however the text shrinks or the field widens.
+            let row = self.screen_row(text, lines, top_row, window);
+            if row.shown.end == row.range.end {
+                self.scroll_x = self.scroll_x.min((row.right() - self.text_width).max(0.0));
+            }
+        }
         let top = bounds.top() - px((past * f64::from(line_height)) as f32);
         let mut rows = Vec::with_capacity(self.page_lines + 2);
         let mut next = Some(top_row);
@@ -319,7 +364,7 @@ impl EditorView {
 
         let scroll_x = self.scroll_x;
         let screen_x = |x: f64| text_left + px((x - scroll_x) as f32);
-        let guides = self.show_indent_guides.then(|| {
+        let guides = (self.show_indent_guides && !self.single_line).then(|| {
             let levels = indent::guide_levels(text, lines, first_line..end_line, TAB_WIDTH);
             let indents: Vec<Option<usize>> = (first_line..end_line)
                 .map(|line| indent::indentation(text, lines.line_range(text, line).0, TAB_WIDTH))
@@ -329,8 +374,17 @@ impl EditorView {
         let Selection { anchor, head } = self.selection;
         let (start, end) = (anchor.min(head), anchor.max(head));
         let metrics = &self.metrics;
+        // Room for the caret at either end of the text of an input field.
+        let clip = if self.single_line {
+            let room = px(CARET_WIDTH / 2.);
+            let right = text_left + px(self.text_width as f32) + room;
+            Bounds::from_corners(point(text_left - room, bounds.top()), point(right, bounds.bottom()))
+        } else {
+            text_area
+        };
         let mut layout = Layout {
             geometry: Geometry { bounds, gutter, text_area, text_left, track, thumb: None },
+            clip,
             line_height,
             lines: Vec::with_capacity(rows.len()),
             numbers: Vec::with_capacity(rows.len()),
@@ -396,7 +450,7 @@ impl EditorView {
             }
             layout.lines.push((row.shaped, point(screen_x(row.x), y)));
 
-            if first {
+            if first && !self.single_line {
                 let number = (at.line + 1).to_string();
                 let run = metrics.run(number.len(), colors::LINE_NUMBER);
                 let shaped = window.text_system().shape_line(number.into(), metrics.font_size, &[run], None);
@@ -406,7 +460,7 @@ impl EditorView {
         }
         self.widest = widest;
 
-        layout.geometry.thumb = (max_top > 0.0).then(|| {
+        layout.geometry.thumb = (max_top > 0.0 && !self.single_line).then(|| {
             let track_height = f64::from(track.size.height);
             let page = self.page_lines as f64;
             let height = (track_height * page / (max_top + page)).max(24.0);
@@ -425,13 +479,20 @@ impl EditorView {
         let delta = event.delta.pixel_delta(self.metrics.line_height);
         self.scroll_rows(-f64::from(delta.y) / line_height, cx);
         if !self.wrapping() {
-            // Scrolling right stops when the widest visible line is half out of view.
-            let max_x = (self.widest - self.text_width * 0.5).max(0.0);
-            self.scroll_x = (self.scroll_x - f64::from(delta.x)).clamp(0.0, max_x.max(self.scroll_x));
+            // A view scrolled past the limit to show the caret stays there.
+            let max_x = self.max_scroll_x().max(self.scroll_x);
+            self.scroll_x = (self.scroll_x - f64::from(delta.x)).clamp(0.0, max_x);
         }
         // A selection being dragged follows the text under the mouse.
         self.select_to_mouse(window, cx);
         cx.notify();
+    }
+
+    /// How far the view scrolls to the right: an input field until the end of its text is at the
+    /// right edge, a document until the widest visible line is half out of view.
+    pub(super) fn max_scroll_x(&self) -> f64 {
+        let reach = if self.single_line { self.text_width } else { self.text_width * 0.5 };
+        (self.widest - reach).max(0.0)
     }
 }
 
@@ -443,7 +504,8 @@ impl Focusable for EditorView {
 
 impl Render for EditorView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let view = div().key_context(CONTEXT).track_focus(&self.focus).size_full();
+        let view = div().key_context(keymap::key_context(self.single_line)).track_focus(&self.focus);
+        let view = if self.single_line { view.w_full() } else { keymap::on_document_actions(view.size_full(), cx) };
         let view = keymap::on_edits(view, cx);
         keymap::on_motions(view, cx).child(EditorElement::new(cx.entity()))
     }

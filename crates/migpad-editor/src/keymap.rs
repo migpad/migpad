@@ -1,12 +1,24 @@
 //! Editor actions and their keys. The keys are fixed and follow each system: Cmd and Option on
 //! macOS, Ctrl on Windows and Linux.
 
-use gpui::{Action, Context, Div, InteractiveElement, KeyBinding, actions};
+use gpui::{Action, Context, Div, InteractiveElement, KeyBinding, KeyContext, actions};
 
 use crate::view::{Deletion, EditorView, Motion};
 
-/// The key context of the editor.
-pub(crate) const CONTEXT: &str = "Editor";
+/// The key context of the editor; its `mode` tells the view of a document, `full`, from an input
+/// field, `single_line`.
+const CONTEXT: &str = "Editor";
+/// Where the keys that only the view of a document takes are bound: an input field leaves them to
+/// the element around it.
+const DOCUMENT: &str = "Editor && mode == full";
+
+/// The key context of a view.
+pub(crate) fn key_context(single_line: bool) -> KeyContext {
+    let mut context = KeyContext::default();
+    context.add(CONTEXT);
+    context.set("mode", if single_line { "single_line" } else { "full" });
+    context
+}
 
 /// Declares, for each motion of the caret, an action that moves the caret and one that selects,
 /// and the function that handles them.
@@ -65,7 +77,7 @@ actions!(
     ]
 );
 
-/// Handles the editing actions in `div`.
+/// Handles the editing actions of every view in `div`.
 pub(crate) fn on_edits(div: Div, cx: &mut Context<EditorView>) -> Div {
     div.on_action(cx.listener(|view, _: &SelectAll, window, cx| view.select_all(window, cx)))
         .on_action(cx.listener(|view, _: &Backspace, window, cx| view.delete(Deletion::CharLeft, window, cx)))
@@ -73,13 +85,19 @@ pub(crate) fn on_edits(div: Div, cx: &mut Context<EditorView>) -> Div {
         .on_action(cx.listener(|view, _: &DeleteWordLeft, window, cx| view.delete(Deletion::WordLeft, window, cx)))
         .on_action(cx.listener(|view, _: &DeleteWordRight, window, cx| view.delete(Deletion::WordRight, window, cx)))
         .on_action(cx.listener(|view, _: &DeleteToLineStart, window, cx| view.delete(Deletion::LineStart, window, cx)))
-        .on_action(cx.listener(|view, _: &Newline, window, cx| view.newline(window, cx)))
-        .on_action(cx.listener(|view, _: &Tab, window, cx| view.type_text("\t", window, cx)))
         .on_action(cx.listener(|view, _: &Undo, window, cx| view.undo(window, cx)))
         .on_action(cx.listener(|view, _: &Redo, window, cx| view.redo(window, cx)))
         .on_action(cx.listener(|view, _: &Copy, _, cx| view.copy(cx)))
         .on_action(cx.listener(|view, _: &Cut, window, cx| view.cut(window, cx)))
         .on_action(cx.listener(|view, _: &Paste, window, cx| view.paste(window, cx)))
+}
+
+/// Handles in `div` the actions that only the view of a document takes. In an input field they go
+/// on to the element around it: the commands of the View menu then reach the document, not the
+/// field that has the focus.
+pub(crate) fn on_document_actions(div: Div, cx: &mut Context<EditorView>) -> Div {
+    div.on_action(cx.listener(|view, _: &Newline, window, cx| view.newline(window, cx)))
+        .on_action(cx.listener(|view, _: &Tab, window, cx| view.type_text("\t", window, cx)))
         // Commands of the View menu, without keys until the menu exists.
         .on_action(
             cx.listener(|view, _: &ToggleWhitespace, _, cx| view.set_show_whitespace(!view.shows_whitespace(), cx)),
@@ -138,9 +156,10 @@ pub(crate) fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("backspace", Backspace, context),
         KeyBinding::new("shift-backspace", Backspace, context),
         KeyBinding::new("delete", Delete, context),
-        KeyBinding::new("enter", Newline, context),
-        KeyBinding::new("shift-enter", Newline, context),
-        KeyBinding::new("tab", Tab, context),
+        // In an input field Enter is what the field is for, and Tab moves the focus.
+        KeyBinding::new("enter", Newline, Some(DOCUMENT)),
+        KeyBinding::new("shift-enter", Newline, Some(DOCUMENT)),
+        KeyBinding::new("tab", Tab, Some(DOCUMENT)),
         KeyBinding::new("secondary-z", Undo, context),
         KeyBinding::new("secondary-shift-z", Redo, context),
         KeyBinding::new("secondary-c", Copy, context),
@@ -185,6 +204,18 @@ mod tests {
             if let Some(before) = seen.insert(keys.clone(), action) {
                 panic!("{keys} is bound to both {before} and {action}");
             }
+        }
+    }
+
+    #[test]
+    fn input_fields_leave_enter_and_tab_to_the_element_around_them() {
+        let (document, field) = ([key_context(false)], [key_context(true)]);
+        for binding in key_bindings() {
+            let action = binding.action().name();
+            let predicate = binding.predicate().expect("editor keys have a context");
+            assert!(predicate.eval(&document), "{action} in a document");
+            let left = ["editor::Newline", "editor::Tab"].contains(&action);
+            assert_eq!(predicate.eval(&field), !left, "{action} in an input field");
         }
     }
 }

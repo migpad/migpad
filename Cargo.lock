@@ -3261,6 +3261,7 @@ name = "migpad-editor"
 version = "0.1.0-dev"
 dependencies = [
  "gpui-pre",
+ "gpui-pre-platform",
  "memchr",
  "migpad-core",
 ]

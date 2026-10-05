@@ -1,5 +1,6 @@
 //! Editing with the keyboard: typing, deleting, line breaks, the clipboard, undo and redo.
 
+use std::borrow::Cow;
 use std::ops::Range;
 use std::time::Instant;
 
@@ -59,8 +60,15 @@ impl EditorView {
         edited
     }
 
+    /// Text from the keyboard, an input method or the clipboard as the view takes it: an input
+    /// field makes it one line.
+    pub(super) fn accepted<'a>(&self, text: &'a str) -> Cow<'a, str> {
+        if self.single_line { one_line(text) } else { Cow::Borrowed(text) }
+    }
+
     /// Types `text` over the selection.
     pub(crate) fn type_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.accepted(text);
         let range = self.selected_range();
         let after = Selection::caret(range.start + text.len());
         self.replace(range, text.as_bytes(), EditKind::Typing, after, window, cx);
@@ -143,10 +151,15 @@ impl EditorView {
         self.replace(range, b"", EditKind::Other, after, window, cx);
     }
 
-    /// Pastes the text of the clipboard over the selection, with the line breaks of the document.
+    /// Pastes the text of the clipboard over the selection, with the line breaks of the document;
+    /// in an input field, as one line.
     pub(crate) fn paste(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else { return };
-        let bytes = with_line_ending(&text, self.document.read(cx).format.line_ending.as_bytes());
+        let bytes = if self.single_line {
+            one_line(&text).into_owned().into_bytes()
+        } else {
+            with_line_ending(&text, self.document.read(cx).format.line_ending.as_bytes())
+        };
         let range = self.selected_range();
         let after = Selection::caret(range.start + bytes.len());
         self.replace(range, &bytes, EditKind::Other, after, window, cx);
@@ -167,6 +180,25 @@ fn with_line_ending(text: &str, line_ending: &[u8]) -> Vec<u8> {
     out
 }
 
+/// `text` as one line: line breaks at its ends are dropped, and each one inside — LF, CRLF or CR —
+/// becomes a space. A line copied with its line break comes without it.
+fn one_line(text: &str) -> Cow<'_, str> {
+    let text = text.trim_matches(['\r', '\n']);
+    if !text.contains(['\r', '\n']) {
+        return Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find(['\r', '\n']) {
+        out.push_str(&rest[..i]);
+        out.push(' ');
+        let crlf = rest[i..].starts_with("\r\n");
+        rest = &rest[i + if crlf { 2 } else { 1 }..];
+    }
+    out.push_str(rest);
+    Cow::Owned(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,5 +209,14 @@ mod tests {
         assert_eq!(with_line_ending(text, b"\r\n"), b"a\r\nb\r\nc\r\nd\r\n");
         assert_eq!(with_line_ending(text, b"\n"), b"a\nb\nc\nd\n");
         assert_eq!(with_line_ending("без переводов", b"\r"), "без переводов".as_bytes());
+    }
+
+    #[test]
+    fn input_fields_take_text_as_one_line() {
+        assert!(matches!(one_line("одна строка"), Cow::Borrowed("одна строка")));
+        assert_eq!(one_line("one\ntwo\r\nthree\rfour"), "one two three four");
+        assert_eq!(one_line("\r\n  line\t\n"), "  line\t");
+        assert_eq!(one_line("a\n\nb\r\n\r\nc\r\rd"), "a  b  c  d");
+        assert_eq!(one_line("\n\r\n\r"), "");
     }
 }
