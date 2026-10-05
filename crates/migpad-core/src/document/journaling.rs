@@ -325,7 +325,7 @@ fn journal_file(dir: &Path, id: DocumentId) -> PathBuf {
 }
 
 fn fingerprint(path: &Path) -> Option<Fingerprint> {
-    fs::metadata(path).ok().map(|metadata| Fingerprint::of(&metadata))
+    Fingerprint::of_path(path).ok()
 }
 
 #[cfg(test)]
@@ -383,7 +383,7 @@ mod tests {
     fn save(doc: &mut Document) {
         let path = doc.path.clone().unwrap();
         std::fs::write(&path, text(doc)).unwrap();
-        let disk = Fingerprint::of(&std::fs::metadata(&path).unwrap());
+        let disk = Fingerprint::of_path(&path).unwrap();
         doc.saved(path, doc.format, disk);
     }
 

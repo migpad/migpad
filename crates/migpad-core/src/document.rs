@@ -4,15 +4,18 @@
 pub mod journal;
 mod journaling;
 mod load;
+mod save;
 
 use std::fmt;
-use std::fs::Metadata;
+use std::fs::File;
+use std::io;
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime};
 
 pub use journaling::{RecoverError, Recovered};
 pub use load::{LARGE_FILE, Loader, OpenAs, OpenError, Opened, PREVIEW_LEN, open};
+pub use save::SaveError;
 
 use crate::encoding::{Encoding, Losses};
 use crate::history::{Edit, EditKind, History, Selection, Transaction};
@@ -255,20 +258,18 @@ impl Default for Format {
 pub struct Fingerprint {
     pub len: u64,
     pub modified: Option<SystemTime>,
-    /// Device and inode on Unix. None on Windows for now: its file index is not in stable Rust.
+    /// Device and inode on Unix, volume and file index on Windows.
     pub id: Option<(u64, u64)>,
 }
 
 impl Fingerprint {
-    pub fn of(metadata: &Metadata) -> Self {
-        #[cfg(unix)]
-        let id = {
-            use std::os::unix::fs::MetadataExt;
-            Some((metadata.dev(), metadata.ino()))
-        };
-        #[cfg(not(unix))]
-        let id = None;
-        Fingerprint { len: metadata.len(), modified: metadata.modified().ok(), id }
+    pub fn of_file(file: &File) -> io::Result<Self> {
+        let metadata = file.metadata()?;
+        Ok(Fingerprint { len: metadata.len(), modified: metadata.modified().ok(), id: crate::platform::file_id(file) })
+    }
+
+    pub fn of_path(path: &Path) -> io::Result<Self> {
+        Self::of_file(&File::open(path)?)
     }
 }
 

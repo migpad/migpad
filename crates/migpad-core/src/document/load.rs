@@ -111,10 +111,11 @@ fn open_with(path: &Path, open_as: OpenAs, limits: Limits) -> Result<Opened, Ope
             (Detected { encoding, bom }, None)
         }
     };
+    let disk = Fingerprint::of_file(&file)?;
     let loader = Loader {
         file,
         path: path.to_owned(),
-        disk: Fingerprint::of(&metadata),
+        disk,
         len,
         encoding,
         bom,

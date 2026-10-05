@@ -21,7 +21,9 @@ gpui_platform = { package = "gpui-pre-platform", version = "=0.3.7", features = 
 
 chardetng = "1.0"
 encoding_rs = "0.8.42"
+libc = "0.2"
 memchr = "2.8"
+windows-sys = "0.61"
 
 [profile.release]
 lto = "thin"
