@@ -9,7 +9,7 @@ use migpad_core::history::{EditKind, Selection};
 use migpad_core::text::TextStore;
 
 use super::EditorView;
-use crate::layout::ScreenLine;
+use super::rows::RowAt;
 use crate::utf16::{from_utf16, to_utf16};
 
 /// Of a line longer than this, input methods see a window around the caret.
@@ -150,11 +150,17 @@ impl EntityInputHandler for EditorView {
     ) -> Option<Bounds<Pixels>> {
         let range = self.ime_range_bytes(&range_utf16, cx);
         let doc = self.document.read(cx);
-        let line = doc.lines().line_of(range.start);
-        let row = ScreenLine::new(doc.text(), doc.lines(), line, &self.line_style(), window);
-        // Where the range is now, not in the last frame: input methods ask as soon as they change it.
+        let (text, lines) = (doc.text(), doc.lines());
+        // The row of the start of the range, and how far it is below the top of the view: where it
+        // is now, not in the last frame, as input methods ask as soon as they change it.
+        let line = lines.line_of(range.start);
+        let starts = self.row_starts(text, lines, line);
+        let at = RowAt { line, row: starts.partition_point(|&start| start <= range.start).saturating_sub(1) };
+        let (top, past) = self.top_row(text, lines);
+        let below = self.rows_between(text, lines, top, at, self.page_lines + 1).map_or(0.0, |rows| rows as f64 - past);
+        let row = self.screen_row(text, lines, at, window);
         let line_height = self.metrics.line_height;
-        let top = self.geometry.text_area.top() + px(((line as f64 - self.scroll_top) * f64::from(line_height)) as f32);
+        let top = self.geometry.text_area.top() + px((below * f64::from(line_height)) as f32);
         let x = |pos| self.geometry.text_left + px((row.x_of(pos) - self.scroll_x) as f32);
         let left = x(range.start);
         let right = x(range.end).max(left + px(1.));
@@ -167,13 +173,13 @@ impl EntityInputHandler for EditorView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<usize> {
-        let (line, x) = self.hit(point, cx);
+        let (at, x) = self.hit(point, cx);
         let (start, bytes) = self.ime_text(cx);
         let doc = self.document.read(cx);
-        if doc.lines().line_of(start) != line {
+        if doc.lines().line_of(start) != at.line {
             return None;
         }
-        let pos = ScreenLine::new(doc.text(), doc.lines(), line, &self.line_style(), window).boundary_at(x);
+        let pos = self.screen_row(doc.text(), doc.lines(), at, window).boundary_at(x);
         (start..=start + bytes.len()).contains(&pos).then(|| to_utf16(&bytes, pos - start))
     }
 

@@ -10,6 +10,7 @@ mod layout;
 mod movement;
 mod utf16;
 mod view;
+mod wrap;
 
 pub use view::EditorView;
 

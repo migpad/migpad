@@ -5,8 +5,12 @@ mod caret;
 mod edit;
 mod input;
 mod mouse;
+mod rows;
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ops::Range;
+use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
@@ -25,7 +29,7 @@ use crate::columns::Columns;
 use crate::element::EditorElement;
 use crate::indent;
 use crate::keymap::{self, CONTEXT};
-use crate::layout::{Geometry, Layout, LineStyle, Metrics, ScreenLine, TAB_WIDTH};
+use crate::layout::{Geometry, Layout, LineStyle, Metrics, TAB_WIDTH};
 use crate::movement;
 
 /// Space between the gutter and the text.
@@ -34,6 +38,8 @@ const SCROLLBAR_WIDTH: f32 = 12.0;
 const CARET_WIDTH: f32 = 2.0;
 /// How long the blinking caret is shown, and then hidden.
 const BLINK: Duration = Duration::from_millis(500);
+/// Lines do not wrap in a view narrower than this many cells.
+const MIN_WRAP_CELLS: usize = 8;
 
 /// Colors of the light theme, until the theme of the interface takes over.
 pub(crate) mod colors {
@@ -77,6 +83,16 @@ pub struct EditorView {
     /// Whether spaces, tabs and line breaks are marked.
     show_whitespace: bool,
     show_indent_guides: bool,
+    /// Whether lines wrap to the width of the view; they do not in a large file.
+    word_wrap: bool,
+    /// The cells of a row lines wrap to; none when they do not wrap.
+    wrap_cells: usize,
+    /// Where the rows of the lines laid out since the text or the width last changed start, by
+    /// the start of the line.
+    wraps: RefCell<HashMap<usize, Rc<[usize]>>>,
+    /// Whether the caret at a wrap is at the end of the upper row rather than the start of the
+    /// lower one.
+    caret_at_row_end: bool,
     /// Where the parts of the view were in the last layout, for the mouse.
     geometry: Geometry,
     selection: Selection,
@@ -116,6 +132,10 @@ impl EditorView {
             columns: Columns::new(TAB_WIDTH),
             show_whitespace: false,
             show_indent_guides: false,
+            word_wrap: false,
+            wrap_cells: 0,
+            wraps: RefCell::default(),
+            caret_at_row_end: false,
             geometry: Geometry::default(),
             selection: Selection::default(),
             marked: None,
@@ -152,6 +172,25 @@ impl EditorView {
         cx.notify();
     }
 
+    /// Whether lines wrap to the width of the view: they do not in a large file even so.
+    pub fn wraps_lines(&self) -> bool {
+        self.word_wrap
+    }
+
+    pub fn set_word_wrap(&mut self, wrap: bool, cx: &mut Context<Self>) {
+        self.word_wrap = wrap;
+        self.wraps.get_mut().clear();
+        self.caret_at_row_end = false;
+        cx.notify();
+    }
+
+    /// Forgets what was found about the lines: the text has changed.
+    fn text_changed(&mut self) {
+        self.columns.clear();
+        self.wraps.get_mut().clear();
+        self.caret_at_row_end = false;
+    }
+
     /// How the lines of the view are laid out now.
     fn line_style(&self) -> LineStyle<'_> {
         LineStyle {
@@ -165,7 +204,7 @@ impl EditorView {
 
     /// Keeps the selection where the caret can be once the text has changed under it.
     fn document_changed(&mut self, cx: &mut Context<Self>) {
-        self.columns.clear();
+        self.text_changed();
         let doc = self.document.read(cx);
         let snap = |pos| movement::snap(doc.text(), doc.lines(), pos);
         self.selection = Selection { anchor: snap(self.selection.anchor), head: snap(self.selection.head) };
@@ -227,26 +266,17 @@ impl EditorView {
         cx.notify();
     }
 
-    fn max_top(&self, count: usize) -> f64 {
-        count.saturating_sub(self.page_lines) as f64
-    }
-
-    /// Scrolls so that `top` is the first visible line, as far as the document allows.
-    fn scroll_to(&mut self, top: f64, cx: &App) {
-        let count = self.document.read(cx).lines().count();
-        self.scroll_top = top.clamp(0.0, self.max_top(count));
-    }
-
-    /// Lays out the lines that fit in `bounds`, with the selection and the caret.
+    /// Lays out the rows that fit in `bounds`, with the selection and the caret.
     pub(crate) fn layout(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut Context<Self>) -> Layout {
         let active = self.focus.is_focused(window) && window.is_window_active();
-        let doc = self.document.read(cx);
-        let (text, lines) = (doc.text(), doc.lines());
-        let count = lines.count();
-        let metrics = &self.metrics;
-        let line_height = metrics.line_height;
+        let (count, large) = {
+            let doc = self.document.read(cx);
+            (doc.lines().count(), doc.is_large())
+        };
+        let line_height = self.metrics.line_height;
+        let char_width = self.metrics.char_width;
         let digits = count.to_string().len().max(3);
-        let gutter_width = px((digits as f64 * metrics.char_width + 14.0) as f32);
+        let gutter_width = px((digits as f64 * char_width + 14.0) as f32);
         let track = Bounds::new(
             point(bounds.right() - px(SCROLLBAR_WIDTH), bounds.top()),
             size(px(SCROLLBAR_WIDTH), bounds.size.height),
@@ -257,29 +287,53 @@ impl EditorView {
         self.view_lines = f64::from(bounds.size.height) / f64::from(line_height);
         self.page_lines = (self.view_lines as usize).max(1);
         self.text_width = f64::from(text_area.size.width) - f64::from(PAD_LEFT);
-        let max_top = self.max_top(count);
+        // Lines wrap to the whole cells of the text width, one left for the caret; not those of a
+        // large file.
+        let cells = if self.word_wrap && !large { (self.text_width / char_width) as usize } else { 0 };
+        let cells = if cells > MIN_WRAP_CELLS { cells - 1 } else { 0 };
+        if cells != self.wrap_cells {
+            self.wrap_cells = cells;
+            self.wraps.get_mut().clear();
+        }
+        if self.wrapping() {
+            self.scroll_x = 0.0;
+        }
+        let doc = self.document.read(cx);
+        let (text, lines) = (doc.text(), doc.lines());
+        let max_top = self.max_top(text, lines);
         self.scroll_top = self.scroll_top.clamp(0.0, max_top);
 
-        let first = self.scroll_top.floor() as usize;
-        let top = bounds.top() - px(((self.scroll_top - first as f64) * f64::from(line_height)) as f32);
-        let last = count.min(first + self.page_lines + 2);
+        // The rows in view, from the one at the top.
+        let (top_row, past) = self.top_row(text, lines);
+        let top = bounds.top() - px((past * f64::from(line_height)) as f32);
+        let mut rows = Vec::with_capacity(self.page_lines + 2);
+        let mut next = Some(top_row);
+        while let Some(at) = next
+            && rows.len() < self.page_lines + 2
+        {
+            rows.push(at);
+            next = self.next_row(text, lines, at);
+        }
+        let first_line = top_row.line;
+        let end_line = rows.last().map_or(first_line, |at| at.line) + 1;
+
         let scroll_x = self.scroll_x;
         let screen_x = |x: f64| text_left + px((x - scroll_x) as f32);
-        let style = self.line_style();
         let guides = self.show_indent_guides.then(|| {
-            let levels = indent::guide_levels(text, lines, first..last, TAB_WIDTH);
-            let indents: Vec<Option<usize>> = (first..last)
+            let levels = indent::guide_levels(text, lines, first_line..end_line, TAB_WIDTH);
+            let indents: Vec<Option<usize>> = (first_line..end_line)
                 .map(|line| indent::indentation(text, lines.line_range(text, line).0, TAB_WIDTH))
                 .collect();
             (levels, indent::indent_step(&indents, TAB_WIDTH))
         });
         let Selection { anchor, head } = self.selection;
         let (start, end) = (anchor.min(head), anchor.max(head));
+        let metrics = &self.metrics;
         let mut layout = Layout {
             geometry: Geometry { bounds, gutter, text_area, text_left, track, thumb: None },
             line_height,
-            lines: Vec::with_capacity(last - first),
-            numbers: Vec::with_capacity(last - first),
+            lines: Vec::with_capacity(rows.len()),
+            numbers: Vec::with_capacity(rows.len()),
             selection: Vec::new(),
             selection_color: if active { colors::SELECTION } else { colors::SELECTION_INACTIVE },
             caret: None,
@@ -288,19 +342,23 @@ impl EditorView {
             hitbox: None,
         };
         let mut widest: f64 = 0.0;
-        for (i, line) in (first..last).enumerate() {
+        for (i, &at) in rows.iter().enumerate() {
             let y = top + line_height * i as f32;
-            let row = ScreenLine::new(text, lines, line, &style, window);
+            let row = self.screen_row(text, lines, at, window);
+            // The number and the guides go to the first row of a line, the label of its line
+            // break and the sliver of a selected one to the last.
+            let first = at.row == 0;
+            let last = self.last_row_of_line(text, lines, at);
             widest = widest.max(row.right());
-            if let Some((levels, step)) = &guides {
+            if first && let Some((levels, step)) = &guides {
                 // A guide at the start of each level the line is indented past.
-                for column in (0..levels[i]).step_by(*step) {
-                    let x = screen_x(column as f64 * metrics.char_width).round();
+                for column in (0..levels[at.line - first_line]).step_by(*step) {
+                    let x = screen_x(column as f64 * char_width).round();
                     layout.guides.push(Bounds::new(point(x, y), size(px(1.), line_height)));
                 }
             }
-            let eol = lines.line_range(text, line).1;
-            if self.show_whitespace && eol > 0 && row.range.end <= row.shown.end {
+            let eol = lines.line_range(text, at.line).1;
+            if self.show_whitespace && last && eol > 0 && row.range.end <= row.shown.end {
                 let label = match (eol, text.byte(row.range.end)) {
                     (2, _) => "CRLF",
                     (_, b'\r') => "CR",
@@ -316,35 +374,42 @@ impl EditorView {
                 );
                 layout.labels.push((shaped, point(x, y), background));
             }
-            if start < end && start <= row.range.end && end > row.range.start {
-                let from = row.x_of(start.max(row.range.start));
-                // A selected line break shows as a sliver after the end of the line.
-                let to = if end > row.range.end {
-                    row.x_of(row.range.end) + metrics.char_width * 0.5
+            if start < end && start <= row.shown.end && end > row.shown.start {
+                let from = row.x_of(start.max(row.shown.start));
+                let to = if end > row.range.end && last {
+                    row.x_of(row.range.end) + char_width * 0.5
                 } else {
-                    row.x_of(end)
+                    row.x_of(end.min(row.shown.end))
                 };
-                layout
-                    .selection
-                    .push(Bounds::from_corners(point(screen_x(from), y), point(screen_x(to), y + line_height)));
+                if to > from {
+                    let selected = Bounds::from_corners(point(screen_x(from), y), point(screen_x(to), y + line_height));
+                    layout.selection.push(selected);
+                }
             }
-            if active && self.caret_on && (row.shown.start..=row.shown.end).contains(&head) {
+            // At a wrap the caret is at the start of the lower row, or at the end of the upper one.
+            let on_row = (row.shown.start..=row.shown.end).contains(&head)
+                && !(head == row.shown.end && !last && !self.caret_at_row_end)
+                && !(head == row.shown.start && !first && self.caret_at_row_end);
+            if active && self.caret_on && on_row {
                 let x = screen_x(row.x_of(head)).round() - px(CARET_WIDTH / 2.);
                 layout.caret = Some(Bounds::new(point(x, y), size(px(CARET_WIDTH), line_height)));
             }
             layout.lines.push((row.shaped, point(screen_x(row.x), y)));
 
-            let number = (line + 1).to_string();
-            let run = metrics.run(number.len(), colors::LINE_NUMBER);
-            let shaped = window.text_system().shape_line(number.into(), metrics.font_size, &[run], None);
-            let x = gutter.right() - px(7.) - shaped.width();
-            layout.numbers.push((shaped, point(x, y)));
+            if first {
+                let number = (at.line + 1).to_string();
+                let run = metrics.run(number.len(), colors::LINE_NUMBER);
+                let shaped = window.text_system().shape_line(number.into(), metrics.font_size, &[run], None);
+                let x = gutter.right() - px(7.) - shaped.width();
+                layout.numbers.push((shaped, point(x, y)));
+            }
         }
         self.widest = widest;
 
-        layout.geometry.thumb = (count > self.page_lines).then(|| {
+        layout.geometry.thumb = (max_top > 0.0).then(|| {
             let track_height = f64::from(track.size.height);
-            let height = (track_height * self.page_lines as f64 / count as f64).max(24.0);
+            let page = self.page_lines as f64;
+            let height = (track_height * page / (max_top + page)).max(24.0);
             let offset = (track_height - height) * self.scroll_top / max_top;
             Bounds::new(
                 point(track.left() + px(2.), track.top() + px(offset as f32)),
@@ -356,11 +421,14 @@ impl EditorView {
     }
 
     pub(crate) fn scroll(&mut self, event: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let line_height = f64::from(self.metrics.line_height);
         let delta = event.delta.pixel_delta(self.metrics.line_height);
-        self.scroll_to(self.scroll_top - f64::from(delta.y) / f64::from(self.metrics.line_height), cx);
-        // Scrolling right stops when the widest visible line is half out of view.
-        let max_x = (self.widest - self.text_width * 0.5).max(0.0);
-        self.scroll_x = (self.scroll_x - f64::from(delta.x)).clamp(0.0, max_x.max(self.scroll_x));
+        self.scroll_rows(-f64::from(delta.y) / line_height, cx);
+        if !self.wrapping() {
+            // Scrolling right stops when the widest visible line is half out of view.
+            let max_x = (self.widest - self.text_width * 0.5).max(0.0);
+            self.scroll_x = (self.scroll_x - f64::from(delta.x)).clamp(0.0, max_x.max(self.scroll_x));
+        }
         // A selection being dragged follows the text under the mouse.
         self.select_to_mouse(window, cx);
         cx.notify();
