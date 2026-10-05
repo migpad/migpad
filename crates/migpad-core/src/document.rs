@@ -2,6 +2,7 @@
 //! on disk.
 
 pub mod journal;
+mod journaling;
 mod load;
 
 use std::fmt;
@@ -10,6 +11,7 @@ use std::ops::Range;
 use std::path::PathBuf;
 use std::time::{Instant, SystemTime};
 
+pub use journaling::{RecoverError, Recovered};
 pub use load::{LARGE_FILE, Loader, OpenAs, OpenError, Opened, PREVIEW_LEN, open};
 
 use crate::encoding::{Encoding, Losses};
@@ -88,6 +90,10 @@ pub struct Document {
     large: bool,
     decode_losses: Losses,
     history: History,
+    id: DocumentId,
+    /// The state of the history the file on disk has, if it can be reached; see [`History::state`].
+    saved_at: Option<u64>,
+    journal: journaling::JournalState,
 }
 
 impl Document {
@@ -102,6 +108,9 @@ impl Document {
             large: false,
             decode_losses: Losses::default(),
             history: History::new(),
+            id: DocumentId::random(),
+            saved_at: Some(0),
+            journal: Default::default(),
         }
     }
 
@@ -149,6 +158,7 @@ impl Document {
         if edits.is_empty() {
             return Ok(());
         }
+        self.journal_before_edit();
         let edits = edits
             .iter()
             .map(|(range, text)| {
@@ -157,26 +167,45 @@ impl Document {
                 Edit { pos: range.start, deleted, inserted: text.to_vec() }
             })
             .collect();
-        self.history.record(Transaction { edits, before, after }, kind, now);
+        let transaction = Transaction { edits, before, after };
+        let merged = self.history.can_merge(&transaction, kind, now);
+        self.journal_write(|journal| journal.write_transaction(&transaction, kind, merged));
+        let recorded = self.history.record(transaction, kind, now);
+        debug_assert_eq!(merged, recorded);
+        self.journal_after_change();
         Ok(())
     }
 
     /// Reverts the last undo step; returns the selection it started with.
     pub fn undo(&mut self) -> Option<Selection> {
+        if !self.history.can_undo() {
+            return None;
+        }
+        self.journal_before_edit();
         let transaction = self.history.undo()?;
         for edit in transaction.edits.iter().rev() {
             apply(&mut self.text, &mut self.lines, edit.pos..edit.pos + edit.inserted.len(), &edit.deleted);
         }
-        Some(transaction.before)
+        let before = transaction.before;
+        self.journal_write(journal::Journal::write_undo);
+        self.journal_after_change();
+        Some(before)
     }
 
     /// Applies the last undone step again; returns the selection it ended with.
     pub fn redo(&mut self) -> Option<Selection> {
+        if !self.history.can_redo() {
+            return None;
+        }
+        self.journal_before_edit();
         let transaction = self.history.redo()?;
         for edit in &transaction.edits {
             apply(&mut self.text, &mut self.lines, edit.pos..edit.pos + edit.deleted.len(), &edit.inserted);
         }
-        Some(transaction.after)
+        let after = transaction.after;
+        self.journal_write(journal::Journal::write_redo);
+        self.journal_after_change();
+        Some(after)
     }
 
     pub fn can_undo(&self) -> bool {

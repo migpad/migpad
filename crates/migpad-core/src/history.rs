@@ -77,17 +77,23 @@ impl Transaction {
 #[derive(Debug)]
 pub struct History {
     done: VecDeque<Step>,
-    undone: Vec<Transaction>,
+    /// Undone steps; the last one is redone first.
+    undone: Vec<Step>,
     /// Bytes of edits in `done` and `undone`.
     bytes: usize,
     /// The last step takes no more edits.
     sealed: bool,
+    next_id: u64,
+    /// The state of the text before the oldest step kept, see [`History::state`].
+    bottom: u64,
     max_steps: usize,
     max_bytes: usize,
 }
 
 #[derive(Debug)]
 struct Step {
+    /// Tells steps apart; the state of the text after the step is `id + 1`, see [`History::state`].
+    id: u64,
     transaction: Transaction,
     kind: EditKind,
     /// When an edit last joined the step.
@@ -100,41 +106,51 @@ impl History {
     }
 
     fn with_limits(max_steps: usize, max_bytes: usize) -> Self {
-        History { done: VecDeque::new(), undone: Vec::new(), bytes: 0, sealed: true, max_steps, max_bytes }
+        History {
+            done: VecDeque::new(),
+            undone: Vec::new(),
+            bytes: 0,
+            sealed: true,
+            next_id: 0,
+            bottom: 0,
+            max_steps,
+            max_bytes,
+        }
     }
 
     /// Records a transaction that has just been applied, and drops what can no longer be redone.
-    /// Typing and deleting continue the last step if they directly follow it; returns whether
-    /// the transaction joined the last step.
+    /// Typing and deleting continue the last step if they directly follow it, see
+    /// [`History::can_merge`]; returns whether the transaction joined the last step.
     pub fn record(&mut self, transaction: Transaction, kind: EditKind, now: Instant) -> bool {
-        self.bytes -= self.undone.drain(..).map(|t| t.size()).sum::<usize>();
-        self.bytes += transaction.size();
-        let line_break = transaction.edits.iter().any(Edit::breaks_line);
-        let merged = !self.sealed && !line_break && self.merge(&transaction, kind, now);
-        if !merged {
-            self.done.push_back(Step { transaction, kind, time: now });
-        }
-        self.trim();
+        let merged = self.can_merge(&transaction, kind, now);
         // A line break ends the step: the next edit starts a new one.
+        let line_break = breaks_line(&transaction);
+        self.push(transaction, kind, now, merged);
         self.sealed = line_break;
         merged
+    }
+
+    /// Whether [`History::record`] would join `transaction` to the last step: the step is not
+    /// sealed, neither of them breaks a line, they are of the same kind, typing or deleting, with
+    /// no pause of [`MERGE_PAUSE`] between them, and the transaction continues where the step
+    /// left the selection.
+    pub fn can_merge(&self, transaction: &Transaction, kind: EditKind, now: Instant) -> bool {
+        let Some(step) = self.done.back() else { return false };
+        !self.sealed
+            && !breaks_line(transaction)
+            && kind == step.kind
+            && now.saturating_duration_since(step.time) < MERGE_PAUSE
+            && transaction.before == step.transaction.after
+            && joinable(&step.transaction, transaction, kind)
     }
 
     /// Records a transaction again from the journal, where `merged` tells whether it joined
     /// the last step; time plays no part. Returns `false` if it cannot join that step.
     pub fn replay(&mut self, transaction: Transaction, kind: EditKind, merged: bool) -> bool {
-        self.bytes -= self.undone.drain(..).map(|t| t.size()).sum::<usize>();
-        if merged {
-            let Some(step) = self.done.back_mut() else { return false };
-            if !join(&mut step.transaction, &transaction, kind) {
-                return false;
-            }
-            self.bytes += transaction.size();
-        } else {
-            self.bytes += transaction.size();
-            self.done.push_back(Step { transaction, kind, time: Instant::now() });
+        if merged && !self.done.back().is_some_and(|step| joinable(&step.transaction, &transaction, kind)) {
+            return false;
         }
-        self.trim();
+        self.push(transaction, kind, Instant::now(), merged);
         self.sealed = true;
         true
     }
@@ -153,36 +169,79 @@ impl History {
         !self.undone.is_empty()
     }
 
+    /// Identifies the state of the text: equal states mean equal text, through undo and redo.
+    /// The document compares it with the state it was saved in. A step joined by typing changes
+    /// the text but not the state, so a saved state must be sealed.
+    pub fn state(&self) -> u64 {
+        self.done.back().map_or(self.bottom, |step| step.id + 1)
+    }
+
+    /// The position of the current state in the linear history — the states before the oldest
+    /// step, after each done step, after each step that can be redone: the number of done steps.
+    pub fn position(&self) -> u64 {
+        self.done.len() as u64
+    }
+
+    /// The state at a position of the linear history, see [`History::position`].
+    pub fn state_at(&self, position: u64) -> Option<u64> {
+        let position = usize::try_from(position).ok()?;
+        if position == 0 {
+            return Some(self.bottom);
+        }
+        let step = match self.done.get(position - 1) {
+            Some(step) => step,
+            None => self.undone.iter().rev().nth(position - 1 - self.done.len())?,
+        };
+        Some(step.id + 1)
+    }
+
+    /// The position of a state in the linear history, if it can still be reached.
+    pub fn position_of(&self, state: u64) -> Option<u64> {
+        (0..=(self.done.len() + self.undone.len()) as u64).find(|&position| self.state_at(position) == Some(state))
+    }
+
     /// Moves the last step to the redo list and returns it; the caller reverts its edits,
     /// last first.
     pub fn undo(&mut self) -> Option<&Transaction> {
         let step = self.done.pop_back()?;
         self.sealed = true;
-        self.undone.push(step.transaction);
-        self.undone.last()
+        self.undone.push(step);
+        self.undone.last().map(|step| &step.transaction)
     }
 
     /// Moves the last undone step back and returns it; the caller applies its edits again.
     pub fn redo(&mut self) -> Option<&Transaction> {
-        let transaction = self.undone.pop()?;
+        let step = self.undone.pop()?;
         self.sealed = true;
-        let now = Instant::now();
-        self.done.push_back(Step { transaction, kind: EditKind::Other, time: now });
+        self.done.push_back(step);
         self.done.back().map(|step| &step.transaction)
     }
 
-    /// Joins `transaction` to the last step if it continues typing or deleting there.
-    fn merge(&mut self, transaction: &Transaction, kind: EditKind, now: Instant) -> bool {
-        let Some(step) = self.done.back_mut() else { return false };
-        if kind != step.kind
-            || now.saturating_duration_since(step.time) >= MERGE_PAUSE
-            || transaction.before != step.transaction.after
-            || !join(&mut step.transaction, transaction, kind)
-        {
-            return false;
+    /// The steps that can be undone, oldest first.
+    pub fn done_steps(&self) -> impl Iterator<Item = (&Transaction, EditKind)> {
+        self.done.iter().map(|step| (&step.transaction, step.kind))
+    }
+
+    /// The steps that can be redone, in the order they would be: recording them in this order and
+    /// then undoing as many recreates the redo list.
+    pub fn undone_steps(&self) -> impl Iterator<Item = (&Transaction, EditKind)> {
+        self.undone.iter().rev().map(|step| (&step.transaction, step.kind))
+    }
+
+    /// Adds a new step, or joins the transaction to the last one; drops the redo list.
+    fn push(&mut self, transaction: Transaction, kind: EditKind, now: Instant, merged: bool) {
+        self.bytes -= self.undone.drain(..).map(|step| step.transaction.size()).sum::<usize>();
+        self.bytes += transaction.size();
+        if merged {
+            let step = self.done.back_mut().expect("a step to join");
+            join(&mut step.transaction, &transaction, kind);
+            step.time = now;
+        } else {
+            let id = self.next_id;
+            self.next_id += 1;
+            self.done.push_back(Step { id, transaction, kind, time: now });
         }
-        step.time = now;
-        true
+        self.trim();
     }
 
     /// Drops the oldest steps beyond the limits, but never the last one.
@@ -190,42 +249,52 @@ impl History {
         while self.done.len() > 1 && (self.done.len() > self.max_steps || self.bytes > self.max_bytes) {
             let step = self.done.pop_front().expect("more than one step");
             self.bytes -= step.transaction.size();
+            self.bottom = step.id + 1;
         }
     }
 }
 
-/// Appends the single edit of `transaction` to the single edit of `step` if it continues typing
-/// or deleting there.
-fn join(step: &mut Transaction, transaction: &Transaction, kind: EditKind) -> bool {
-    let ([edit], [last]) = (transaction.edits.as_slice(), step.edits.as_mut_slice()) else {
+fn breaks_line(transaction: &Transaction) -> bool {
+    transaction.edits.iter().any(Edit::breaks_line)
+}
+
+/// Whether the single edit of `transaction` continues typing or deleting where the single edit
+/// of `step` left off.
+fn joinable(step: &Transaction, transaction: &Transaction, kind: EditKind) -> bool {
+    let ([edit], [last]) = (transaction.edits.as_slice(), step.edits.as_slice()) else {
         return false;
     };
-    let joined = match kind {
+    match kind {
         // Typing right after the text typed so far.
-        EditKind::Typing if edit.deleted.is_empty() && edit.pos == last.pos + last.inserted.len() => {
-            last.inserted.extend_from_slice(&edit.inserted);
-            true
-        }
-        // Backspace right before the text deleted so far.
-        EditKind::Deleting
-            if edit.inserted.is_empty() && last.inserted.is_empty() && edit.pos + edit.deleted.len() == last.pos =>
-        {
-            last.deleted.splice(0..0, edit.deleted.iter().copied());
-            last.pos = edit.pos;
-            true
-        }
-        // Delete at the same place.
-        EditKind::Deleting if edit.inserted.is_empty() && last.inserted.is_empty() && edit.pos == last.pos => {
-            last.deleted.extend_from_slice(&edit.deleted);
-            true
+        EditKind::Typing => edit.deleted.is_empty() && edit.pos == last.pos + last.inserted.len(),
+        // Backspace right before the text deleted so far, or Delete at the same place.
+        EditKind::Deleting => {
+            edit.inserted.is_empty()
+                && last.inserted.is_empty()
+                && (edit.pos + edit.deleted.len() == last.pos || edit.pos == last.pos)
         }
         // Other edits never join.
-        _ => false,
-    };
-    if joined {
-        step.after = transaction.after;
+        EditKind::Other => false,
     }
-    joined
+}
+
+/// Appends the single edit of `transaction` to that of `step`; they must be [`joinable`].
+fn join(step: &mut Transaction, transaction: &Transaction, kind: EditKind) {
+    let ([edit], [last]) = (transaction.edits.as_slice(), step.edits.as_mut_slice()) else {
+        unreachable!("joinable transactions have one edit each");
+    };
+    match kind {
+        EditKind::Typing => last.inserted.extend_from_slice(&edit.inserted),
+        // Delete at the same place grows to the right.
+        EditKind::Deleting if edit.pos == last.pos => last.deleted.extend_from_slice(&edit.deleted),
+        // Backspace grows to the left.
+        EditKind::Deleting => {
+            last.deleted.splice(0..0, edit.deleted.iter().copied());
+            last.pos = edit.pos;
+        }
+        EditKind::Other => unreachable!("other edits never join"),
+    }
+    step.after = transaction.after;
 }
 
 impl Default for History {
@@ -348,6 +417,34 @@ mod tests {
         assert!(!history.record(insert(1, "x"), EditKind::Typing, Instant::now()));
         assert!(!history.can_redo());
         assert_eq!(history.bytes, 2);
+    }
+
+    #[test]
+    fn states_follow_undo_redo_and_trimming() {
+        let mut history = History::with_limits(2, 1000);
+        let start = history.state();
+        history.record(insert(0, "a"), EditKind::Other, Instant::now());
+        let after_a = history.state();
+        history.record(insert(1, "b"), EditKind::Other, Instant::now());
+        assert_ne!(history.state(), after_a);
+        history.undo();
+        assert_eq!(history.state(), after_a);
+        history.redo();
+        let after_b = history.state();
+        assert_eq!((history.position(), history.state_at(1), history.state_at(2)), (2, Some(after_a), Some(after_b)));
+        history.undo();
+        assert_eq!(
+            (history.position(), history.state_at(2), history.position_of(after_b)),
+            (1, Some(after_b), Some(2))
+        );
+        history.redo();
+        // A third step drops the first one: the state before it can no longer be reached.
+        history.record(insert(2, "c"), EditKind::Other, Instant::now());
+        history.undo();
+        history.undo();
+        assert_eq!(history.state(), after_a, "all undone, the text keeps the dropped step");
+        assert_ne!(history.state(), start);
+        assert_eq!(history.position_of(start), None);
     }
 
     #[test]
