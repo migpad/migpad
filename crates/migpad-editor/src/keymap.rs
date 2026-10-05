@@ -60,7 +60,8 @@ actions!(
         Cut,
         Paste,
         ToggleWhitespace,
-        ToggleIndentGuides
+        ToggleIndentGuides,
+        ToggleWordWrap
     ]
 );
 
@@ -86,6 +87,7 @@ pub(crate) fn on_edits(div: Div, cx: &mut Context<EditorView>) -> Div {
         .on_action(cx.listener(|view, _: &ToggleIndentGuides, _, cx| {
             view.set_show_indent_guides(!view.shows_indent_guides(), cx)
         }))
+        .on_action(cx.listener(|view, _: &ToggleWordWrap, _, cx| view.set_word_wrap(!view.wraps_lines(), cx)))
 }
 
 /// `keys` move the caret; with Shift they select.
