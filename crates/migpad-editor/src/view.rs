@@ -2,8 +2,11 @@
 //! lines.
 
 mod caret;
+mod edit;
+mod input;
 mod mouse;
 
+use std::ops::Range;
 use std::time::Duration;
 
 use gpui::{
@@ -14,10 +17,11 @@ use migpad_core::document::Document;
 use migpad_core::history::Selection;
 
 pub(crate) use caret::Motion;
+pub(crate) use edit::Deletion;
 use mouse::Drag;
 
 use crate::element::EditorElement;
-use crate::keymap::{self, CONTEXT, SelectAll};
+use crate::keymap::{self, CONTEXT};
 use crate::layout::{Geometry, Layout, Metrics, ScreenLine};
 use crate::movement;
 
@@ -62,6 +66,8 @@ pub struct EditorView {
     /// Where the parts of the view were in the last layout, for the mouse.
     geometry: Geometry,
     selection: Selection,
+    /// The text an input method is composing: underlined, and replaced until it is committed.
+    marked: Option<Range<usize>>,
     /// Where vertical moves keep the caret, in pixels from the start of a line: past shorter lines
     /// it comes back to its column.
     goal_x: Option<f64>,
@@ -80,7 +86,7 @@ impl EditorView {
         let subscriptions = vec![
             cx.observe(&document, |view, _, cx| view.document_changed(cx)),
             cx.on_focus(&focus, window, Self::restart_blink),
-            cx.on_blur(&focus, window, Self::restart_blink),
+            cx.on_blur(&focus, window, Self::blurred),
             cx.observe_window_activation(window, Self::restart_blink),
         ];
         EditorView {
@@ -95,6 +101,7 @@ impl EditorView {
             widest: 0.0,
             geometry: Geometry::default(),
             selection: Selection::default(),
+            marked: None,
             goal_x: None,
             drag: None,
             autoscroll: None,
@@ -114,6 +121,39 @@ impl EditorView {
         let snap = |pos| movement::snap(doc.text(), doc.lines(), pos);
         self.selection = Selection { anchor: snap(self.selection.anchor), head: snap(self.selection.head) };
         cx.notify();
+    }
+
+    fn selected_range(&self) -> Range<usize> {
+        let Selection { anchor, head } = self.selection;
+        anchor.min(head)..anchor.max(head)
+    }
+
+    /// Ends the undo step being typed: the next edit starts a new one.
+    fn seal_undo_step(&mut self, cx: &mut Context<Self>) {
+        self.document.update(cx, |doc, _| doc.seal_undo_step());
+    }
+
+    /// Takes the text being composed as it is.
+    fn end_composition(&mut self, cx: &mut Context<Self>) {
+        if self.marked.take().is_some() {
+            self.seal_undo_step(cx);
+        }
+    }
+
+    /// After the caret moved or the text changed: shows the caret, and tells input methods
+    /// where it is now.
+    fn caret_moved(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.reveal_caret(window, cx);
+        self.restart_blink(window, cx);
+        window.invalidate_character_coordinates();
+    }
+
+    /// Without focus, what is being composed stays as it is, and typing after the focus is back
+    /// starts a new undo step.
+    fn blurred(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.marked = None;
+        self.seal_undo_step(cx);
+        self.restart_blink(window, cx);
     }
 
     /// Shows the caret and starts its blinking over, if the view has focus in an active window;
@@ -191,7 +231,7 @@ impl EditorView {
         let mut widest: f64 = 0.0;
         for (i, line) in (first..last).enumerate() {
             let y = top + line_height * i as f32;
-            let row = ScreenLine::new(text, lines, line, scroll_x, metrics, window);
+            let row = ScreenLine::new(text, lines, line, scroll_x, self.marked.as_ref(), metrics, window);
             widest = widest.max(row.right());
             if start < end && start <= row.range.end && end > row.range.start {
                 let from = row.x_of(start.max(row.range.start));
@@ -252,11 +292,8 @@ impl Focusable for EditorView {
 
 impl Render for EditorView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let view = div()
-            .key_context(CONTEXT)
-            .track_focus(&self.focus)
-            .size_full()
-            .on_action(cx.listener(|view, _: &SelectAll, _, cx| view.select_all(cx)));
+        let view = div().key_context(CONTEXT).track_focus(&self.focus).size_full();
+        let view = keymap::on_edits(view, cx);
         keymap::on_motions(view, cx).child(EditorElement::new(cx.entity()))
     }
 }

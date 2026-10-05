@@ -3,7 +3,7 @@
 
 use gpui::{Action, Context, Div, InteractiveElement, KeyBinding, actions};
 
-use crate::view::{EditorView, Motion};
+use crate::view::{Deletion, EditorView, Motion};
 
 /// The key context of the editor.
 pub(crate) const CONTEXT: &str = "Editor";
@@ -43,7 +43,41 @@ motions! {
     DocEnd: MoveDocEnd, SelectDocEnd;
 }
 
-actions!(editor, [SelectAll]);
+actions!(
+    editor,
+    [
+        SelectAll,
+        Backspace,
+        Delete,
+        DeleteWordLeft,
+        DeleteWordRight,
+        DeleteToLineStart,
+        Newline,
+        Tab,
+        Undo,
+        Redo,
+        Copy,
+        Cut,
+        Paste
+    ]
+);
+
+/// Handles the editing actions in `div`.
+pub(crate) fn on_edits(div: Div, cx: &mut Context<EditorView>) -> Div {
+    div.on_action(cx.listener(|view, _: &SelectAll, window, cx| view.select_all(window, cx)))
+        .on_action(cx.listener(|view, _: &Backspace, window, cx| view.delete(Deletion::CharLeft, window, cx)))
+        .on_action(cx.listener(|view, _: &Delete, window, cx| view.delete(Deletion::CharRight, window, cx)))
+        .on_action(cx.listener(|view, _: &DeleteWordLeft, window, cx| view.delete(Deletion::WordLeft, window, cx)))
+        .on_action(cx.listener(|view, _: &DeleteWordRight, window, cx| view.delete(Deletion::WordRight, window, cx)))
+        .on_action(cx.listener(|view, _: &DeleteToLineStart, window, cx| view.delete(Deletion::LineStart, window, cx)))
+        .on_action(cx.listener(|view, _: &Newline, window, cx| view.newline(window, cx)))
+        .on_action(cx.listener(|view, _: &Tab, window, cx| view.type_text("\t", window, cx)))
+        .on_action(cx.listener(|view, _: &Undo, window, cx| view.undo(window, cx)))
+        .on_action(cx.listener(|view, _: &Redo, window, cx| view.redo(window, cx)))
+        .on_action(cx.listener(|view, _: &Copy, _, cx| view.copy(cx)))
+        .on_action(cx.listener(|view, _: &Cut, window, cx| view.cut(window, cx)))
+        .on_action(cx.listener(|view, _: &Paste, window, cx| view.paste(window, cx)))
+}
 
 /// `keys` move the caret; with Shift they select.
 fn motion(keys: &str, to: impl Action, select: impl Action) -> [KeyBinding; 2] {
@@ -87,7 +121,41 @@ pub(crate) fn key_bindings() -> Vec<KeyBinding> {
         ]
     };
     let mut bindings: Vec<KeyBinding> = common.into_iter().chain(system).flatten().collect();
-    bindings.push(KeyBinding::new("secondary-a", SelectAll, Some(CONTEXT)));
+    let context = Some(CONTEXT);
+    bindings.extend([
+        KeyBinding::new("secondary-a", SelectAll, context),
+        KeyBinding::new("backspace", Backspace, context),
+        KeyBinding::new("shift-backspace", Backspace, context),
+        KeyBinding::new("delete", Delete, context),
+        KeyBinding::new("enter", Newline, context),
+        KeyBinding::new("shift-enter", Newline, context),
+        KeyBinding::new("tab", Tab, context),
+        KeyBinding::new("secondary-z", Undo, context),
+        KeyBinding::new("secondary-shift-z", Redo, context),
+        KeyBinding::new("secondary-c", Copy, context),
+        KeyBinding::new("secondary-x", Cut, context),
+        KeyBinding::new("secondary-v", Paste, context),
+    ]);
+    if cfg!(target_os = "macos") {
+        bindings.extend([
+            KeyBinding::new("alt-backspace", DeleteWordLeft, context),
+            KeyBinding::new("alt-delete", DeleteWordRight, context),
+            KeyBinding::new("cmd-backspace", DeleteToLineStart, context),
+            // As in the text fields of macOS.
+            KeyBinding::new("ctrl-h", Backspace, context),
+            KeyBinding::new("ctrl-d", Delete, context),
+        ]);
+    } else {
+        bindings.extend([
+            KeyBinding::new("ctrl-backspace", DeleteWordLeft, context),
+            KeyBinding::new("ctrl-delete", DeleteWordRight, context),
+            KeyBinding::new("ctrl-y", Redo, context),
+            // The keys of the clipboard from the days of IBM CUA, still at home on Windows.
+            KeyBinding::new("ctrl-insert", Copy, context),
+            KeyBinding::new("shift-delete", Cut, context),
+            KeyBinding::new("shift-insert", Paste, context),
+        ]);
+    }
     bindings
 }
 

@@ -47,15 +47,19 @@ impl Selection {
     }
 }
 
-/// What a transaction does, for merging typing and deleting into single undo steps.
+/// What a transaction does, for merging typing, deleting and IME composition into single undo
+/// steps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EditKind {
     /// Typing text, possibly over a selection.
     Typing,
     /// Backspace or Delete.
     Deleting,
-    /// Anything else: paste, replace, IME composition; never merged.
+    /// Anything else: paste, replace; never merged.
     Other,
+    /// The text an input method composes, changed again and again until it is committed; the
+    /// whole composition is one step, however long it takes.
+    Composing,
 }
 
 /// Edits undone and redone as one step, applied in order, each to the text the previous one left;
@@ -125,21 +129,22 @@ impl History {
         let merged = self.can_merge(&transaction, kind, now);
         // A line break ends the step: the next edit starts a new one.
         let line_break = breaks_line(&transaction);
-        self.push(transaction, kind, now, merged);
-        self.sealed = line_break;
+        let kept = self.push(transaction, kind, now, merged);
+        // A dropped composition leaves the step before it sealed, as it was.
+        self.sealed = line_break || !kept;
         merged
     }
 
     /// Whether [`History::record`] would join `transaction` to the last step: the step is not
-    /// sealed, neither of them breaks a line, they are of the same kind, typing or deleting, with
-    /// no pause of [`MERGE_PAUSE`] between them, and the transaction continues where the step
-    /// left the selection.
+    /// sealed, neither of them breaks a line, they are of the same kind — typing or deleting with
+    /// no pause of [`MERGE_PAUSE`] between them, or composing — and the transaction continues
+    /// where the step left the selection.
     pub fn can_merge(&self, transaction: &Transaction, kind: EditKind, now: Instant) -> bool {
         let Some(step) = self.done.back() else { return false };
         !self.sealed
             && !breaks_line(transaction)
             && kind == step.kind
-            && now.saturating_duration_since(step.time) < MERGE_PAUSE
+            && (kind == EditKind::Composing || now.saturating_duration_since(step.time) < MERGE_PAUSE)
             && transaction.before == step.transaction.after
             && joinable(&step.transaction, transaction, kind)
     }
@@ -150,7 +155,7 @@ impl History {
         if merged && !self.done.back().is_some_and(|step| joinable(&step.transaction, &transaction, kind)) {
             return false;
         }
-        self.push(transaction, kind, Instant::now(), merged);
+        let _ = self.push(transaction, kind, Instant::now(), merged);
         self.sealed = true;
         true
     }
@@ -228,20 +233,33 @@ impl History {
         self.undone.iter().rev().map(|step| (&step.transaction, step.kind))
     }
 
-    /// Adds a new step, or joins the transaction to the last one; drops the redo list.
-    fn push(&mut self, transaction: Transaction, kind: EditKind, now: Instant, merged: bool) {
+    /// Adds a new step, or joins the transaction to the last one; drops the redo list. Returns
+    /// whether the step is kept: a composition that ends where it began is dropped.
+    fn push(&mut self, transaction: Transaction, kind: EditKind, now: Instant, merged: bool) -> bool {
         self.bytes -= self.undone.drain(..).map(|step| step.transaction.size()).sum::<usize>();
-        self.bytes += transaction.size();
         if merged {
             let step = self.done.back_mut().expect("a step to join");
+            self.bytes -= step.transaction.size();
             join(&mut step.transaction, &transaction, kind);
+            self.bytes += step.transaction.size();
             step.time = now;
+            // A composition that ends where it began, cancelled for example, leaves no step.
+            if kind == EditKind::Composing
+                && let [edit] = step.transaction.edits.as_slice()
+                && edit.deleted == edit.inserted
+            {
+                self.bytes -= step.transaction.size();
+                self.done.pop_back();
+                return false;
+            }
         } else {
+            self.bytes += transaction.size();
             let id = self.next_id;
             self.next_id += 1;
             self.done.push_back(Step { id, transaction, kind, time: now });
         }
         self.trim();
+        true
     }
 
     /// Drops the oldest steps beyond the limits, but never the last one.
@@ -273,6 +291,8 @@ fn joinable(step: &Transaction, transaction: &Transaction, kind: EditKind) -> bo
                 && last.inserted.is_empty()
                 && (edit.pos + edit.deleted.len() == last.pos || edit.pos == last.pos)
         }
+        // A change within the text composed so far.
+        EditKind::Composing => edit.pos >= last.pos && edit.pos + edit.deleted.len() <= last.pos + last.inserted.len(),
         // Other edits never join.
         EditKind::Other => false,
     }
@@ -291,6 +311,10 @@ fn join(step: &mut Transaction, transaction: &Transaction, kind: EditKind) {
         EditKind::Deleting => {
             last.deleted.splice(0..0, edit.deleted.iter().copied());
             last.pos = edit.pos;
+        }
+        EditKind::Composing => {
+            let start = edit.pos - last.pos;
+            last.inserted.splice(start..start + edit.deleted.len(), edit.inserted.iter().copied());
         }
         EditKind::Other => unreachable!("other edits never join"),
     }
@@ -401,6 +425,57 @@ mod tests {
         assert!(!history.record(insert(1, "b"), EditKind::Typing, start + MERGE_PAUSE));
         history.seal();
         assert!(!history.record(insert(2, "c"), EditKind::Typing, start + MERGE_PAUSE));
+    }
+
+    /// Replaces `deleted` at `pos` with `inserted` as an input method does: the caret is after the
+    /// replaced text before, and after the new one after.
+    fn compose(pos: usize, deleted: &str, inserted: &str) -> Transaction {
+        let edit = Edit { pos, deleted: deleted.into(), inserted: inserted.into() };
+        let (before, after) = (Selection::caret(pos + deleted.len()), Selection::caret(pos + inserted.len()));
+        Transaction { edits: vec![edit], before, after }
+    }
+
+    #[test]
+    fn a_composition_is_one_step_however_long_it_takes() {
+        let mut history = History::new();
+        let start = Instant::now();
+        // "ka" composed over the selected "sel", converted to kanji, then committed.
+        let steps = [
+            Transaction { before: Selection { anchor: 2, head: 5 }, ..compose(2, "sel", "k") },
+            compose(2, "k", "か"),
+            compose(2, "か", "漢字"),
+            compose(5, "字", "字"),
+        ];
+        let merged: Vec<bool> = (steps.into_iter().enumerate())
+            .map(|(i, t)| history.record(t, EditKind::Composing, start + MERGE_PAUSE * (i as u32 + 1)))
+            .collect();
+        assert_eq!(merged, [false, true, true, true], "no pause ends a composition");
+        history.seal();
+        assert_eq!(
+            undo_edits(&mut history),
+            [Edit { pos: 2, deleted: b"sel".to_vec(), inserted: "漢字".as_bytes().to_vec() }]
+        );
+        assert_eq!(history.bytes, 3 + "漢字".len());
+    }
+
+    #[test]
+    fn a_cancelled_composition_leaves_no_step() {
+        let mut history = History::new();
+        history.record(insert(0, "a"), EditKind::Typing, Instant::now());
+        history.seal();
+        let state = history.state();
+        assert!(!history.record(compose(1, "", "k"), EditKind::Composing, Instant::now()));
+        assert!(history.record(compose(1, "k", ""), EditKind::Composing, Instant::now()));
+        assert_eq!((history.state(), history.done.len(), history.bytes), (state, 1, 1));
+        // The step before stays sealed.
+        assert!(!history.record(insert(1, "b"), EditKind::Typing, Instant::now()));
+        // A change outside the composed text starts a step of its own.
+        history.record(compose(2, "", "k"), EditKind::Composing, Instant::now());
+        assert!(!history.record(
+            Transaction { before: Selection::caret(3), ..compose(0, "a", "c") },
+            EditKind::Composing,
+            Instant::now()
+        ));
     }
 
     #[test]

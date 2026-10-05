@@ -3,7 +3,7 @@
 
 use std::ops::Range;
 
-use gpui::{Bounds, Font, Hitbox, Hsla, Pixels, Point, ShapedLine, TextRun, Window, px, rgb};
+use gpui::{Bounds, Font, Hitbox, Hsla, Pixels, Point, ShapedLine, TextRun, UnderlineStyle, Window, px, rgb};
 use migpad_core::document::Text;
 use migpad_core::text::{LineIndex, TextStore};
 
@@ -66,10 +66,19 @@ pub(crate) struct ScreenLine {
 
 impl ScreenLine {
     /// Lays out `line`; a long one in a window around `scroll_x`, the pixels scrolled to the right.
-    pub fn new(text: &Text, lines: &LineIndex, line: usize, scroll_x: f64, metrics: &Metrics, window: &Window) -> Self {
+    /// The bytes of `underline` are underlined: the text an input method composes.
+    pub fn new(
+        text: &Text,
+        lines: &LineIndex,
+        line: usize,
+        scroll_x: f64,
+        underline: Option<&Range<usize>>,
+        metrics: &Metrics,
+        window: &Window,
+    ) -> Self {
         let (range, _) = lines.line_range(text, line);
         if range.len() <= MAX_SHAPED {
-            return Self::part(text, range.clone(), range, metrics, window);
+            return Self::part(text, range.clone(), range, underline, metrics, window);
         }
         // The character at the left edge of the view is found by counting one column per byte from
         // the start of the line. The window is shaped around it and placed so that this character
@@ -80,7 +89,7 @@ impl ScreenLine {
         let edge = text.floor_char_boundary(wanted, range.start);
         let start = text.floor_char_boundary(edge.saturating_sub(MAX_SHAPED / 4).max(range.start), range.start);
         let end = text.floor_char_boundary((start + MAX_SHAPED).min(range.end), start);
-        let mut line = Self::part(text, range.clone(), start..end, metrics, window);
+        let mut line = Self::part(text, range.clone(), start..end, underline, metrics, window);
         let next = text.next_char_boundary(edge, end);
         let scrolled_past = if next > edge {
             ((column - (edge - range.start) as f64) / (next - edge) as f64).clamp(0.0, 1.0)
@@ -93,11 +102,33 @@ impl ScreenLine {
     }
 
     /// Lays out the part `shown` of the line with the bytes `range`.
-    pub fn part(text: &Text, range: Range<usize>, shown: Range<usize>, metrics: &Metrics, window: &Window) -> Self {
+    pub fn part(
+        text: &Text,
+        range: Range<usize>,
+        shown: Range<usize>,
+        underline: Option<&Range<usize>>,
+        metrics: &Metrics,
+        window: &Window,
+    ) -> Self {
         let DisplayText { text: shown_text, map } =
             DisplayText::new(&text.to_vec(shown.clone()), shown.start - range.start, TAB_WIDTH);
-        let run = metrics.run(shown_text.len(), colors::TEXT);
-        let shaped = window.text_system().shape_line(shown_text.into(), metrics.font_size, &[run], None);
+        let len = shown_text.len();
+        let mut runs = vec![metrics.run(len, colors::TEXT)];
+        if let Some(underline) = underline
+            && underline.start < shown.end
+            && underline.end > shown.start
+        {
+            let at = |pos: usize| map.display_offset(pos.clamp(shown.start, shown.end) - shown.start);
+            let (from, to) = (at(underline.start), at(underline.end));
+            let style = UnderlineStyle { color: Some(rgb(colors::TEXT).into()), thickness: px(1.), wavy: false };
+            runs = vec![
+                metrics.run(from, colors::TEXT),
+                TextRun { underline: Some(style), ..metrics.run(to - from, colors::TEXT) },
+                metrics.run(len - to, colors::TEXT),
+            ];
+            runs.retain(|run| run.len > 0);
+        }
+        let shaped = window.text_system().shape_line(shown_text.into(), metrics.font_size, &runs, None);
         ScreenLine { range, shown, x: 0.0, shaped, map }
     }
 

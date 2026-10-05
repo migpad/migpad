@@ -6,19 +6,22 @@
 //! Steps are separated by spaces:
 //!
 //! - a keystroke, such as `down`, `shift-end` or `cmd-a`;
+//! - `type:TEXT`: text from the system, as typed or committed by an input method;
+//! - `mark:TEXT`: text an input method composes, and `unmark` to take it as it is;
 //! - `click:X,Y`, or `click:X,Y,N` for N clicks;
 //! - `press:X,Y`, `move:X,Y` with the button held, `release:X,Y`;
 //! - `wait:MS`.
 //!
-//! `shift-click` and `shift-press` hold Shift. Coordinates are pixels from the top left corner of
-//! the content of the window.
+//! `\s` in a text is a space. `shift-click` and `shift-press` hold Shift. Coordinates are pixels
+//! from the top left corner of the content of the window.
 
 use std::time::Duration;
 
 use gpui::{
-    AnyWindowHandle, App, Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    PlatformInput, Point, point, px,
+    AnyWindowHandle, App, EntityInputHandler, Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, PlatformInput, Point, WindowHandle, point, px,
 };
+use migpad_editor::EditorView;
 
 /// The pause before the first step, while the window shows its first frame.
 const START: Duration = Duration::from_millis(500);
@@ -27,26 +30,42 @@ const PAUSE: Duration = Duration::from_millis(50);
 
 enum Step {
     Key(Keystroke),
+    Type(String),
+    Mark(String),
+    Unmark,
     Mouse(Vec<PlatformInput>),
     Wait(Duration),
 }
 
 /// Plays the steps of `MIGPAD_DEBUG_INPUT`, if it is set, in `window`; release builds ignore it.
-pub fn play(window: AnyWindowHandle, cx: &mut App) {
+pub fn play(window: WindowHandle<EditorView>, cx: &mut App) {
     if !cfg!(debug_assertions) {
         return;
     }
     let Ok(script) = std::env::var("MIGPAD_DEBUG_INPUT") else { return };
+    // Events go through the window without holding its view, which handles them.
+    let events = AnyWindowHandle::from(window);
     cx.spawn(async move |cx| {
         cx.background_executor().timer(START).await;
         for step in script.split_whitespace() {
             match parse(step) {
                 Some(Step::Key(keystroke)) => {
-                    let _ = window.update(cx, |_, window, cx| window.dispatch_keystroke(keystroke, cx));
+                    let _ = events.update(cx, |_, window, cx| window.dispatch_keystroke(keystroke, cx));
                 }
-                Some(Step::Mouse(events)) => {
-                    for event in events {
-                        let _ = window.update(cx, |_, window, cx| window.dispatch_event(event, cx));
+                Some(Step::Type(text)) => {
+                    let _ = window.update(cx, |view, window, cx| view.replace_text_in_range(None, &text, window, cx));
+                }
+                Some(Step::Mark(text)) => {
+                    let _ = window.update(cx, |view, window, cx| {
+                        view.replace_and_mark_text_in_range(None, &text, None, window, cx)
+                    });
+                }
+                Some(Step::Unmark) => {
+                    let _ = window.update(cx, |view, window, cx| view.unmark_text(window, cx));
+                }
+                Some(Step::Mouse(input)) => {
+                    for event in input {
+                        let _ = events.update(cx, |_, window, cx| window.dispatch_event(event, cx));
                     }
                 }
                 Some(Step::Wait(time)) => cx.background_executor().timer(time).await,
@@ -61,6 +80,15 @@ pub fn play(window: AnyWindowHandle, cx: &mut App) {
 fn parse(step: &str) -> Option<Step> {
     if let Some(ms) = step.strip_prefix("wait:") {
         return ms.parse().ok().map(|ms| Step::Wait(Duration::from_millis(ms)));
+    }
+    if let Some(text) = step.strip_prefix("type:") {
+        return Some(Step::Type(text.replace("\\s", " ")));
+    }
+    if let Some(text) = step.strip_prefix("mark:") {
+        return Some(Step::Mark(text.replace("\\s", " ")));
+    }
+    if step == "unmark" {
+        return Some(Step::Unmark);
     }
     let (modifiers, mouse) = match step.strip_prefix("shift-") {
         Some(rest) if rest.starts_with("click:") || rest.starts_with("press:") => (Modifiers::shift(), rest),

@@ -14,8 +14,8 @@
 //!   of the file on disk if there is a file, the losses of decoding it, where the saved state is
 //!   in the undo history, and a snapshot of the text if one was taken; without a snapshot, the
 //!   text of the base is the file;
-//! - `T`, transaction: its kind, whether it joined the last undo step, the selections before and
-//!   after, and the edits;
+//! - `T`, transaction: its kind (0 typing, 1 deleting, 2 other, 3 composing), whether it joined
+//!   the last undo step, the selections before and after, and the edits;
 //! - `U`, undo; `R`, redo;
 //! - `F`, format: the format changed without saving.
 //!
@@ -102,6 +102,7 @@ impl Journal {
             EditKind::Typing => 0,
             EditKind::Deleting => 1,
             EditKind::Other => 2,
+            EditKind::Composing => 3,
         });
         payload.push(merged as u8);
         put_selection(&mut payload, transaction.before);
@@ -415,6 +416,7 @@ fn decode(kind: u8, payload: &[u8]) -> Option<Record> {
                 0 => EditKind::Typing,
                 1 => EditKind::Deleting,
                 2 => EditKind::Other,
+                3 => EditKind::Composing,
                 _ => return None,
             };
             let merged = match cursor.u8()? {
@@ -768,6 +770,23 @@ mod tests {
         assert_eq!(text(&doc), b"ab");
         assert_eq!(doc.undo(), Some(Selection::caret(0)), "typed \"ab\" is one step");
         assert_eq!((text(&doc), doc.can_undo()), (Vec::new(), false));
+    }
+
+    #[test]
+    fn a_composition_replays_as_one_step() {
+        let records = vec![
+            snapshot_base("ab"),
+            transaction(1, "", "k", EditKind::Composing, false),
+            transaction(1, "k", "か", EditKind::Composing, true),
+            transaction(1, "か", "家", EditKind::Composing, true),
+        ];
+        let (file, _) = write("journal-composition", None, &records);
+        let contents = read(&file.0).unwrap();
+        assert_eq!(contents.records, records);
+        let mut doc = Document::replay(&contents, None).unwrap();
+        assert_eq!(text(&doc), "a家b".as_bytes());
+        doc.undo();
+        assert_eq!((text(&doc), doc.can_undo()), (b"ab".to_vec(), false));
     }
 
     #[test]
