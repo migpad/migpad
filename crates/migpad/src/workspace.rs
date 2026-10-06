@@ -2,16 +2,17 @@
 //! which act on the window or on the document of the active tab whatever has the focus.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui::{
     App, AppContext, Context, DragMoveEvent, Entity, EntityId, ExternalPaths, FocusHandle, Focusable, MouseDownEvent,
     MouseUpEvent, PathPromptOptions, Render, ScrollHandle, SharedString, Subscription, Task, Window, WindowId, canvas,
     div, prelude::*, px, rgb,
 };
-use migpad_core::document::{Document, Format};
+use migpad_core::document::{Document, Fingerprint, Format};
 use migpad_core::encoding::Encoding;
 use migpad_core::history::Selection;
+use migpad_core::text::TextStore;
 use migpad_editor::EditorView;
 use migpad_ui::notification::NotificationBar;
 use migpad_ui::{Button, MenuBar, TabBar, TabInfo, theme};
@@ -252,9 +253,25 @@ impl Workspace {
             }
             NoticeAction::ShowFirst(pos) => {
                 self.activate(index, window, cx);
-                self.editor().update(cx, |editor, cx| editor.select(Selection::caret(pos), window, cx));
+                // The character itself is selected: it shows better than a caret beside it.
+                let text = self.document().read(cx).text();
+                let pos = pos.min(text.len());
+                let selection = Selection { anchor: pos, head: text.next_char_boundary(pos, text.len()) };
+                self.editor().update(cx, |editor, cx| editor.select(selection, window, cx));
             }
             NoticeAction::SaveReplacing => {
+                // What would be lost is replaced in the text first, as the file gets it: the window
+                // shows what is saved, and undo brings the characters back.
+                let Some(tab) = self.tabs.get(index) else { return };
+                let (document, editor) = (tab.document.clone(), tab.editor.clone());
+                let selection = editor.read(cx).selection();
+                let replaced = document.update(cx, |doc, cx| {
+                    let result = doc.replace_losses(doc.format.encoding, selection, Instant::now());
+                    cx.notify();
+                    result
+                });
+                let Ok(after) = replaced else { return };
+                editor.update(cx, |editor, cx| editor.select(after, window, cx));
                 self.save(index, None, true, window, cx);
             }
             NoticeAction::SaveAs => self.save_as(index, window, cx),
@@ -296,10 +313,16 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> bool {
         let Some(tab) = self.tabs.get(index) else { return false };
-        let Some(path) = tab.document.read(cx).path.clone() else {
+        let doc = tab.document.read(cx);
+        let Some(path) = doc.path.clone() else {
             self.save_as(index, window, cx);
             return false;
         };
+        // Nothing to write: the file is as it was read or saved, and so is the text.
+        if format.is_none() && !doc.is_modified() && doc.disk.is_some() && Fingerprint::of_path(&path).ok() == doc.disk
+        {
+            return true;
+        }
         self.save_to(index, path, format, accept_losses, cx)
     }
 
@@ -323,6 +346,10 @@ impl Workspace {
         });
         match result {
             Ok(()) => {
+                // An untitled document has a name now: its number is free for a new one.
+                if let Some(tab) = self.tabs.get_mut(index) {
+                    tab.untitled = None;
+                }
                 self.clear_notices(index, Topic::Save, cx);
                 cx.add_recent_document(&path);
                 true
