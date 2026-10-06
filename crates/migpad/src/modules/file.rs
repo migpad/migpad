@@ -19,6 +19,7 @@ impl Module for FileModule {
         let menu = |group| Some((MenuId::File, group));
         let new = Command::new("file.new", Key::FileNew, NewTab).keys(by_os(&["cmd-n"], &["ctrl-n"], &["ctrl-n"]));
         registry.add(new, menu(0));
+        registry.add_to_toolbar("file.new", 0);
         let new_window = Command::new("file.new_window", Key::FileNewWindow, NewWindow)
             .keys(by_os(&["cmd-shift-n"], &["ctrl-shift-n"], &["ctrl-shift-n"]));
         registry.add(new_window, menu(0));

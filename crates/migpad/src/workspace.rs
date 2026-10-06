@@ -5,18 +5,33 @@ use std::path::Path;
 use std::time::Duration;
 
 use gpui::{
-    App, AppContext, Context, Entity, ExternalPaths, FocusHandle, Focusable, Render, ScrollHandle, SharedString,
+    App, AppContext, Context, Entity, ExternalPaths, FocusHandle, Focusable, Global, Render, ScrollHandle, SharedString,
     Subscription, Task, Window, WindowId, div, prelude::*, px, rgb,
 };
 use migpad_core::document::Document;
 use migpad_editor::EditorView;
-use migpad_ui::{TabBar, TabInfo, theme};
+use migpad_ui::{TabBar, TabInfo, Toolbar, theme};
 
 use crate::commands::{Registry, update_menus};
 use crate::status::{self, COUNT_STEP, Loading, SelectionCount, count_chars};
 use crate::strings::{Key, tr};
 use crate::tabs::Tabs;
 use crate::windows::{self, ClosedTab, Opening};
+
+/// Whether the windows show the toolbar: they do until it is hidden.
+struct ToolbarHidden(bool);
+
+impl Global for ToolbarHidden {}
+
+pub fn toolbar_visible(cx: &App) -> bool {
+    !cx.try_global::<ToolbarHidden>().is_some_and(|hidden| hidden.0)
+}
+
+/// Shows or hides the toolbar of every window.
+pub fn set_toolbar_visible(visible: bool, cx: &mut App) {
+    cx.set_global(ToolbarHidden(!visible));
+    cx.refresh_windows();
+}
 
 /// How often the status bar shows how far a file has loaded.
 const PROGRESS_TICK: Duration = Duration::from_millis(100);
@@ -45,6 +60,8 @@ pub struct Workspace {
     /// Counts the changes to the documents of the window: counts of selections go stale with them.
     revision: u64,
     selection_count: Option<SelectionCount>,
+    /// Whether the window has drawn a frame: what its elements handle is known after that.
+    drawn: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -74,6 +91,7 @@ impl Workspace {
             title: (String::new(), false),
             revision: 0,
             selection_count: None,
+            drawn: false,
             _subscriptions: vec![activation, appearance],
         };
         workspace.update_title(window, cx);
@@ -87,6 +105,16 @@ impl Workspace {
     /// The view of the document that the commands act on: that of the active tab.
     pub fn editor(&self) -> &Entity<EditorView> {
         &self.tabs.active().editor
+    }
+
+    /// Whether the window has drawn a frame.
+    pub fn has_drawn(&self) -> bool {
+        self.drawn
+    }
+
+    /// The document of the active tab.
+    pub fn document(&self) -> &Entity<Document> {
+        &self.tabs.active().document
     }
 
     pub fn active_tab(&self) -> usize {
@@ -455,7 +483,16 @@ impl Render for Workspace {
                 workspace.open_paths(paths.paths(), window, cx);
             }));
         let root = handlers.iter().fold(root, |root, handler| handler(root, cx));
+        let toolbar = toolbar_visible(cx).then(|| Toolbar::new(cx.global::<Registry>().toolbar(self, window, cx)));
         let status_bar = self.status_bar(cx);
-        root.child(self.tab_bar(cx)).child(div().flex_1().min_h_0().child(self.editor().clone())).child(status_bar)
+        if !self.drawn {
+            // Once the first frame is drawn, the toolbar knows which of its commands can act.
+            self.drawn = true;
+            window.request_animation_frame();
+        }
+        root.children(toolbar)
+            .child(self.tab_bar(cx))
+            .child(div().flex_1().min_h_0().child(self.editor().clone()))
+            .child(status_bar)
     }
 }

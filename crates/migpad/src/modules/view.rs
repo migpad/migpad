@@ -5,8 +5,9 @@ use gpui::actions;
 
 use crate::commands::{Command, MenuId, Module, Registry, update_menus};
 use crate::strings::Key;
+use crate::workspace::{set_toolbar_visible, toolbar_visible};
 
-actions!(view, [ToggleWordWrap, ToggleInvisibles, ToggleIndentGuides]);
+actions!(view, [ToggleWordWrap, ToggleInvisibles, ToggleIndentGuides, ToggleToolbar]);
 
 pub struct ViewModule;
 
@@ -26,6 +27,8 @@ impl Module for ViewModule {
         let indent_guides = Command::new("view.indent_guides", Key::ViewIndentGuides, ToggleIndentGuides)
             .checked(|workspace, cx| workspace.editor().read(cx).shows_indent_guides());
         registry.add(indent_guides, menu(1));
+        let toolbar = Command::new("view.toolbar", Key::ViewToolbar, ToggleToolbar).checked(|_, cx| toolbar_visible(cx));
+        registry.add(toolbar, menu(2));
 
         registry.on_window_action(|workspace, _: &ToggleWordWrap, _, cx| {
             workspace.editor().update(cx, |editor, cx| editor.set_word_wrap(!editor.wraps_lines(), cx));
@@ -33,6 +36,10 @@ impl Module for ViewModule {
         });
         registry.on_window_action(|workspace, _: &ToggleInvisibles, _, cx| {
             workspace.editor().update(cx, |editor, cx| editor.set_show_whitespace(!editor.shows_whitespace(), cx));
+            update_menus(Some(workspace), cx);
+        });
+        registry.on_window_action(|workspace, _: &ToggleToolbar, _, cx| {
+            set_toolbar_visible(!toolbar_visible(cx), cx);
             update_menus(Some(workspace), cx);
         });
         registry.on_window_action(|workspace, _: &ToggleIndentGuides, _, cx| {
