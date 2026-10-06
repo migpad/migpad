@@ -9,6 +9,7 @@ mod journals;
 mod keys;
 mod modules;
 mod notices;
+mod session;
 mod status;
 mod strings;
 mod tabs;
@@ -40,7 +41,8 @@ fn main() {
         migpad_editor::init(cx);
         commands::init(&modules::all(), cx);
         commands::update_menus(None, cx);
-        cx.on_window_closed(|cx, _| {
+        cx.on_window_closed(|cx, closed| {
+            session::window_closed(closed, cx);
             // On macOS MigPad stays open without windows, as applications there do.
             if cx.windows().is_empty() && !cfg!(target_os = "macos") {
                 cx.quit();
@@ -55,14 +57,21 @@ fn main() {
             }
         })
         .detach();
-        // Edits of the last moment reach the disk before the program is gone.
+        // Quitting asks nothing: edits of the last moment reach the disk, and the session is
+        // written for the next start to bring everything back.
         cx.on_app_quit(|cx| {
             let documents = windows::open_documents(cx);
             journals::sync_now(&documents, cx);
+            session::finish(cx);
             async {}
         })
         .detach();
-        match windows::open_window(&paths, cx).or_else(|| windows::open_window(&[], cx)) {
+        // The windows of the last time come back, with the files of the command line; or a window
+        // opens for these files, or an untitled document.
+        let window = session::restore(&paths, cx)
+            .or_else(|| windows::open_window(&paths, cx))
+            .or_else(|| windows::open_window(&[], cx));
+        match window {
             Some(window) => debug_input::play(window, cx),
             // The reason is told above; without a window there is nothing to do.
             None => cx.quit(),

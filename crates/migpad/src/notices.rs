@@ -1,5 +1,5 @@
 //! Notifications over the text of a tab: what went wrong opening or saving a file, bytes that
-//! could not be read in its encoding, a journal that stopped.
+//! could not be read in its encoding, a journal that stopped, a file changed by another program.
 
 use std::io;
 use std::path::Path;
@@ -35,6 +35,8 @@ pub enum Topic {
     Save,
     /// The journal of the document.
     Journal,
+    /// The file on disk, changed by another program.
+    Disk,
 }
 
 /// What a button of a notification does.
@@ -48,6 +50,10 @@ pub enum NoticeAction {
     SaveReplacing,
     /// Saves under another name.
     SaveAs,
+    /// Opens the file as it is on disk; the text of the document goes among the closed tabs.
+    LoadFromDisk,
+    /// Keeps the text of the document over the file changed on disk.
+    KeepMine,
 }
 
 impl NoticeAction {
@@ -57,6 +63,8 @@ impl NoticeAction {
             NoticeAction::ShowFirst(_) => Key::NoticeShowFirst,
             NoticeAction::SaveReplacing => Key::NoticeSaveReplacing,
             NoticeAction::SaveAs => Key::NoticeSaveAs,
+            NoticeAction::LoadFromDisk => Key::NoticeLoadFromDisk,
+            NoticeAction::KeepMine => Key::NoticeKeepMine,
         })
     }
 }
@@ -138,6 +146,29 @@ impl Notice {
 pub fn journal_failed(file: &str, error: &io::Error) -> Notice {
     let message = fill(Key::NoticeJournalFailed, &[("file", file), ("reason", &write_reason(error))]);
     Notice { topic: Some(Topic::Journal), ..Notice::new(Severity::Warning, message) }
+}
+
+/// The file `file` was changed by another program while MigPad was closed, and the document has
+/// changes of its own: they are shown, and the file on disk is a choice away.
+pub fn changed_while_closed(file: &str) -> Notice {
+    Notice {
+        severity: Severity::Warning,
+        message: fill(Key::NoticeChangedWhileClosed, &[("file", file)]),
+        topic: Some(Topic::Disk),
+        actions: vec![NoticeAction::LoadFromDisk, NoticeAction::KeepMine],
+    }
+}
+
+/// The large file `file` was changed while MigPad was closed, and its journal has no copy of it
+/// for the changes to go on: it opens as it is, and the changes are set aside.
+pub fn changes_set_aside(file: &str) -> Notice {
+    let message = fill(Key::NoticeChangesSetAside, &[("file", file)]);
+    Notice { topic: Some(Topic::Disk), ..Notice::new(Severity::Warning, message) }
+}
+
+/// The changes of `file` could not be recovered from its journal, which is set aside.
+pub fn recover_failed(file: &str, reason: &str) -> Notice {
+    Notice::new(Severity::Error, fill(Key::NoticeRecoverFailed, &[("file", file), ("reason", reason)]))
 }
 
 /// Why a file could not be written, told by the kind of the error: the system's own words only

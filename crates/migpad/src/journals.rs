@@ -30,6 +30,11 @@ pub fn init(cx: &mut App) {
     cx.set_global(Data(data));
 }
 
+/// The folder of the data, if there is one.
+pub fn data(cx: &App) -> Option<DataDir> {
+    cx.try_global::<Data>()?.0.clone()
+}
+
 /// The folder of the journals.
 pub fn dir(cx: &App) -> Option<PathBuf> {
     cx.try_global::<Data>()?.0.as_ref().map(DataDir::journals)

@@ -12,6 +12,8 @@ use gpui::{
 use migpad_core::document::{Document, Fingerprint, Format};
 use migpad_core::encoding::Encoding;
 use migpad_core::history::Selection;
+use migpad_core::state::TabState;
+use migpad_core::state::session::{Rect, WindowMode, WindowState};
 use migpad_core::text::TextStore;
 use migpad_editor::EditorView;
 use migpad_ui::notification::NotificationBar;
@@ -22,10 +24,11 @@ use crate::journals;
 use crate::keys;
 use crate::modules::file::NewTab;
 use crate::notices::{self, Notice, NoticeAction, Topic};
+use crate::session;
 use crate::status::{self, COUNT_STEP, Loading, SelectionCount, count_chars};
 use crate::strings::{Key, fill, tr};
 use crate::tabs::Tabs;
-use crate::windows::{self, Closed, ClosedTab, ForTab, Opening};
+use crate::windows::{self, Closed, ClosedTab, ForTab, Opening, Reopening};
 
 /// The dialog of the system that opens files: several at once.
 pub fn open_options() -> PathPromptOptions {
@@ -89,6 +92,8 @@ pub struct Workspace {
     /// Whether a question is open over the window: one at a time — a second one would wait behind
     /// it on macOS, and take its place on Linux.
     asking: bool,
+    /// Where the window is, for the session: its bounds, how it shows, and its screen.
+    place: (Rect, WindowMode, Option<String>),
     _subscriptions: Vec<Subscription>,
 }
 
@@ -108,6 +113,7 @@ impl Workspace {
         let activation = cx.observe_window_activation(window, |workspace, window, cx| {
             if window.is_window_active() {
                 update_menus(Some(workspace), cx);
+                session::activated(workspace.window_id, cx);
             } else {
                 for tab in workspace.tabs.iter() {
                     journals::sync(&tab.document, cx);
@@ -116,6 +122,11 @@ impl Workspace {
         });
         // Colors follow the appearance of the system, unless a theme is chosen.
         let appearance = migpad_ui::theme::follow_system(window, cx);
+        // The session knows where the window is.
+        let moved = cx.observe_window_bounds(window, |workspace, window, cx| {
+            workspace.place = session::place(window, cx);
+            workspace.record_session(cx);
+        });
         let window_id = window.window_handle().window_id();
         let untitled = Self::untitled_for(&first.document, [], window_id, cx);
         let tab = Tab::new(first.document, untitled, first.loading, window, cx);
@@ -145,9 +156,10 @@ impl Workspace {
             next_notice: 0,
             dragged_files: None,
             asking: false,
-            _subscriptions: vec![activation, appearance],
+            place: session::place(window, cx),
+            _subscriptions: vec![activation, appearance, moved],
         };
-        workspace.settle(0, first.selection, window, cx);
+        workspace.settle(0, first.selection, first.notice, window, cx);
         workspace.update_title(window, cx);
         workspace
     }
@@ -211,13 +223,23 @@ impl Workspace {
         let numbers: Vec<u32> = self.untitled_numbers().collect();
         let untitled = Self::untitled_for(&tab.document, numbers, self.window_id, cx);
         let index = self.tabs.push(Tab::new(tab.document, untitled, tab.loading, window, cx));
-        self.settle(index, tab.selection, window, cx);
+        self.settle(index, tab.selection, tab.notice, window, cx);
         self.activate(index, window, cx);
     }
 
     /// Puts a new tab in order: the selection it comes with, at once or once its file has loaded,
-    /// and a warning of bytes lost in reading.
-    fn settle(&mut self, index: usize, selection: Option<Selection>, window: &mut Window, cx: &mut Context<Self>) {
+    /// what it tells over its text, and a warning of bytes lost in reading.
+    fn settle(
+        &mut self,
+        index: usize,
+        selection: Option<Selection>,
+        notice: Option<Notice>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(notice) = notice {
+            self.notify_tab(index, notice, cx);
+        }
         if let Some(selection) = selection
             && let Some(tab) = self.tabs.get_mut(index)
         {
@@ -302,6 +324,8 @@ impl Workspace {
                 self.save(index, None, true, window, cx).detach();
             }
             NoticeAction::SaveAs => self.save_as(index, window, cx).detach(),
+            NoticeAction::LoadFromDisk => self.load_from_disk(index, window, cx),
+            NoticeAction::KeepMine => self.keep_mine(index, cx),
         }
     }
 
@@ -452,7 +476,7 @@ impl Workspace {
     /// A new tab with an untitled document.
     pub fn new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let document = journals::document(Document::new(), cx);
-        self.add_tab(ForTab { document, loading: None, selection: None }, window, cx);
+        self.add_tab(ForTab::new(document, None, None), window, cx);
     }
 
     /// Opens files into tabs: a file open in a window already comes forward there.
@@ -471,9 +495,7 @@ impl Workspace {
                 continue;
             }
             match windows::open_document(path, cx) {
-                Opening::Document(document, loading) => {
-                    self.add_tab(ForTab { document, loading, selection: None }, window, cx)
-                }
+                Opening::Document(document, loading) => self.add_tab(ForTab::new(document, loading, None), window, cx),
                 Opening::Failed(notice) => self.notify(notice, cx),
             }
         }
@@ -636,6 +658,13 @@ impl Workspace {
     /// Closes the window; its tabs go among the closed ones. Changes to save are asked about
     /// first, in one question for all the documents that have them ([ADR 0020]).
     pub fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The last window on Windows and Linux: closing it is quitting, which asks nothing and
+        // keeps the window for the next start, as its button does.
+        if !cfg!(target_os = "macos") && cx.windows().len() == 1 {
+            session::finish(cx);
+            window.remove_window();
+            return;
+        }
         let changed: Vec<(EntityId, String)> = self
             .tabs
             .iter()
@@ -732,32 +761,84 @@ impl Workspace {
                 return;
             }
         }
-        let selection = Some(closed.selection);
-        let tab = match (closed.document, closed.path) {
-            (Some(document), _) => ForTab { document, loading: None, selection },
-            (None, Some(path)) => match windows::open_document(&path, cx) {
-                Opening::Document(document, loading) => ForTab { document, loading, selection },
-                Opening::Failed(notice) => return self.notify(notice, cx),
-            },
-            (None, None) => return,
-        };
-        self.add_tab(tab, window, cx);
+        match windows::reopening(closed, cx) {
+            Reopening::Tab(tab) => self.add_tab(tab, window, cx),
+            Reopening::Failed(notice) => self.notify(notice, cx),
+            Reopening::Nothing => {}
+        }
     }
 
     /// Opens a closed tab whose file is open in the tab at `index`.
     fn reopen_over(&mut self, index: usize, closed: ClosedTab, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(document) = closed.document else { return self.activate(index, window, cx) };
-        let tab = ForTab { document, loading: None, selection: Some(closed.selection) };
+        if closed.document.is_none() && closed.journal.is_none() {
+            return self.activate(index, window, cx);
+        }
+        let tab = match windows::reopening(closed, cx) {
+            Reopening::Tab(tab) => tab,
+            Reopening::Failed(notice) => return self.notify_tab(index, notice, cx),
+            Reopening::Nothing => return self.activate(index, window, cx),
+        };
         let open_has_changes = self.tabs.get(index).is_some_and(|tab| tab.document.read(cx).is_modified());
         if open_has_changes {
             return self.add_tab(tab, window, cx);
         }
-        let replaced = Tab::new(tab.document, None, None, window, cx);
+        let replaced = Tab::new(tab.document, None, tab.loading, window, cx);
         // The document replaced had no changes: it goes with its journal.
         let gone = self.tabs.replace(index, replaced);
         gone.document.update(cx, |doc, _| doc.remove_journal());
-        self.settle(index, tab.selection, window, cx);
+        self.settle(index, tab.selection, tab.notice, window, cx);
         self.activate(index, window, cx);
+    }
+
+    /// The file of the tab at `index`, changed by another program, opens as it is on disk; the
+    /// text of the tab goes among the closed tabs with its changes: it is not lost.
+    fn load_from_disk(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(index) else { return };
+        let Some(path) = tab.document.read(cx).path.clone() else { return };
+        let selection = tab.pending_selection.unwrap_or_else(|| tab.editor.read(cx).selection());
+        let mine =
+            ClosedTab { document: Some(tab.document.clone()), journal: None, path: Some(path.clone()), selection };
+        match windows::open_document(&path, cx) {
+            Opening::Document(document, loading) => {
+                let replaced = Tab::new(document, None, loading, window, cx);
+                self.tabs.replace(index, replaced);
+                windows::remember_tab(mine, cx);
+                self.settle(index, Some(selection), None, window, cx);
+                self.activate(index, window, cx);
+            }
+            Opening::Failed(notice) => self.notify_tab(index, notice, cx),
+        }
+    }
+
+    /// The text of the tab at `index` stays over its file changed by another program: saving
+    /// writes it over that.
+    fn keep_mine(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(index) else { return };
+        tab.document.update(cx, |doc, cx| {
+            let disk = doc.path.as_deref().and_then(|path| Fingerprint::of_path(path).ok());
+            doc.keep_over_file(disk);
+            cx.notify();
+        });
+    }
+
+    /// The window as the session keeps it.
+    fn window_state(&self, cx: &App) -> WindowState {
+        let tabs = self
+            .tabs
+            .iter()
+            .map(|tab| {
+                let doc = tab.document.read(cx);
+                let selection = tab.pending_selection.unwrap_or_else(|| tab.editor.read(cx).selection());
+                TabState { document: Some(doc.id()), path: doc.path.clone(), selection }
+            })
+            .collect();
+        let (bounds, mode, display) = self.place.clone();
+        WindowState { bounds, mode, display, tabs, active: self.tabs.active_index() }
+    }
+
+    /// Tells the session how the window is now.
+    fn record_session(&self, cx: &mut App) {
+        session::record(self.window_id, self.window_state(cx), cx);
     }
 
     /// The name of the document of a tab: its file, or "Untitled 2".
@@ -1037,6 +1118,7 @@ impl Tab {
         let doc = self.document.read(cx);
         ClosedTab {
             document: self.has_changes(cx).then(|| self.document.clone()),
+            journal: None,
             path: doc.path.clone(),
             selection: self.pending_selection.unwrap_or_else(|| self.editor.read(cx).selection()),
         }
@@ -1051,6 +1133,8 @@ impl Focusable for Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Whatever changed in the window — tabs, documents, selections — the session hears of it.
+        self.record_session(cx);
         let theme = theme(cx);
         if self.reveal_tab {
             // The bar scrolls once it knows its width: in the first frame it does not.

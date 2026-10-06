@@ -138,6 +138,18 @@ impl Document {
         self.journal.snapshot_due = !self.large;
     }
 
+    /// Keeps the text over a file that another program has changed: the file is `disk` now, and
+    /// the text has changes to save, whatever it had before. The journal starts anew from the
+    /// text, so that a recovery does not take the file for changed again — but that of a large
+    /// file, which would have to copy it.
+    pub fn keep_over_file(&mut self, disk: Option<Fingerprint>) {
+        self.disk = disk;
+        self.saved_at = None;
+        if self.journal.file.is_some() && !self.large {
+            self.rewrite_journal(true);
+        }
+    }
+
     /// Changes the format without saving, like converting the line endings.
     pub fn set_format(&mut self, format: Format) {
         self.format = format;
@@ -534,6 +546,22 @@ mod tests {
         assert!(file_changed && !back.can_undo() && !back.is_modified());
         assert_eq!((text(&back), back.id()), (b"changed elsewhere".to_vec(), doc.id()));
         assert!(!journal.exists(), "the old journal no longer applies");
+    }
+
+    #[test]
+    fn a_text_kept_over_a_changed_file_is_not_taken_for_changed_again() {
+        let (file, dir) = (TempFile::new("journaling-keep", b"text"), TempDir::new("journaling-keep"));
+        let mut doc = journaled(&file, &dir);
+        insert(&mut doc, 4, "!", EditKind::Other);
+        std::fs::write(&file.0, b"changed elsewhere").unwrap();
+        doc.keep_over_file(Fingerprint::of_path(&file.0).ok());
+        assert!(doc.is_modified());
+        let (mut back, file_changed) = restored(recovered(&doc));
+        assert!(!file_changed);
+        assert_eq!(text(&back), b"text!");
+        // No state of the history is the file any more.
+        back.undo();
+        assert!(back.is_modified());
     }
 
     #[test]
