@@ -1,7 +1,9 @@
 //! What the status bar shows: where the caret is, how long the selection is, how many lines the
 //! document has, its encoding and line breaks, and how much of a large file has loaded.
 
+use std::cell::{Cell, RefCell};
 use std::ops::Range;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -11,17 +13,22 @@ use migpad_core::line_ending::LineEnding;
 use migpad_core::text::TextStore;
 use migpad_ui::StatusBar;
 
+use crate::notices::Notice;
 use crate::strings::{Key, fill, number, percent};
 
 /// A selection of up to this many bytes is counted at once; a longer one in parts of this size, a
 /// part a frame, so that counting gigabytes does not stop the window.
 pub const COUNT_STEP: usize = 4 << 20;
 
-/// How far a large file has loaded in the background: bytes read, of how many.
+/// How far a large file has loaded in the background: bytes read, of how many; whether the
+/// loading has stopped, and why, if it stopped short.
 #[derive(Clone, Debug)]
 pub struct Loading {
     pub read: Arc<AtomicU64>,
     pub total: u64,
+    pub stopped: Rc<Cell<bool>>,
+    /// What to tell over the text of a load that stopped short: taken once it is told.
+    pub failure: Rc<RefCell<Option<Notice>>>,
 }
 
 /// The characters of a selection, counted or being counted.
@@ -61,25 +68,25 @@ pub fn count_chars(text: &Text, range: Range<usize>) -> usize {
     bytes.utf8_chunks().map(|chunk| chunk.valid().chars().count() + usize::from(!chunk.invalid().is_empty())).sum()
 }
 
-/// The fields of the status bar for a document: the caret at `(line, column)`, both from zero,
-/// the characters of the selection — `None` while they are counted — and how far the file
-/// has loaded, if it is loading.
+/// The fields of the status bar for a document: the caret at `(line, column)`, both from zero —
+/// the column `None` while it is found — the characters of the selection, `None` while they are
+/// counted, and how far the file has loaded, if it is loading.
 pub fn status_bar(
     doc: &Document,
-    caret: (usize, usize),
+    caret: (usize, Option<usize>),
     selection: Option<Option<usize>>,
     loading: Option<&Loading>,
 ) -> StatusBar {
     let (line, column) = caret;
-    let position =
-        fill(Key::StatusPosition, &[("line", &number(line as u64 + 1)), ("column", &number(column as u64 + 1))]);
+    let column = column.map_or_else(|| "…".to_owned(), |column| number(column as u64 + 1));
+    let position = fill(Key::StatusPosition, &[("line", &number(line as u64 + 1)), ("column", &column)]);
     let mut bar = StatusBar::new().left(position);
     if let Some(chars) = selection {
         let count = chars.map_or_else(|| "…".to_owned(), |chars| number(chars as u64));
         bar = bar.left(fill(Key::StatusSelection, &[("count", &count)]));
     }
     let lines = match loading {
-        Some(loading) if doc.is_preview() => {
+        Some(loading) if doc.is_preview() && !loading.stopped.get() => {
             let read = loading.read.load(Ordering::Relaxed).min(loading.total);
             let share = (read * 100).checked_div(loading.total).unwrap_or(100);
             fill(Key::StatusLoading, &[("percent", &percent(share))])
@@ -148,11 +155,11 @@ mod tests {
         doc.format = Format { encoding: Encoding::UTF_8, bom: true, line_ending: LineEnding::CrLf };
         let fields = |bar: StatusBar| bar.fields().map(str::to_owned).collect::<Vec<_>>();
         set_language(Language::English);
-        let english = fields(status_bar(&doc, (1233, 4), Some(Some(15000)), None));
+        let english = fields(status_bar(&doc, (1233, Some(4)), Some(Some(15000)), None));
         set_language(Language::Russian);
-        let russian = fields(status_bar(&doc, (1233, 4), Some(None), None));
+        let russian = fields(status_bar(&doc, (1233, None), Some(None), None));
         set_language(Language::English);
         assert_eq!(english, ["Ln 1,234, Col 5", "Selected: 15,000", "Lines: 1", "UTF-8 with BOM", "CRLF"]);
-        assert_eq!(russian, ["Стр 1\u{202f}234, стлб 5", "Выделено: …", "Строк: 1", "UTF-8 с BOM", "CRLF"]);
+        assert_eq!(russian, ["Стр 1\u{202f}234, стлб …", "Выделено: …", "Строк: 1", "UTF-8 с BOM", "CRLF"]);
     }
 }

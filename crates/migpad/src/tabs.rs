@@ -45,6 +45,11 @@ impl<T> Tabs<T> {
         self.items.iter().position(matches)
     }
 
+    /// Puts `item` in place of the tab at `index`; returns the tab it replaced.
+    pub fn replace(&mut self, index: usize, item: T) -> T {
+        std::mem::replace(&mut self.items[index], item)
+    }
+
     /// Adds a tab at the end and makes it active; returns its index.
     pub fn push(&mut self, item: T) -> usize {
         self.items.push(item);
@@ -106,7 +111,8 @@ impl<T> Tabs<T> {
     }
 }
 
-/// Tabs closed lately, the last one first; the oldest are forgotten past [`ClosedTabs::LIMIT`].
+/// Tabs closed lately, the last one first; past [`ClosedTabs::LIMIT`] the oldest are forgotten,
+/// except those that are precious, which stay however many there are.
 #[derive(Debug)]
 pub struct ClosedTabs<T> {
     items: VecDeque<T>,
@@ -121,20 +127,19 @@ impl<T> Default for ClosedTabs<T> {
 impl<T> ClosedTabs<T> {
     pub const LIMIT: usize = 20;
 
-    pub fn push(&mut self, item: T) {
-        if self.items.len() == Self::LIMIT {
-            self.items.pop_back();
-        }
+    /// Adds `item`, the last closed; `precious` tells the items that are never forgotten.
+    pub fn push(&mut self, item: T, precious: impl Fn(&T) -> bool) {
         self.items.push_front(item);
+        if self.items.len() > Self::LIMIT
+            && let Some(oldest) = self.items.iter().rposition(|item| !precious(item))
+        {
+            self.items.remove(oldest);
+        }
     }
 
     /// The tab closed last.
     pub fn pop(&mut self) -> Option<T> {
         self.items.pop_front()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.items.is_empty()
     }
 }
 
@@ -241,14 +246,28 @@ mod tests {
     #[test]
     fn closed_tabs_come_back_last_first() {
         let mut closed = ClosedTabs::default();
-        assert!(closed.is_empty());
+        assert_eq!(closed.pop(), None);
         for i in 0..ClosedTabs::<usize>::LIMIT + 5 {
-            closed.push(i);
+            closed.push(i, |_| false);
         }
         assert_eq!(closed.pop(), Some(ClosedTabs::<usize>::LIMIT + 4));
         let rest: Vec<usize> = std::iter::from_fn(|| closed.pop()).collect();
         assert_eq!(rest.len(), ClosedTabs::<usize>::LIMIT - 1);
         assert_eq!(rest.last(), Some(&5), "the oldest are forgotten");
+    }
+
+    #[test]
+    fn precious_closed_tabs_are_never_forgotten() {
+        let mut closed = ClosedTabs::default();
+        let precious = |i: &usize| i.is_multiple_of(10);
+        for i in 0..ClosedTabs::<usize>::LIMIT * 3 {
+            closed.push(i, precious);
+        }
+        let kept: Vec<usize> = std::iter::from_fn(|| closed.pop()).collect();
+        // The last ones closed, and every precious one however old.
+        assert!([0, 10, 20, 30, 40, 50].iter().all(|i| kept.contains(i)), "{kept:?}");
+        assert_eq!(kept.len(), ClosedTabs::<usize>::LIMIT);
+        assert_eq!(kept[0], ClosedTabs::<usize>::LIMIT * 3 - 1);
     }
 
     #[test]

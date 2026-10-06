@@ -25,8 +25,6 @@ impl Module for EditModule {
             .os_action(OsAction::Redo)
             .enabled(|workspace, cx| workspace.document().read(cx).can_redo());
         registry.add(redo, menu(0));
-        registry.add_to_toolbar("edit.undo", 2);
-        registry.add_to_toolbar("edit.redo", 2);
         registry.add(Command::new("edit.cut", Key::EditCut, Cut).os_action(OsAction::Cut), menu(1));
         registry.add(Command::new("edit.copy", Key::EditCopy, Copy).os_action(OsAction::Copy), menu(1));
         registry.add(Command::new("edit.paste", Key::EditPaste, Paste).os_action(OsAction::Paste), menu(1));

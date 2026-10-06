@@ -43,12 +43,20 @@ fn main() {
             if cx.windows().is_empty() && !cfg!(target_os = "macos") {
                 cx.quit();
             }
-            commands::update_menus(None, cx);
+            // The menus show the check marks of the active window, which may not have changed.
+            let active = cx.active_window().and_then(|window| window.downcast::<workspace::Workspace>());
+            let updated = active.is_some_and(|active| {
+                active.update(cx, |workspace, _, cx| commands::update_menus(Some(workspace), cx)).is_ok()
+            });
+            if !updated {
+                commands::update_menus(None, cx);
+            }
         })
         .detach();
-        let window = windows::open_window(&paths, cx).or_else(|| windows::open_window(&[], cx));
-        if let Some(window) = window {
-            debug_input::play(window, cx);
+        match windows::open_window(&paths, cx).or_else(|| windows::open_window(&[], cx)) {
+            Some(window) => debug_input::play(window, cx),
+            // The reason is told above; without a window there is nothing to do.
+            None => cx.quit(),
         }
         cx.activate(true);
     });

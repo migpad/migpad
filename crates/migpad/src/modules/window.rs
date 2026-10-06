@@ -78,8 +78,9 @@ impl Module for WindowModule {
         if cfg!(target_os = "macos") {
             registry.add_window_list(MenuId::Window, 2);
         }
-        // Alt pressed and released alone, or F10, brings the keyboard to the menu bar MigPad draws.
-        let menu_keys: &[&str] = if own_menu_bar() { &["alt", "f10"] } else { &[] };
+        // F10 brings the keyboard to the menu bar MigPad draws, as Alt pressed and released alone
+        // does — the menu bar watches for that itself.
+        let menu_keys: &[&str] = if own_menu_bar() { &["f10"] } else { &[] };
         registry.add(Command::new("window.menu_bar", Key::WindowMenu, ToggleMenuBar).keys(menu_keys), None);
 
         registry.on_window_action(|_, _: &Minimize, window, _| window.minimize_window());

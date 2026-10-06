@@ -11,7 +11,6 @@ use gpui::{
     Menu, MenuItem, OsAction, SharedString, SystemMenuType, Window, WindowId,
 };
 
-use migpad_ui::Button;
 use migpad_ui::menu_bar::{ItemSpec, MenuSpec};
 
 use crate::keys;
@@ -40,8 +39,8 @@ pub struct Command {
     pub keys: &'static [&'static str],
     /// Whether a toggle is on, for its check mark in the menus.
     pub checked: Option<fn(&Workspace, &App) -> bool>,
-    /// Whether the command has something to do now, for the toolbar and the menus MigPad draws:
-    /// undo without steps to undo is gray. Without it, a command is available when something
+    /// Whether the command has something to do now, for the menus MigPad draws: undo without steps
+    /// to undo is gray. Without it, a command is available when something
     /// handles its action.
     pub enabled: Option<fn(&Workspace, &App) -> bool>,
 }
@@ -151,8 +150,6 @@ type AppHandler = Box<dyn FnOnce(&mut App)>;
 pub struct Registry {
     commands: Vec<Command>,
     placements: Vec<Placement>,
-    /// The buttons of the toolbar: commands, by groups.
-    toolbar: Vec<(u8, &'static str)>,
     /// The actions the application handles whatever window they come from.
     app_actions: HashSet<TypeId>,
     window_handlers: Vec<WindowHandler>,
@@ -173,12 +170,6 @@ impl Registry {
     /// Adds the Services menu of macOS to a group of a menu.
     pub fn add_services(&mut self, menu: MenuId, group: u8) {
         self.placements.push(Placement { menu, group, entry: Entry::Services });
-    }
-
-    /// Adds a button for the command `id` to a group of the toolbar: groups go in the order of their
-    /// numbers, buttons within a group in the order they were added.
-    pub fn add_to_toolbar(&mut self, id: &'static str, group: u8) {
-        self.toolbar.push((group, id));
     }
 
     fn command(&self, id: &str) -> &Command {
@@ -205,30 +196,6 @@ impl Registry {
                 |focus| window.is_action_available_in(action, focus),
             );
         handled && command.enabled.is_none_or(|enabled| enabled(workspace, cx))
-    }
-
-    /// The buttons of the toolbar of `window`, by groups.
-    pub fn toolbar(&self, workspace: &Workspace, window: &Window, cx: &App) -> Vec<Vec<Button>> {
-        let focus = workspace.editor().focus_handle(cx);
-        let mut groups: Vec<u8> = self.toolbar.iter().map(|(group, _)| *group).collect();
-        groups.sort_unstable();
-        groups.dedup();
-        groups
-            .into_iter()
-            .map(|group| {
-                let ids = self.toolbar.iter().filter(|(of, _)| *of == group).map(|(_, id)| *id);
-                ids.map(|id| {
-                    let command = self.command(id);
-                    let action = command.action.boxed_clone();
-                    let keys = keys::for_action(action.as_ref(), &focus, window).map(SharedString::from);
-                    Button::new(SharedString::new_static(id), tr(command.label))
-                        .disabled(!self.is_enabled(command, workspace, None, window, cx))
-                        .tooltip(tr(command.label), keys)
-                        .on_click(move |_, window, cx| window.dispatch_action(action.boxed_clone(), cx))
-                })
-                .collect()
-            })
-            .collect()
     }
 
     /// The menus of the bar MigPad draws, for the window of `workspace`: those of macOS, without the
@@ -259,7 +226,7 @@ impl Registry {
                     label: tr(command.label).into(),
                     mnemonic: mnemonic(command.label),
                     keys: keys::for_action(command.action.as_ref(), &focus, window).map(SharedString::from),
-                    checked: command.checked.is_some_and(|checked| checked(workspace, cx)),
+                    checked: command.checked.map(|checked| checked(workspace, cx)),
                     enabled: self.is_enabled(command, workspace, target, window, cx),
                     action: command.action.boxed_clone(),
                 });
@@ -480,7 +447,6 @@ mod tests {
             })
             .collect();
         assert!(items.iter().all(|item| ids.contains(item)));
-        assert!(registry.toolbar.iter().all(|(_, button)| ids.contains(button)));
         items.sort_unstable();
         items.dedup();
         assert_eq!(items.len(), registry.placements.iter().filter(|p| matches!(p.entry, Entry::Command(_))).count());

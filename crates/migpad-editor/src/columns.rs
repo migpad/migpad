@@ -63,6 +63,20 @@ impl Columns {
         }
     }
 
+    /// The column of byte `pos`, as [`Columns::column_of`] finds it, if that takes walking no more
+    /// than `budget` bytes of the line past the checkpoints known; otherwise `None`, the line walked
+    /// that much further for the next call.
+    pub fn column_within<S: TextStore>(
+        &self,
+        text: &S,
+        range: &Range<usize>,
+        pos: usize,
+        budget: usize,
+    ) -> Option<usize> {
+        let pos = pos.clamp(range.start, range.end);
+        self.extend(text, range, &|byte, _| byte <= pos, budget).then(|| self.column_of(text, range, pos))
+    }
+
     /// The last checkpoint for which `before` holds, finding further checkpoints while the last
     /// one known does.
     fn checkpoint<S: TextStore>(
@@ -71,21 +85,41 @@ impl Columns {
         range: &Range<usize>,
         before: impl Fn(usize, usize) -> bool,
     ) -> (usize, usize) {
+        self.extend(text, range, &before, usize::MAX);
+        let lines = self.lines.borrow();
+        let points = &lines[&range.start];
+        let i = points.partition_point(|&(byte, column)| before(byte, column));
+        points[i.saturating_sub(1)]
+    }
+
+    /// Finds checkpoints while the last one known satisfies `before`, walking at most `budget`
+    /// bytes; returns whether it got that far.
+    fn extend<S: TextStore>(
+        &self,
+        text: &S,
+        range: &Range<usize>,
+        before: &impl Fn(usize, usize) -> bool,
+        budget: usize,
+    ) -> bool {
         let mut lines = self.lines.borrow_mut();
         let points = lines.entry(range.start).or_insert_with(|| vec![(range.start, 0)]);
+        let mut walked = 0;
         while let Some(&(byte, column)) = points.last()
             && before(byte, column)
             && byte < range.end
         {
+            if walked >= budget {
+                return false;
+            }
             let next = text.floor_char_boundary((byte + self.step).min(range.end), byte);
             if next <= byte {
                 break;
             }
             let (_, next_column) = walk(&text.to_vec(byte..next), column, self.tab_width, |_, _, _, _| true);
             points.push((next, next_column));
+            walked += next - byte;
         }
-        let i = points.partition_point(|&(byte, column)| before(byte, column));
-        points[i.saturating_sub(1)]
+        true
     }
 }
 
@@ -152,6 +186,25 @@ mod tests {
         }
         let (end_byte, end_column) = *plain.last().unwrap();
         assert_eq!(columns.char_at(&text, &range, end_column + 5), (end_byte, end_column, end_column));
+    }
+
+    #[test]
+    fn a_far_column_is_found_a_part_at_a_time() {
+        let line = "ab\tж".repeat(100);
+        let text = GapBuffer::from_vec(line.clone().into_bytes());
+        let range = 0..line.len();
+        let columns = Columns::with_step(4, 9);
+        let mut calls = 1;
+        let found = loop {
+            match columns.column_within(&text, &range, line.len(), 50) {
+                Some(column) => break column,
+                None => calls += 1,
+            }
+        };
+        assert!(calls > 1, "a part at a time");
+        assert_eq!(found, Columns::with_step(4, 9).column_of(&text, &range, line.len()));
+        // Near the start, at once.
+        assert_eq!(columns.column_within(&text, &range, 4, 0), Some(4));
     }
 
     #[test]

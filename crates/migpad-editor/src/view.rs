@@ -41,6 +41,8 @@ const CARET_WIDTH: f32 = 2.0;
 const BLINK: Duration = Duration::from_millis(500);
 /// Lines do not wrap in a view narrower than this many cells.
 const MIN_WRAP_CELLS: usize = 8;
+/// Bytes of a long line walked at a time to find the column of the caret.
+pub const COLUMN_STEP: usize = 4 << 20;
 
 /// The view of a document in a window, or the one line of an input field.
 pub struct EditorView {
@@ -181,14 +183,16 @@ impl EditorView {
     }
 
     /// The line of the caret and its column on screen, both from zero: a tab reaches to its stop,
-    /// any other character takes one column.
-    pub fn caret_position(&self, cx: &App) -> (usize, usize) {
+    /// any other character takes one column. The column of a caret far into a long line takes
+    /// walking the line up to it: each call walks it [`COLUMN_STEP`] further, and the column is
+    /// `None` until it is found.
+    pub fn caret_position(&self, cx: &App) -> (usize, Option<usize>) {
         let doc = self.document.read(cx);
         let (text, lines) = (doc.text(), doc.lines());
         let head = self.selection.head.min(text.len());
         let line = lines.line_of(head);
         let (range, _) = lines.line_range(text, line);
-        (line, self.columns.column_of(text, &range, head))
+        (line, self.columns.column_within(text, &range, head, COLUMN_STEP))
     }
 
     /// The text, invalid UTF-8 as U+FFFD: what an input field holds.
@@ -290,6 +294,9 @@ impl EditorView {
     /// Without focus, what is being composed stays as it is, and typing after the focus is back
     /// starts a new undo step.
     fn blurred(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A selection being dragged ends: the view of a tab switched away from no longer sees the
+        // mouse.
+        self.mouse_up();
         self.marked = None;
         self.seal_undo_step(cx);
         self.restart_blink(window, cx);

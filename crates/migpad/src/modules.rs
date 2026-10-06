@@ -2,7 +2,7 @@
 
 mod app;
 mod edit;
-mod file;
+pub mod file;
 mod view;
 mod window;
 

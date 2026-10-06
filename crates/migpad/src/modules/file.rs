@@ -19,7 +19,6 @@ impl Module for FileModule {
         let menu = |group| Some((MenuId::File, group));
         let new = Command::new("file.new", Key::FileNew, NewTab).keys(by_os(&["cmd-n"], &["ctrl-n"], &["ctrl-n"]));
         registry.add(new, menu(0));
-        registry.add_to_toolbar("file.new", 0);
         let new_window = Command::new("file.new_window", Key::FileNewWindow, NewWindow).keys(by_os(
             &["cmd-shift-n"],
             &["ctrl-shift-n"],
@@ -53,21 +52,11 @@ impl Module for FileModule {
         });
         registry.on_window_action(|workspace, _: &CloseWindow, window, cx| workspace.close_window(window, cx));
         // Without a window — on macOS, where MigPad stays open without them — and for a new window
-        // from any of them.
-        registry.on_app_action(|_: &NewTab, cx| open_window(cx));
-        registry.on_app_action(|_: &NewWindow, cx| open_window(cx));
-        registry.on_app_action(|_: &ReopenClosed, cx| {
-            if !windows::has_closed(cx) {
-                return;
-            }
-            if let Some(window) = windows::open_window(&[], cx) {
-                // The tab comes in place of the untitled one the new window has.
-                let _ = window.update(cx, |workspace, window, cx| {
-                    workspace.reopen_closed(window, cx);
-                    workspace.drop_first_tab(window, cx);
-                });
-            }
-        });
+        // from any of them. The window opens once the action is handled: the window it came from
+        // is being updated until then, and its place and tabs cannot be read.
+        registry.on_app_action(|_: &NewTab, cx| cx.defer(open_window));
+        registry.on_app_action(|_: &NewWindow, cx| cx.defer(open_window));
+        registry.on_app_action(|_: &ReopenClosed, cx| cx.defer(windows::reopen_in_new_window));
     }
 }
 

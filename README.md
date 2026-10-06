@@ -9,7 +9,7 @@ A fast cross-platform text editor for macOS, Linux and Windows, inspired by [Ake
 - **Small and fast** — instant startup, low memory use, large files without freezing the interface.
 - **Careful with text** — Unicode and legacy encodings (Windows-1251, KOI8-R, CP866 and more), encoding auto-detection, BOM, LF / CRLF / CR line endings.
 - **Powerful editing** — column selection, find and replace with regular expressions, multi-level undo.
-- **Nothing is lost** — edits are saved continuously and survive closing the editor or a crash, so it never asks "Save changes?".
+- **Nothing is lost** — edits are saved continuously and survive quitting or a crash, so quitting never asks "Save changes?"; closing a tab with unsaved changes asks whether to save them.
 - **Offline** — no telemetry, accounts or online services.
 - **Everything built in** — no plugins: features ship with the editor, and the modular architecture lets new ones be added without reworking the core.
 

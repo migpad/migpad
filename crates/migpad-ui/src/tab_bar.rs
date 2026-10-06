@@ -1,6 +1,8 @@
-//! The bar of tabs over the text: a tab for each document of the window, with its name, the mark
-//! of changes to save and the button that closes it. A press switches to a tab, the middle button
-//! closes it, dragging moves it; when the tabs do not fit, the bar scrolls, the wheel too.
+//! The bar of tabs over the text, always shown, one tab or many: a tab for each document of the
+//! window, with its name, the mark of changes to save and the button that closes it, and after the
+//! last tab a button that opens a new one. A press switches to a tab, the middle button closes it,
+//! dragging moves it; when the tabs do not fit, they scroll, the wheel too, and the button of a new
+//! tab stays at the right edge.
 
 use std::rc::Rc;
 
@@ -32,6 +34,8 @@ pub struct TabBar {
     active: usize,
     scroll: ScrollHandle,
     close_label: SharedString,
+    /// The tooltip of the button of a new tab, and its keys.
+    new_label: (SharedString, Option<SharedString>),
     on_select: Handler<usize>,
     on_close: Handler<usize>,
     on_move: Handler<(usize, usize)>,
@@ -55,6 +59,7 @@ impl TabBar {
             active,
             scroll,
             close_label: SharedString::default(),
+            new_label: (SharedString::default(), None),
             on_select: Rc::new(|_, _, _| {}),
             on_close: Rc::new(|_, _, _| {}),
             on_move: Rc::new(|_, _, _| {}),
@@ -65,6 +70,11 @@ impl TabBar {
     /// The tooltip of the buttons that close tabs.
     pub fn close_label(self, label: impl Into<SharedString>) -> Self {
         TabBar { close_label: label.into(), ..self }
+    }
+
+    /// The tooltip of the button of a new tab, and the keys of the command.
+    pub fn new_label(self, label: impl Into<SharedString>, keys: Option<SharedString>) -> Self {
+        TabBar { new_label: (label.into(), keys), ..self }
     }
 
     pub fn on_select(self, handler: impl Fn(usize, &mut Window, &mut App) + 'static) -> Self {
@@ -80,7 +90,7 @@ impl TabBar {
         TabBar { on_move: Rc::new(handler), ..self }
     }
 
-    /// A double click on the free part of the bar.
+    /// The button of a new tab, or a double click on the free part of the bar.
     pub fn on_new(self, handler: impl Fn((), &mut Window, &mut App) + 'static) -> Self {
         TabBar { on_new: Rc::new(handler), ..self }
     }
@@ -183,7 +193,32 @@ impl RenderOnce for TabBar {
                 )
                 .child(close)
         });
-        let (on_move, on_new) = (self.on_move.clone(), self.on_new.clone());
+        let (on_move, on_new, on_plus) = (self.on_move.clone(), self.on_new.clone(), self.on_new.clone());
+        // A plus of two thin lines, crisp at any scale.
+        let line = || div().absolute().rounded(px(0.75)).bg(rgb(theme.text_muted));
+        let glyph = div()
+            .relative()
+            .size(px(11.))
+            .child(line().left_0().top(px(4.75)).w(px(11.)).h(px(1.5)))
+            .child(line().top_0().left(px(4.75)).w(px(1.5)).h(px(11.)));
+        let plus = div()
+            .id("new-tab")
+            .role(Role::Button)
+            .aria_label(self.new_label.0.clone())
+            .relative()
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .size(px(24.))
+            .mx(px(4.))
+            .my_auto()
+            .rounded(px(4.))
+            .hover(|style| style.bg(rgb(theme.hover)))
+            .active(|style| style.bg(rgb(theme.pressed)))
+            .on_click(move |_, window, cx| on_plus((), window, cx))
+            .tooltip(Tooltip::builder(self.new_label.0, self.new_label.1))
+            .child(glyph);
         div()
             .id("tab-bar")
             .role(Role::TabList)
@@ -193,7 +228,19 @@ impl RenderOnce for TabBar {
             .bg(rgb(theme.bar))
             .border_b_1()
             .border_color(rgb(theme.border))
-            .child(div().id("tabs").flex().h_full().overflow_x_scroll().track_scroll(&self.scroll).children(tabs))
+            // The tabs give way to the button when they do not fit: it stays in sight.
+            .child(
+                div()
+                    .id("tabs")
+                    .flex()
+                    .flex_shrink(1.)
+                    .min_w_0()
+                    .h_full()
+                    .overflow_x_scroll()
+                    .track_scroll(&self.scroll)
+                    .children(tabs),
+            )
+            .child(plus)
             // The free part: a tab dropped here goes to the end, a double click opens a new one.
             .child(
                 div()

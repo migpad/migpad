@@ -10,8 +10,8 @@ use std::rc::Rc;
 
 use gpui::{
     Action, AnyElement, App, Bounds, BoxShadow, Context, FocusHandle, HighlightStyle, KeyDownEvent, Keystroke,
-    MouseButton, MouseDownEvent, Pixels, Render, Role, SharedString, StyledText, Toggled, UnderlineStyle, Window,
-    anchored, canvas, deferred, div, point, prelude::*, px, rgb, rgba,
+    Modifiers, MouseButton, MouseDownEvent, Pixels, Render, Role, SharedString, StyledText, Subscription, Toggled,
+    UnderlineStyle, Window, anchored, canvas, deferred, div, point, prelude::*, px, rgb, rgba,
 };
 
 use crate::theme::theme;
@@ -34,7 +34,8 @@ pub enum ItemSpec {
         mnemonic: Option<usize>,
         /// The keys of the command, shown on the right.
         keys: Option<SharedString>,
-        checked: bool,
+        /// Whether a toggle is on; `None` for an item that is not a toggle.
+        checked: Option<bool>,
         enabled: bool,
         action: Box<dyn Action>,
     },
@@ -182,38 +183,78 @@ type MenusSource = Rc<dyn Fn(Option<&FocusHandle>, &mut Window, &mut App) -> Vec
 
 /// The menu bar of a window.
 pub struct MenuBar {
+    /// The focus of the menus while the keyboard is in them: on an element no press reaches, so
+    /// that presses on the bar do not take the focus from the text.
     focus: FocusHandle,
     nav: Nav,
     /// Whether the keyboard drives the menus now: then the mnemonics are underlined.
     keyboard: bool,
     /// Whether Alt is held: the mnemonics are underlined too.
     alt_held: bool,
+    /// Whether Alt is pressed alone, nothing else since: released so, it brings the keyboard to
+    /// the menus.
+    alt_tap: bool,
     /// The focus before the menus took it, to go back to.
     previous_focus: Option<FocusHandle>,
     menus: MenusSource,
     /// Where the bar is in the window, for clicks on its titles while a menu is open.
     bounds: Rc<Cell<Bounds<Pixels>>>,
+    _activation: Subscription,
 }
 
 impl MenuBar {
-    /// A bar of the menus that `menus` describes each time they are drawn.
+    /// A bar of the menus that `menus` describes each time they are drawn, in `window`.
     pub fn new(
         menus: impl Fn(Option<&FocusHandle>, &mut Window, &mut App) -> Vec<MenuSpec> + 'static,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        // The menus close when the window is no longer active, as the menus of the system do.
+        let activation = cx.observe_window_activation(window, |bar, window, cx| {
+            if !window.is_window_active() {
+                bar.alt_tap = false;
+                if bar.nav.is_active() {
+                    bar.leave(window, cx);
+                }
+            }
+        });
         MenuBar {
             focus: cx.focus_handle(),
             nav: Nav::default(),
             keyboard: false,
             alt_held: false,
+            alt_tap: false,
             previous_focus: None,
             menus: Rc::new(menus),
             bounds: Rc::default(),
+            _activation: activation,
         }
     }
 
     pub fn is_active(&self) -> bool {
         self.nav.is_active()
+    }
+
+    /// The modifiers changed: Alt held shows the mnemonics, and Alt pressed and released alone
+    /// brings the keyboard to the menus or back — not when the window is not active, as after
+    /// switching windows with Alt+Tab.
+    pub fn modifiers_changed(&mut self, modifiers: &Modifiers, window: &mut Window, cx: &mut Context<Self>) {
+        let alone = modifiers.alt && modifiers.number_of_modifiers() == 1 && !modifiers.function;
+        if alone && !self.alt_held {
+            self.alt_tap = true;
+        } else if modifiers.number_of_modifiers() > 0 && !alone {
+            self.alt_tap = false;
+        }
+        let released = self.alt_held && !modifiers.alt;
+        self.set_alt_held(modifiers.alt && !modifiers.control && !modifiers.platform, cx);
+        if released && std::mem::take(&mut self.alt_tap) && window.is_window_active() {
+            self.toggle(window, cx);
+        }
+    }
+
+    /// A key or a press of the mouse while Alt is held: its release is not for the menus.
+    pub fn other_input(&mut self) {
+        self.alt_tap = false;
     }
 
     /// Alt or F10: brings the keyboard to the bar, or takes it back to the window.
@@ -246,7 +287,7 @@ impl MenuBar {
     }
 
     /// Whether Alt is held now: the mnemonics show while it is.
-    pub fn set_alt_held(&mut self, held: bool, cx: &mut Context<Self>) {
+    fn set_alt_held(&mut self, held: bool, cx: &mut Context<Self>) {
         if self.alt_held != held {
             self.alt_held = held;
             cx.notify();
@@ -369,9 +410,11 @@ impl MenuBar {
                 let keys_color = if highlighted && enabled { theme.text } else { theme.text_muted };
                 div()
                     .id(("item", i))
-                    .role(if checked { Role::MenuItemCheckBox } else { Role::MenuItem })
+                    .role(if checked.is_some() { Role::MenuItemCheckBox } else { Role::MenuItem })
                     .aria_label(label.clone())
-                    .when(checked, |item| item.aria_toggled(Toggled::True))
+                    .when_some(checked, |item, on| item.aria_toggled(if on { Toggled::True } else { Toggled::False }))
+                    // Screen readers follow the highlighted item: the focus stays on the menus.
+                    .when(highlighted, |item| item.aria_active_descendant())
                     .flex()
                     .items_center()
                     .h(px(24.))
@@ -391,7 +434,11 @@ impl MenuBar {
                             bar.choose(menu, i, window, cx);
                         }
                     }))
-                    .child(div().flex_none().w(px(24.)).flex().justify_center().child(if checked { "✓" } else { "" }))
+                    .child(div().flex_none().w(px(24.)).flex().justify_center().child(if checked == Some(true) {
+                        "✓"
+                    } else {
+                        ""
+                    }))
                     .child(div().flex_1().whitespace_nowrap().child(self.label(&label, mnemonic)))
                     .children(keys.map(|keys| div().flex_none().pl(px(28.)).text_color(rgb(keys_color)).child(keys)))
                     .into_any_element()
@@ -441,7 +488,7 @@ impl Render for MenuBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme(cx);
         let menus = (self.menus)(self.previous_focus.as_ref(), window, cx);
-        // The menus are left when the focus leaves them: another window, a click elsewhere.
+        // The menus are left when the focus leaves them, as a press on a tab takes it.
         if self.nav.is_active() && !self.focus.contains_focused(window, cx) {
             self.nav = Nav::default();
             self.keyboard = false;
@@ -468,6 +515,7 @@ impl Render for MenuBar {
                     .px(px(8.))
                     .rounded(px(4.))
                     .when(selected, |title| title.bg(rgb(theme.menu_selected)))
+                    .when(selected && !self.nav.open, |title| title.aria_active_descendant())
                     .when(!selected, |title| title.hover(|style| style.bg(rgb(theme.hover))))
                     .on_mouse_down(
                         MouseButton::Left,
@@ -507,7 +555,6 @@ impl Render for MenuBar {
         div()
             .id("menu-bar")
             .role(Role::MenuBar)
-            .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key_down))
             .relative()
             .flex()
@@ -518,6 +565,7 @@ impl Render for MenuBar {
             .py(px(1.))
             .bg(rgb(theme.bar))
             .text_color(rgb(theme.text))
+            .child(div().absolute().size_0().track_focus(&self.focus))
             .children(titles)
             .children(overlay)
             .child(canvas(move |area, _, _| bounds.set(area), |_, _, _, _| {}).absolute().top_0().left_0().size_full())
