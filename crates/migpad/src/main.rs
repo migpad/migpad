@@ -7,6 +7,7 @@ mod commands;
 mod debug_input;
 mod keys;
 mod modules;
+mod notices;
 mod status;
 mod strings;
 mod tabs;

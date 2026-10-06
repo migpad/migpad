@@ -2,6 +2,7 @@
 //! context menus and notification bars.
 
 pub mod button;
+pub mod notification;
 pub mod status_bar;
 pub mod tab_bar;
 pub mod theme;

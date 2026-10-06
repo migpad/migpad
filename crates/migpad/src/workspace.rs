@@ -5,14 +5,17 @@ use std::path::Path;
 use std::time::Duration;
 
 use gpui::{
-    App, AppContext, Context, Entity, ExternalPaths, FocusHandle, Focusable, Global, Render, ScrollHandle, SharedString,
+    App, AppContext, Context, Entity, EntityId, ExternalPaths, FocusHandle, Focusable, Global, Render, ScrollHandle,
+    SharedString,
     Subscription, Task, Window, WindowId, div, prelude::*, px, rgb,
 };
 use migpad_core::document::Document;
 use migpad_editor::EditorView;
+use migpad_ui::notification::NotificationBar;
 use migpad_ui::{TabBar, TabInfo, Toolbar, theme};
 
 use crate::commands::{Registry, update_menus};
+use crate::notices::{self, Notice};
 use crate::status::{self, COUNT_STEP, Loading, SelectionCount, count_chars};
 use crate::strings::{Key, tr};
 use crate::tabs::Tabs;
@@ -44,6 +47,10 @@ pub struct Tab {
     untitled: Option<u32>,
     /// How far the file has loaded, while it is loading.
     loading: Option<Loading>,
+    /// Notifications over the text, each with its number in the window.
+    notices: Vec<(u64, Notice)>,
+    /// Whether the text was checked for bytes lost in reading: once it is loaded.
+    losses_checked: bool,
     _observe: Subscription,
     /// Shows the progress of the loading in the status bar.
     _progress: Option<Task<()>>,
@@ -62,6 +69,8 @@ pub struct Workspace {
     selection_count: Option<SelectionCount>,
     /// Whether the window has drawn a frame: what its elements handle is known after that.
     drawn: bool,
+    /// The number of the next notification.
+    next_notice: u64,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -92,8 +101,10 @@ impl Workspace {
             revision: 0,
             selection_count: None,
             drawn: false,
+            next_notice: 0,
             _subscriptions: vec![activation, appearance],
         };
+        workspace.check_losses(0, cx);
         workspace.update_title(window, cx);
         workspace
     }
@@ -147,7 +158,49 @@ impl Workspace {
     ) {
         let tab = Tab::new(document, untitled, loading, window, cx);
         let index = self.tabs.push(tab);
+        self.check_losses(index, cx);
         self.activate(index, window, cx);
+    }
+
+    /// Shows a notification over the text of the active tab.
+    pub fn notify(&mut self, notice: Notice, cx: &mut Context<Self>) {
+        let index = self.tabs.active_index();
+        self.notify_tab(index, notice, cx);
+    }
+
+    fn notify_tab(&mut self, index: usize, notice: Notice, cx: &mut Context<Self>) {
+        let id = self.next_notice;
+        self.next_notice += 1;
+        if let Some(tab) = self.tabs.get_mut(index) {
+            tab.notices.push((id, notice));
+            cx.notify();
+        }
+    }
+
+    /// Closes the notification `id` of the tab with `document`.
+    fn close_notice(&mut self, document: EntityId, id: u64, cx: &mut Context<Self>) {
+        if let Some(index) = self.tabs.position(|tab| tab.document.entity_id() == document)
+            && let Some(tab) = self.tabs.get_mut(index)
+        {
+            tab.notices.retain(|(notice, _)| *notice != id);
+            cx.notify();
+        }
+    }
+
+    /// Tells of bytes that could not be read in the encoding of the file of a tab, once it is loaded.
+    fn check_losses(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(index) else { return };
+        let doc = tab.document.read(cx);
+        if tab.losses_checked || doc.is_preview() {
+            return;
+        }
+        let notice = notices::decode_losses(doc);
+        if let Some(tab) = self.tabs.get_mut(index) {
+            tab.losses_checked = true;
+        }
+        if let Some(notice) = notice {
+            self.notify_tab(index, notice, cx);
+        }
     }
 
     /// A new tab with an untitled document.
@@ -175,7 +228,7 @@ impl Workspace {
             }
             match windows::open_document(path, cx) {
                 Opening::Document(document, loading) => self.add_tab(document, None, loading, window, cx),
-                Opening::Failed(path, error) => eprintln!("{}: {error}", path.display()),
+                Opening::Failed(path, error) => self.notify(notices::open_failed(&path, &error), cx),
             }
         }
     }
@@ -268,7 +321,7 @@ impl Workspace {
                 Some(index) => return self.activate(index, window, cx),
                 None => match windows::open_document(path, cx) {
                     Opening::Document(document, loading) => (document, loading),
-                    Opening::Failed(path, error) => return eprintln!("{}: {error}", path.display()),
+                    Opening::Failed(path, error) => return self.notify(notices::open_failed(&path, &error), cx),
                 },
             },
             (None, None) => return,
@@ -318,11 +371,32 @@ impl Workspace {
         }
     }
 
-    /// A document of the window has changed: its text, or its file.
-    fn document_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// A document of the window has changed: its text, or its file, or it has loaded.
+    fn document_changed(&mut self, document: EntityId, window: &mut Window, cx: &mut Context<Self>) {
         self.revision += 1;
+        if let Some(index) = self.tabs.position(|tab| tab.document.entity_id() == document) {
+            self.check_losses(index, cx);
+        }
         self.update_title(window, cx);
         cx.notify();
+    }
+
+    /// The notifications of the active tab.
+    fn notification_bars(&self, cx: &mut Context<Self>) -> Vec<NotificationBar> {
+        let tab = self.tabs.active();
+        let document = tab.document.entity_id();
+        tab.notices
+            .iter()
+            .map(|(id, notice)| {
+                let (workspace, id) = (cx.entity().downgrade(), *id);
+                NotificationBar::new(("notice", id), notice.severity, notice.message.clone()).on_close(
+                    tr(Key::NoticeClose),
+                    move |_, cx| {
+                        let _ = workspace.update(cx, |workspace, cx| workspace.close_notice(document, id, cx));
+                    },
+                )
+            })
+            .collect()
     }
 
     /// The characters of the selection of the active tab, or `None` while a long one is counted a
@@ -423,7 +497,9 @@ impl Tab {
         cx: &mut Context<Workspace>,
     ) -> Tab {
         let editor = cx.new(|cx| EditorView::new(document.clone(), window, cx));
-        let observe = cx.observe_in(&document, window, |workspace, _, window, cx| workspace.document_changed(window, cx));
+        let observe = cx.observe_in(&document, window, |workspace, document, window, cx| {
+            workspace.document_changed(document.entity_id(), window, cx)
+        });
         // The status bar shows how far the file has loaded, a few times a second.
         let progress = loading.is_some().then(|| {
             let document = document.downgrade();
@@ -437,7 +513,16 @@ impl Tab {
                 }
             })
         });
-        Tab { document, editor, untitled, loading, _observe: observe, _progress: progress }
+        Tab {
+            document,
+            editor,
+            untitled,
+            loading,
+            notices: Vec::new(),
+            losses_checked: false,
+            _observe: observe,
+            _progress: progress,
+        }
     }
 
     /// What is kept of the tab once it is closed: the document, if it has changes to save.
@@ -492,6 +577,7 @@ impl Render for Workspace {
         }
         root.children(toolbar)
             .child(self.tab_bar(cx))
+            .children(self.notification_bars(cx))
             .child(div().flex_1().min_h_0().child(self.editor().clone()))
             .child(status_bar)
     }

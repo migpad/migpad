@@ -32,6 +32,14 @@ impl<T> Tabs<T> {
         &self.items[self.active]
     }
 
+    pub fn get(&self, index: usize) -> Option<&T> {
+        self.items.get(index)
+    }
+
+    pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
+        self.items.get_mut(index)
+    }
+
     /// The first tab that `matches`.
     pub fn position(&self, matches: impl FnMut(&T) -> bool) -> Option<usize> {
         self.items.iter().position(matches)

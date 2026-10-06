@@ -12,6 +12,7 @@ use migpad_core::document::{Document, OpenAs, OpenError, Opened, open};
 use migpad_core::history::Selection;
 
 use crate::commands::update_menus;
+use crate::notices;
 use crate::status::Loading;
 use crate::tabs::{ClosedTabs, lowest_free};
 use crate::workspace::Workspace;
@@ -101,6 +102,12 @@ pub fn open_document(path: &Path, cx: &mut App) -> Opening {
             .detach();
             Opening::Document(document, Some(progress))
         }
+        // A file that is not there yet: an empty document, which saving creates.
+        Err(OpenError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut document = Document::new();
+            document.path = Some(path);
+            Opening::Document(cx.new(|_| document), None)
+        }
         Err(error) => Opening::Failed(path, error),
     }
 }
@@ -130,12 +137,13 @@ pub fn open_window(paths: &[PathBuf], cx: &mut App) -> Option<WindowHandle<Works
     if !paths.is_empty() && opened.is_empty() {
         return None;
     }
+    let mut failures = Vec::new();
     let documents: Vec<(Entity<Document>, Option<Loading>)> = opened
         .into_iter()
         .filter_map(|(opening, _)| match opening {
             Opening::Document(document, loading) => Some((document, loading)),
             Opening::Failed(path, error) => {
-                eprintln!("{}: {error}", path.display());
+                failures.push(notices::open_failed(&path, &error));
                 None
             }
         })
@@ -151,6 +159,10 @@ pub fn open_window(paths: &[PathBuf], cx: &mut App) -> Option<WindowHandle<Works
                 let mut workspace = Workspace::new(first, untitled, loading, window, cx);
                 for (document, loading) in documents {
                     workspace.add_tab(document, None, loading, window, cx);
+                }
+                // What could not be opened is told in the tab that is shown.
+                for notice in failures {
+                    workspace.notify(notice, cx);
                 }
                 workspace
             });
