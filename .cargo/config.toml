@@ -1,0 +1,4 @@
+# Windows: the C runtime is linked statically, so that migpad.exe starts without the Visual C++
+# Redistributable (VCRUNTIME140.dll); CI checks this. RUSTFLAGS set in the environment replace these flags.
+[target.'cfg(all(target_os = "windows", target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]
