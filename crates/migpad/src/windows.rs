@@ -32,23 +32,64 @@ pub struct ClosedTab {
     pub selection: Selection,
 }
 
-/// The tabs closed lately, of all windows.
-#[derive(Default)]
-struct Closed(ClosedTabs<ClosedTab>);
-
-impl Global for Closed {}
-
-/// Remembers a closed tab, unless there is nothing to open again: an untitled document without text.
-pub fn remember_closed(tab: ClosedTab, cx: &mut App) {
-    if tab.document.is_some() || tab.path.is_some() {
-        // Changes to save are kept however many tabs close after them: there is no other copy.
-        cx.default_global::<Closed>().0.push(tab, |tab| tab.document.is_some());
+impl ClosedTab {
+    /// Whether there is something to open again: not an untitled document without text.
+    fn is_worth_keeping(&self) -> bool {
+        self.document.is_some() || self.path.is_some()
     }
 }
 
-/// The tab closed last, if any.
-pub fn take_closed(cx: &mut App) -> Option<ClosedTab> {
-    cx.default_global::<Closed>().0.pop()
+/// What closed lately: a tab, or a window with its tabs, which comes back whole.
+pub enum Closed {
+    Tab(ClosedTab),
+    /// The tabs of a closed window, in their order, and which one was active.
+    Window {
+        tabs: Vec<ClosedTab>,
+        active: usize,
+    },
+}
+
+impl Closed {
+    /// Whether it keeps changes to save: there is no other copy of them.
+    fn has_changes(&self) -> bool {
+        match self {
+            Closed::Tab(tab) => tab.document.is_some(),
+            Closed::Window { tabs, .. } => tabs.iter().any(|tab| tab.document.is_some()),
+        }
+    }
+}
+
+/// The tabs and windows closed lately.
+#[derive(Default)]
+struct ClosedList(ClosedTabs<Closed>);
+
+impl Global for ClosedList {}
+
+fn remember(closed: Closed, cx: &mut App) {
+    // Changes to save are kept however many tabs close after them.
+    cx.default_global::<ClosedList>().0.push(closed, Closed::has_changes);
+}
+
+/// Remembers a closed tab, unless there is nothing to open again.
+pub fn remember_tab(tab: ClosedTab, cx: &mut App) {
+    if tab.is_worth_keeping() {
+        remember(Closed::Tab(tab), cx);
+    }
+}
+
+/// Remembers a closed window with those of its tabs there is something to open again in.
+pub fn remember_window(tabs: Vec<ClosedTab>, active: usize, cx: &mut App) {
+    let active = tabs[..active.min(tabs.len())].iter().filter(|tab| tab.is_worth_keeping()).count();
+    let tabs: Vec<ClosedTab> = tabs.into_iter().filter(ClosedTab::is_worth_keeping).collect();
+    if !tabs.is_empty() {
+        let active = active.min(tabs.len() - 1);
+        remember(Closed::Window { tabs, active }, cx);
+    }
+}
+
+/// The tab or the window closed last, if any.
+pub fn take_closed(cx: &mut App) -> Option<Closed> {
+    cx.default_global::<ClosedList>().0.pop()
 }
 
 /// The workspaces of the open windows, except one that is being updated now.
@@ -206,9 +247,14 @@ pub fn open_window_with(tabs: Vec<ForTab>, notices: Vec<Notice>, cx: &mut App) -
     Some(window)
 }
 
-/// Opens the tab closed last in a new window: what Reopen Closed Tab does without windows.
+/// Opens what closed last without a window to put it in: a closed window again, or a tab in a new
+/// window — what Reopen Closed Tab does without windows.
 pub fn reopen_in_new_window(cx: &mut App) {
-    let Some(closed) = take_closed(cx) else { return };
+    let closed = match take_closed(cx) {
+        Some(Closed::Tab(tab)) => tab,
+        Some(Closed::Window { tabs, active }) => return reopen_window(tabs, active, cx),
+        None => return,
+    };
     if let Some((window, _)) = closed.path.as_deref().and_then(|path| find_open(path, cx)) {
         // The file is open in a window: the tab comes there.
         let _ = window.update(cx, |workspace, window, cx| {
@@ -227,6 +273,43 @@ pub fn reopen_in_new_window(cx: &mut App) {
         (None, None) => return,
     };
     open_window_with(tabs, notices, cx);
+}
+
+/// Opens a closed window again, with its tabs and the one that was active. A file opened in another
+/// window since stays there, unless its tab kept changes to save.
+pub fn reopen_window(tabs: Vec<ClosedTab>, active: usize, cx: &mut App) {
+    let mut reopened = Vec::new();
+    let mut notices = Vec::new();
+    let mut active_tab = None;
+    for (i, closed) in tabs.into_iter().enumerate() {
+        if closed.document.is_none() && closed.path.as_deref().is_some_and(|path| find_open(path, cx).is_some()) {
+            continue;
+        }
+        let selection = Some(closed.selection);
+        let tab = match (closed.document, closed.path) {
+            (Some(document), _) => ForTab { document, loading: None, selection },
+            (None, Some(path)) => match open_document(&path, cx) {
+                Opening::Document(document, loading) => ForTab { document, loading, selection },
+                Opening::Failed(notice) => {
+                    notices.push(notice);
+                    continue;
+                }
+            },
+            (None, None) => continue,
+        };
+        if i == active {
+            active_tab = Some(reopened.len());
+        }
+        reopened.push(tab);
+    }
+    if reopened.is_empty() && notices.is_empty() {
+        return;
+    }
+    if let Some(window) = open_window_with(reopened, notices, cx)
+        && let Some(index) = active_tab
+    {
+        let _ = window.update(cx, |workspace, window, cx| workspace.activate(index, window, cx));
+    }
 }
 
 /// Brings forward the tab with the file at `path`, if a window has it open.

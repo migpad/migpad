@@ -22,7 +22,7 @@ use crate::notices::{self, Notice};
 use crate::status::{self, COUNT_STEP, Loading, SelectionCount, count_chars};
 use crate::strings::{Key, tr};
 use crate::tabs::Tabs;
-use crate::windows::{self, ClosedTab, ForTab, Opening};
+use crate::windows::{self, Closed, ClosedTab, ForTab, Opening};
 
 /// How often the status bar shows how far a file has loaded.
 const PROGRESS_TICK: Duration = Duration::from_millis(100);
@@ -322,7 +322,7 @@ impl Workspace {
         }
         let was_active = index == self.tabs.active_index();
         let Some(tab) = self.tabs.remove(index) else { return };
-        windows::remember_closed(tab.closed(cx), cx);
+        windows::remember_tab(tab.closed(cx), cx);
         if was_active {
             let active = self.tabs.active_index();
             self.activate(active, window, cx);
@@ -347,25 +347,19 @@ impl Workspace {
         window.remove_window();
     }
 
-    /// Keeps the tabs of the window among the closed ones, the active one last: it comes back first.
+    /// Keeps the window among the closed ones, with its tabs: it comes back whole.
     pub fn remember_tabs(&mut self, cx: &mut App) {
-        let active = self.tabs.active_index();
-        let tabs = self.tabs.iter().enumerate();
-        let closed: Vec<ClosedTab> = tabs
-            .clone()
-            .filter(|(i, _)| *i != active)
-            .chain(tabs.filter(|(i, _)| *i == active))
-            .map(|(_, tab)| tab.closed(cx))
-            .collect();
-        for tab in closed {
-            windows::remember_closed(tab, cx);
-        }
+        let tabs = self.tabs.iter().map(|tab| tab.closed(cx)).collect();
+        windows::remember_window(tabs, self.tabs.active_index(), cx);
     }
 
-    /// Opens the tab closed last again.
+    /// Opens what closed last again: a tab here, or a closed window as a window of its own.
     pub fn reopen_closed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(closed) = windows::take_closed(cx) {
-            self.reopen(closed, window, cx);
+        match windows::take_closed(cx) {
+            Some(Closed::Tab(tab)) => self.reopen(tab, window, cx),
+            // Once this window is done with the action: a new window is placed and numbered by it.
+            Some(Closed::Window { tabs, active }) => cx.defer(move |cx| windows::reopen_window(tabs, active, cx)),
+            None => {}
         }
     }
 
