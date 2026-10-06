@@ -11,15 +11,19 @@ use gpui::{
     WindowHandle, WindowId, WindowOptions, point, px, size,
 };
 use migpad_core::document::{Document, DocumentId, OpenAs, OpenError, Opened, open};
+use migpad_core::encoding::Encoding;
 use migpad_core::history::Selection;
 use migpad_core::state::TabState;
 use migpad_core::state::closed::ClosedState;
+use migpad_core::state::recent::RecentFile;
 
-use crate::commands::update_menus;
+use crate::commands::{refresh_menus, update_menus};
 use crate::journals;
 use crate::notices::{self, Notice};
+use crate::recent;
 use crate::session::{self, Recovery};
 use crate::status::Loading;
+use crate::strings::{Key, fill, tr};
 use crate::tabs::{ClosedTabs, lowest_free};
 use crate::workspace::Workspace;
 
@@ -94,6 +98,7 @@ fn remember(closed: Closed, cx: &mut App) {
     // Changes to save are kept however many tabs close after them.
     cx.default_global::<ClosedList>().0.push(closed, Closed::has_changes);
     session::changed(cx);
+    refresh_menus(cx);
 }
 
 /// Remembers a closed tab, unless there is nothing to open again.
@@ -113,11 +118,36 @@ pub fn remember_window(tabs: Vec<ClosedTab>, active: usize, cx: &mut App) {
     }
 }
 
-/// The tab or the window closed last, if any.
-pub fn take_closed(cx: &mut App) -> Option<Closed> {
-    let closed = cx.default_global::<ClosedList>().0.pop();
+/// The tab or the window closed `index`-th from the last — the last is 0 — if any.
+pub fn take_closed(index: usize, cx: &mut App) -> Option<Closed> {
+    let closed = cx.default_global::<ClosedList>().0.take(index);
     session::changed(cx);
+    refresh_menus(cx);
     closed
+}
+
+/// The tabs and windows closed lately as File ▸ Recently Closed shows them, the last first: a
+/// file by its name and folder, a window by the names of its tabs.
+pub fn closed_labels(cx: &App) -> Vec<String> {
+    let Some(closed) = cx.try_global::<ClosedList>() else { return Vec::new() };
+    let name = |tab: &ClosedTab| match tab.path.as_deref().and_then(Path::file_name) {
+        Some(name) => name.to_string_lossy().into_owned(),
+        None => tr(Key::FileUntitled).to_owned(),
+    };
+    closed
+        .0
+        .iter()
+        .map(|closed| match closed {
+            Closed::Tab(tab) => tab.path.as_deref().map_or_else(|| name(tab), recent::label),
+            Closed::Window { tabs, .. } => {
+                let mut names: Vec<String> = tabs.iter().take(3).map(name).collect();
+                if tabs.len() > 3 {
+                    names.push("…".to_owned());
+                }
+                fill(Key::FileClosedWindow, &[("tabs", &names.join(", "))])
+            }
+        })
+        .collect()
 }
 
 /// The tabs and windows closed lately as the state keeps them, the last closed first.
@@ -198,17 +228,45 @@ impl ForTab {
     }
 }
 
+/// Opens the file at `path` that the user chose: in a document, as [`open_document`] does, and
+/// among the recent files, of the system and of MigPad.
+pub fn open_file(path: &Path, cx: &mut App) -> Opening {
+    let opening = open_document(path, cx);
+    note_opened(path, &opening, cx);
+    opening
+}
+
+/// Opens a recent file in the encoding it had.
+pub fn open_recent(file: &RecentFile, cx: &mut App) -> Opening {
+    let open_as =
+        file.encoding.as_deref().and_then(Encoding::for_name).map_or(OpenAs::Detect { tld: None }, OpenAs::Encoding);
+    let opening = open_document_as(&file.path, open_as, cx);
+    note_opened(&file.path, &opening, cx);
+    opening
+}
+
+fn note_opened(path: &Path, opening: &Opening, cx: &mut App) {
+    if let Opening::Document(document, _) = opening
+        && let Some(path) = document.read(cx).path.clone().or_else(|| std::path::absolute(path).ok())
+    {
+        let encoding = document.read(cx).format.encoding;
+        cx.add_recent_document(&path);
+        recent::opened(&path, encoding, cx);
+    }
+}
+
 /// Opens the file at `path` into a document: a large one shows its beginning at once and the
 /// whole text once the background load is done.
 pub fn open_document(path: &Path, cx: &mut App) -> Opening {
+    open_document_as(path, OpenAs::Detect { tld: None }, cx)
+}
+
+/// Opens the file at `path` into a document as `open_as` tells: in the encoding found, or in a given one.
+pub fn open_document_as(path: &Path, open_as: OpenAs, cx: &mut App) -> Opening {
     let path = std::path::absolute(path).unwrap_or_else(|_| path.to_owned());
-    match open(&path, OpenAs::Detect { tld: None }) {
-        Ok(Opened::Complete(loaded)) => {
-            cx.add_recent_document(&path);
-            Opening::Document(journals::document(loaded, cx), None)
-        }
+    match open(&path, open_as) {
+        Ok(Opened::Complete(loaded)) => Opening::Document(journals::document(loaded, cx), None),
         Ok(Opened::Partial { preview, loader }) => {
-            cx.add_recent_document(&path);
             let document = cx.new(|_| preview);
             let progress = Loading {
                 read: loader.progress(),
@@ -280,7 +338,7 @@ pub fn reopening(closed: ClosedTab, cx: &mut App) -> Reopening {
         }
     }
     let Some(path) = closed.path else { return failure.map_or(Reopening::Nothing, Reopening::Failed) };
-    match open_document(&path, cx) {
+    match open_file(&path, cx) {
         Opening::Document(document, loading) => {
             Reopening::Tab(ForTab { document, loading, selection, notice: failure })
         }
@@ -313,7 +371,7 @@ pub fn open_window(paths: &[PathBuf], cx: &mut App) -> Option<WindowHandle<Works
             continue;
         }
         opened.push(path);
-        match open_document(path, cx) {
+        match open_file(path, cx) {
             Opening::Document(document, loading) => tabs.push(ForTab::new(document, loading, None)),
             Opening::Failed(notice) => failures.push(notice),
         }
@@ -378,10 +436,10 @@ pub fn open_window_with(
     Some(window)
 }
 
-/// Opens what closed last without a window to put it in: a closed window again, or a tab in a new
-/// window — what Reopen Closed Tab does without windows.
-pub fn reopen_in_new_window(cx: &mut App) {
-    let closed = match take_closed(cx) {
+/// Opens what closed `index`-th from the last without a window to put it in: a closed window
+/// again, or a tab in a new window — what Reopen Closed Tab does without windows.
+pub fn reopen_in_new_window(index: usize, cx: &mut App) {
+    let closed = match take_closed(index, cx) {
         Some(Closed::Tab(tab)) => tab,
         Some(Closed::Window { tabs, active }) => return reopen_window(tabs, active, cx),
         None => return,
@@ -435,8 +493,28 @@ pub fn reopen_window(tabs: Vec<ClosedTab>, active: usize, cx: &mut App) {
     }
 }
 
+/// Opens a recent file without a window to put it in: in a new window, or where it is open.
+pub fn open_recent_in_new_window(path: &Path, cx: &mut App) {
+    let Some(file) = recent::find(path, cx) else { return };
+    if activate_open(&file.path, cx) {
+        return;
+    }
+    let (tabs, notices) = if !file.path.exists() {
+        recent::forget(&file.path, cx);
+        (Vec::new(), vec![notices::recent_gone(&recent::label(&file.path))])
+    } else {
+        match open_recent(&file, cx) {
+            Opening::Document(document, loading) => {
+                (vec![ForTab::new(document, loading, Some(file.selection))], Vec::new())
+            }
+            Opening::Failed(notice) => (Vec::new(), vec![notice]),
+        }
+    };
+    open_window_with(tabs, notices, None, cx);
+}
+
 /// Brings forward the tab with the file at `path`, if a window has it open.
-fn activate_open(path: &Path, cx: &mut App) -> bool {
+pub fn activate_open(path: &Path, cx: &mut App) -> bool {
     let Some((window, index)) = find_open(path, cx) else { return false };
     window
         .update(cx, |workspace, window, cx| {

@@ -26,6 +26,15 @@ close_window = "Close Win&dow"
 untitled = "Untitled"
 # The button of the dialog that opens files.
 open_button = "Open"
+recent = "&Recent Files"
+recently_closed = "Recent&ly Closed"
+clear_recent = "&Clear List"
+no_recent = "No Recent Files"
+no_closed = "Nothing Closed Lately"
+# A recent file in the menu: its name, then its folder.
+recent_label = "{name} — {folder}"
+# A closed window in the menu, by the names of its tabs.
+closed_window = "Window: {tabs}"
 
 [edit]
 menu = "&Edit"
@@ -89,6 +98,7 @@ changes_set_aside = "“{file}” was changed by another program while MigPad wa
 recover_failed = "Could not recover the changes to “{file}”: {reason}. Its journal is set aside in the folder of MigPad's data."
 load_from_disk = "Load from Disk"
 keep_mine = "Keep My Version"
+recent_gone = "“{file}” is not there any more: it is taken off the recent files."
 save_in_utf8 = "Save in UTF-8"
 show_first = "Show the First"
 save_replacing = "Replace Them and Save"

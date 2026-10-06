@@ -19,6 +19,7 @@ use migpad_core::state::{TabState, write_atomically};
 
 use crate::journals;
 use crate::notices::{self, Notice};
+use crate::recent;
 use crate::strings::{Key, tr};
 use crate::windows::{self, ForTab, Opening};
 use crate::workspace::Workspace;
@@ -34,8 +35,9 @@ struct Writer {
     active: Option<WindowId>,
     /// Writes the files a moment after the last change.
     pending: Option<Task<()>>,
-    /// What the files had when they were last written: the session and the closed tabs.
-    written: Option<(String, String)>,
+    /// What the files had when they were last written: the session, the closed tabs and the
+    /// recent files.
+    written: Option<[String; 3]>,
     /// The program is quitting and the session is written for the last time: the windows that
     /// close now stay in it.
     done: bool,
@@ -77,7 +79,7 @@ pub fn window_closed(window: WindowId, cx: &mut App) {
     schedule(cx);
 }
 
-/// Something else of the session changed: the tabs closed lately.
+/// Something else of the state changed: the tabs closed lately, the recent files.
 pub fn changed(cx: &mut App) {
     if !cx.default_global::<Writer>().done {
         schedule(cx);
@@ -92,10 +94,12 @@ fn schedule(cx: &mut App) {
     cx.default_global::<Writer>().pending = Some(task);
 }
 
-/// Writes the session and the closed tabs now, if they changed since they were last written.
+/// Writes the session, the closed tabs and the recent files now, if they changed since they were
+/// last written.
 fn write(cx: &mut App) {
     let Some(state) = journals::data(cx).map(|data| data.state()) else { return };
     let closed = closed::to_toml(&windows::closed_state(cx));
+    let recent = recent::to_toml(cx);
     let writer = cx.default_global::<Writer>();
     if writer.done {
         return;
@@ -103,12 +107,14 @@ fn write(cx: &mut App) {
     let active = writer.active.and_then(|active| writer.windows.iter().position(|(id, _)| *id == active));
     let windows = writer.windows.iter().map(|(_, window)| window.clone()).collect();
     let session = Session { windows, active: active.unwrap_or(0) }.to_toml();
-    let files = (session, closed);
+    let files = [session, closed, recent];
     if writer.written.as_ref() == Some(&files) {
         return;
     }
-    let result = write_atomically(&state.join("session.toml"), &files.0)
-        .and_then(|()| write_atomically(&state.join("closed.toml"), &files.1));
+    let result = ["session.toml", "closed.toml", "recent.toml"]
+        .iter()
+        .zip(&files)
+        .try_for_each(|(name, text)| write_atomically(&state.join(name), text));
     match result {
         Ok(()) => writer.written = Some(files),
         Err(error) => eprintln!("MigPad could not write its session: {error}"),

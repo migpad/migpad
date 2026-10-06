@@ -24,6 +24,7 @@ use crate::journals;
 use crate::keys;
 use crate::modules::file::NewTab;
 use crate::notices::{self, Notice, NoticeAction, Topic};
+use crate::recent;
 use crate::session;
 use crate::status::{self, COUNT_STEP, Loading, SelectionCount, count_chars};
 use crate::strings::{Key, fill, tr};
@@ -401,6 +402,10 @@ impl Workspace {
                 }
                 self.clear_notices(index, Topic::Save, cx);
                 cx.add_recent_document(&path);
+                if let Some(tab) = self.tabs.get(index) {
+                    let selection = tab.editor.read(cx).selection();
+                    recent::saved(&path, format.encoding, selection, cx);
+                }
                 true
             }
             Err(error) => {
@@ -494,7 +499,7 @@ impl Workspace {
                 });
                 continue;
             }
-            match windows::open_document(path, cx) {
+            match windows::open_file(path, cx) {
                 Opening::Document(document, loading) => self.add_tab(ForTab::new(document, loading, None), window, cx),
                 Opening::Failed(notice) => self.notify(notice, cx),
             }
@@ -736,13 +741,36 @@ impl Workspace {
         windows::remember_window(tabs, self.tabs.active_index(), cx);
     }
 
-    /// Opens what closed last again: a tab here, or a closed window as a window of its own.
-    pub fn reopen_closed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        match windows::take_closed(cx) {
+    /// Opens what closed `index`-th from the last — the last is 0 — again: a tab here, or a closed
+    /// window as a window of its own.
+    pub fn reopen_closed(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        match windows::take_closed(index, cx) {
             Some(Closed::Tab(tab)) => self.reopen(tab, window, cx),
             // Once this window is done with the action: a new window is placed and numbered by it.
             Some(Closed::Window { tabs, active }) => cx.defer(move |cx| windows::reopen_window(tabs, active, cx)),
             None => {}
+        }
+    }
+
+    /// Opens a recent file: in the encoding it had and with the selection where it was, or brings
+    /// it forward where it is open. A file that is not there any more leaves the list.
+    pub fn open_recent(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(file) = recent::find(path, cx) else { return };
+        if !file.path.exists() {
+            recent::forget(&file.path, cx);
+            return self.notify(notices::recent_gone(&recent::label(&file.path)), cx);
+        }
+        if let Some(index) = self.find(&file.path, cx) {
+            return self.activate(index, window, cx);
+        }
+        if windows::activate_open(&file.path, cx) {
+            return;
+        }
+        match windows::open_recent(&file, cx) {
+            Opening::Document(document, loading) => {
+                self.add_tab(ForTab::new(document, loading, Some(file.selection)), window, cx)
+            }
+            Opening::Failed(notice) => self.notify(notice, cx),
         }
     }
 
@@ -1107,6 +1135,12 @@ impl Tab {
     /// journal: what it had is in its file, or was dropped.
     fn close(&self, cx: &mut App) -> ClosedTab {
         let closed = self.closed(cx);
+        // The recent files remember where it was and in which encoding.
+        let doc = self.document.read(cx);
+        if let Some(path) = doc.path.clone() {
+            let encoding = doc.format.encoding;
+            recent::closed(&path, encoding, closed.selection, cx);
+        }
         if closed.document.is_none() {
             self.document.update(cx, |doc, _| doc.remove_journal());
         }

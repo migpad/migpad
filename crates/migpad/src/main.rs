@@ -9,6 +9,7 @@ mod journals;
 mod keys;
 mod modules;
 mod notices;
+mod recent;
 mod session;
 mod status;
 mod strings;
@@ -37,6 +38,7 @@ fn main() {
     application.run(move |cx: &mut App| {
         strings::set_language(Language::of_system());
         journals::init(cx);
+        recent::init(cx);
         migpad_ui::theme::set_mode(theme_mode(), cx);
         migpad_editor::init(cx);
         commands::init(&modules::all(), cx);

@@ -166,6 +166,11 @@ pub fn changes_set_aside(file: &str) -> Notice {
     Notice { topic: Some(Topic::Disk), ..Notice::new(Severity::Warning, message) }
 }
 
+/// The recent file `file` is not there any more: it leaves the list.
+pub fn recent_gone(file: &str) -> Notice {
+    Notice::new(Severity::Warning, fill(Key::NoticeRecentGone, &[("file", file)]))
+}
+
 /// The changes of `file` could not be recovered from its journal, which is set aside.
 pub fn recover_failed(file: &str, reason: &str) -> Notice {
     Notice::new(Severity::Error, fill(Key::NoticeRecoverFailed, &[("file", file), ("reason", reason)]))

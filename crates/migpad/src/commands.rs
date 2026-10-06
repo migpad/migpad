@@ -8,12 +8,13 @@ use std::rc::Rc;
 
 use gpui::{
     Action, App, Context, Div, DummyKeyboardMapper, FocusHandle, Focusable, Global, InteractiveElement, KeyBinding,
-    Menu, MenuItem, OsAction, SharedString, SystemMenuType, Window, WindowId,
+    Menu, MenuItem, NoAction, OsAction, SharedString, SystemMenuType, Window, WindowId,
 };
 
 use migpad_ui::menu_bar::{ItemSpec, MenuSpec};
 
 use crate::keys;
+use crate::recent;
 use crate::strings::{Key, mnemonic, tr};
 use crate::windows;
 use crate::workspace::Workspace;
@@ -121,10 +122,38 @@ pub fn own_menu_bar() -> bool {
 /// What a menu item is.
 enum Entry {
     Command(&'static str),
+    /// A submenu of the registry, by its place there.
+    Submenu(usize),
     /// The Services menu of macOS, which the system fills.
     Services,
     /// The open windows, one item each, to bring forward.
     Windows,
+}
+
+/// A submenu whose items a module makes each time the menus are built: the recent files, the
+/// tabs closed lately.
+struct Submenu {
+    label: Key,
+    items: fn(&App) -> Vec<SubItem>,
+}
+
+/// An item of a submenu that a module makes.
+pub enum SubItem {
+    /// A command, with its label in the tables.
+    Command {
+        label: Key,
+        action: Box<dyn Action>,
+    },
+    /// An item of a list — a file, a closed tab — numbered from 1 in the menus MigPad draws, the
+    /// number its mnemonic.
+    Listed {
+        label: String,
+        number: usize,
+        action: Box<dyn Action>,
+    },
+    /// A disabled item that tells the list is empty.
+    Empty(Key),
+    Separator,
 }
 
 /// Brings the window forward: an item of the list of windows.
@@ -149,6 +178,7 @@ type AppHandler = Box<dyn FnOnce(&mut App)>;
 #[derive(Default)]
 pub struct Registry {
     commands: Vec<Command>,
+    submenus: Vec<Submenu>,
     placements: Vec<Placement>,
     /// The actions the application handles whatever window they come from.
     app_actions: HashSet<TypeId>,
@@ -165,6 +195,13 @@ impl Registry {
             self.placements.push(Placement { menu, group, entry: Entry::Command(command.id) });
         }
         self.commands.push(command);
+    }
+
+    /// Adds a submenu labelled `label` to a group of a menu: `items` makes its items each time the
+    /// menus are built.
+    pub fn add_submenu(&mut self, label: Key, items: fn(&App) -> Vec<SubItem>, menu: MenuId, group: u8) {
+        self.placements.push(Placement { menu, group, entry: Entry::Submenu(self.submenus.len()) });
+        self.submenus.push(Submenu { label, items });
     }
 
     /// Adds the Services menu of macOS to a group of a menu.
@@ -216,11 +253,19 @@ impl Registry {
             let mut items = Vec::with_capacity(placements.len() + 2);
             let mut group = None;
             for placement in placements {
-                let Entry::Command(command) = placement.entry else { continue };
+                let command = match placement.entry {
+                    Entry::Command(command) => command,
+                    Entry::Submenu(_) => "",
+                    Entry::Services | Entry::Windows => continue,
+                };
                 if group.is_some_and(|group| group != placement.group) {
                     items.push(ItemSpec::Separator);
                 }
                 group = Some(placement.group);
+                if let Entry::Submenu(index) = placement.entry {
+                    items.push(self.own_submenu(&self.submenus[index], cx));
+                    continue;
+                }
                 let command = self.command(command);
                 items.push(ItemSpec::Action {
                     label: tr(command.label).into(),
@@ -235,6 +280,41 @@ impl Registry {
             title.filter(|_| !items.is_empty()).map(|(title, mnemonic)| MenuSpec { title, mnemonic, items })
         };
         MenuId::ALL.into_iter().filter_map(menu).collect()
+    }
+
+    /// A submenu as the menus MigPad draws show it: listed items numbered, the numbers their
+    /// mnemonics up to 10.
+    fn own_submenu(&self, submenu: &Submenu, cx: &App) -> ItemSpec {
+        let items: Vec<ItemSpec> = (submenu.items)(cx)
+            .into_iter()
+            .map(|item| match item {
+                SubItem::Command { label, action } => ItemSpec::Action {
+                    label: tr(label).into(),
+                    mnemonic: mnemonic(label),
+                    keys: None,
+                    checked: None,
+                    enabled: true,
+                    action,
+                },
+                SubItem::Listed { label, number, action } => {
+                    let (label, mnemonic) = match number {
+                        1..=10 => (format!("{} {label}", number % 10), Some(0)),
+                        _ => (label, None),
+                    };
+                    ItemSpec::Action { label: label.into(), mnemonic, keys: None, checked: None, enabled: true, action }
+                }
+                SubItem::Empty(label) => ItemSpec::Action {
+                    label: tr(label).into(),
+                    mnemonic: None,
+                    keys: None,
+                    checked: None,
+                    enabled: false,
+                    action: Box::new(NoAction),
+                },
+                SubItem::Separator => ItemSpec::Separator,
+            })
+            .collect();
+        ItemSpec::Submenu { label: tr(submenu.label).into(), mnemonic: mnemonic(submenu.label), enabled: true, items }
     }
 
     /// Adds the list of open windows to a group of a menu.
@@ -295,6 +375,7 @@ impl Registry {
     fn menu_items(&self, entry: &Entry, workspace: Option<&Workspace>, cx: &App) -> Vec<MenuItem> {
         let id = match entry {
             Entry::Command(id) => id,
+            Entry::Submenu(index) => return vec![self.system_submenu(&self.submenus[*index], cx)],
             Entry::Services => return vec![MenuItem::os_submenu(tr(Key::AppServices), SystemMenuType::Services)],
             Entry::Windows => return window_list(workspace, cx),
         };
@@ -306,6 +387,29 @@ impl Registry {
             checked: command.checked.zip(workspace).is_some_and(|(checked, workspace)| checked(workspace, cx)),
             disabled: false,
         }]
+    }
+}
+
+impl Registry {
+    /// A submenu as the menus of the system show it.
+    fn system_submenu(&self, submenu: &Submenu, cx: &App) -> MenuItem {
+        let action = |name: SharedString, action: Box<dyn Action>, disabled: bool| MenuItem::Action {
+            name,
+            action,
+            os_action: None,
+            checked: false,
+            disabled,
+        };
+        let items: Vec<MenuItem> = (submenu.items)(cx)
+            .into_iter()
+            .map(|item| match item {
+                SubItem::Command { label, action: command } => action(tr(label).into(), command, false),
+                SubItem::Listed { label, action: listed, .. } => action(label.into(), listed, false),
+                SubItem::Empty(label) => action(tr(label).into(), Box::new(NoAction), true),
+                SubItem::Separator => MenuItem::separator(),
+            })
+            .collect();
+        MenuItem::submenu(Menu::new(tr(submenu.label)).items(items))
     }
 }
 
@@ -360,8 +464,23 @@ pub fn init(modules: &[&dyn Module], cx: &mut App) {
 /// active, for the check marks of its document. Items whose action no one would handle now are
 /// disabled by GPUI when the menu opens.
 pub fn update_menus(workspace: Option<&Workspace>, cx: &mut App) {
+    // The recent files that are not there any more leave the list as the menus are built.
+    recent::forget_missing(cx);
     let menus = cx.global::<Registry>().menus(workspace, cx);
     cx.set_menus(menus);
+}
+
+/// Builds the menu bar again for the active window, once what is being updated now is done: the
+/// items of a submenu changed.
+pub fn refresh_menus(cx: &mut App) {
+    cx.defer(|cx| {
+        let active = cx.active_window().and_then(|window| window.downcast::<Workspace>());
+        let updated = active
+            .is_some_and(|active| active.update(cx, |workspace, _, cx| update_menus(Some(workspace), cx)).is_ok());
+        if !updated {
+            update_menus(None, cx);
+        }
+    });
 }
 
 #[cfg(test)]
@@ -416,6 +535,7 @@ mod tests {
                     .filter(|placement| placement.menu == menu)
                     .filter_map(|placement| match placement.entry {
                         Entry::Command(id) => Some(registry.command(id).label),
+                        Entry::Submenu(index) => Some(registry.submenus[index].label),
                         Entry::Services | Entry::Windows => None,
                     })
                     // The items of the Window menu that only macOS has go without mnemonics.
@@ -443,7 +563,7 @@ mod tests {
             .iter()
             .filter_map(|placement| match placement.entry {
                 Entry::Command(id) => Some(id),
-                Entry::Services | Entry::Windows => None,
+                Entry::Submenu(_) | Entry::Services | Entry::Windows => None,
             })
             .collect();
         assert!(items.iter().all(|item| ids.contains(item)));
