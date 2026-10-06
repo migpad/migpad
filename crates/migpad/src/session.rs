@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use gpui::{
-    App, AppContext, Bounds, DisplayId, Entity, Global, Task, WindowBounds, WindowHandle, WindowId, point, px, size,
+    App, AppContext, Bounds, DisplayId, Entity, EntityId, Global, Task, WindowBounds, WindowHandle, WindowId, point,
+    px, size,
 };
 use migpad_core::document::{Document, DocumentId, OpenAs, OpenError, Opened, Recovered, open};
 use migpad_core::encoding::Encoding;
@@ -119,6 +120,53 @@ fn write(cx: &mut App) {
         Ok(()) => writer.written = Some(files),
         Err(error) => eprintln!("MigPad could not write its session: {error}"),
     }
+}
+
+/// Quits as the user asks — File ▸ Exit, Cmd+Q, the last window on Windows and Linux — asking
+/// nothing, since the journals bring everything back at the next start ([ADR 0020]). Documents
+/// whose changes no journal can keep — an error stopped it, or there is no folder of data — are
+/// asked about first, in one question in the window of the first of them. Call it once what is
+/// being updated now is done, as with `cx.defer`: the documents of every window are needed.
+pub fn quit(cx: &mut App) {
+    let unkept = unkept_changes(cx);
+    match unkept.first().map(|(window, ..)| *window) {
+        Some(window) => {
+            let _ = window.update(cx, |workspace, window, cx| workspace.ask_before_quitting(unkept, window, cx));
+        }
+        None => quit_now(cx),
+    }
+}
+
+/// Quits now, everything left as [`prepare_quit`] leaves it.
+pub fn quit_now(cx: &mut App) {
+    prepare_quit(cx);
+    cx.quit();
+}
+
+/// Before the program goes, however it ends: the changes of each document go to a journal if none
+/// keeps them yet, the journals reach the disk, and the session is written for the last time.
+pub fn prepare_quit(cx: &mut App) {
+    let documents = windows::open_documents(cx);
+    for document in &documents {
+        document.update(cx, |doc, _| doc.keep_changes());
+    }
+    journals::sync_now(&documents, cx);
+    finish(cx);
+}
+
+/// The documents with changes that no journal keeps, even after trying to write one now: their
+/// windows, the documents, and their names.
+fn unkept_changes(cx: &mut App) -> Vec<(WindowHandle<Workspace>, EntityId, String)> {
+    let changed: Vec<(WindowHandle<Workspace>, Entity<Document>, String)> = windows::workspaces(cx)
+        .flat_map(|(window, workspace)| {
+            workspace.changed_documents(cx).into_iter().map(move |(document, name)| (window, document, name))
+        })
+        .collect();
+    changed
+        .into_iter()
+        .filter(|(_, document, _)| !document.update(cx, |doc, _| doc.keep_changes()))
+        .map(|(window, document, name)| (window, document.entity_id(), name))
+        .collect()
 }
 
 /// The program is quitting: the session is written for the last time, as it is now.

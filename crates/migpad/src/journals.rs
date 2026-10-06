@@ -2,6 +2,7 @@
 //! first edit, so that its changes survive a crash. The journal is flushed to the disk a moment
 //! after the last edit, when the window goes to the background, and on quitting.
 
+use std::fs::File;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -12,32 +13,57 @@ use migpad_core::document::Document;
 /// How long after the last edit the journal is flushed to the disk.
 pub const SYNC_DELAY: Duration = Duration::from_millis(1500);
 
-/// The folder of the data, if there is one.
-struct Data(Option<DataDir>);
+/// The folder of the data, if this copy of the program has one.
+struct Data {
+    dir: Option<DataDir>,
+    /// Holds the folder for this copy of the program while it runs.
+    _lock: Option<File>,
+    /// Another running copy holds the folder: this one keeps nothing there.
+    another_copy: bool,
+}
 
 impl Global for Data {}
 
-/// Finds the folder of the data: next to the program in portable mode, at home otherwise. A debug
-/// build takes another one from `MIGPAD_DATA_DIR`, for checks, until the settings can tell.
+/// Finds the folder of the data — next to the program in portable mode, at home otherwise — and
+/// takes it for this copy of the program. A second copy, which another one runs before it, keeps
+/// nothing there: their journals and sessions would mix. A debug build takes another folder from
+/// `MIGPAD_DATA_DIR`, for checks, until the settings can tell.
 pub fn init(cx: &mut App) {
-    let data = match std::env::var_os("MIGPAD_DATA_DIR") {
+    let found = match std::env::var_os("MIGPAD_DATA_DIR") {
         Some(dir) if cfg!(debug_assertions) => Some(DataDir::at(PathBuf::from(dir))),
         _ => DataDir::find(),
     };
-    if data.is_none() {
-        eprintln!("MigPad has no home folder for its data: changes are not kept safe from a crash.");
-    }
-    cx.set_global(Data(data));
+    let data = match found {
+        Some(dir) => match dir.lock() {
+            Ok(Some(lock)) => Data { dir: Some(dir), _lock: Some(lock), another_copy: false },
+            Ok(None) => Data { dir: None, _lock: None, another_copy: true },
+            // The journals will tell what is wrong with the folder.
+            Err(error) => {
+                eprintln!("MigPad could not take its folder of data {}: {error}", dir.root().display());
+                Data { dir: Some(dir), _lock: None, another_copy: false }
+            }
+        },
+        None => {
+            eprintln!("MigPad has no home folder for its data: changes are not kept safe from a crash.");
+            Data { dir: None, _lock: None, another_copy: false }
+        }
+    };
+    cx.set_global(data);
 }
 
-/// The folder of the data, if there is one.
+/// Whether another running copy of the program holds the folder of the data.
+pub fn another_copy(cx: &App) -> bool {
+    cx.try_global::<Data>().is_some_and(|data| data.another_copy)
+}
+
+/// The folder of the data, if this copy has one.
 pub fn data(cx: &App) -> Option<DataDir> {
-    cx.try_global::<Data>()?.0.clone()
+    cx.try_global::<Data>()?.dir.clone()
 }
 
 /// The folder of the journals.
 pub fn dir(cx: &App) -> Option<PathBuf> {
-    cx.try_global::<Data>()?.0.as_ref().map(DataDir::journals)
+    cx.try_global::<Data>()?.dir.as_ref().map(DataDir::journals)
 }
 
 /// A new document of the application, which keeps its journal from the first edit.

@@ -419,9 +419,10 @@ pub fn open_window_with(
             // with everything in it ([ADR 0020]).
             window.on_window_should_close(cx, |window, cx| {
                 let Some(Some(workspace)) = window.root::<Workspace>() else { return true };
+                // Quitting goes on once this window is done with the question whether to close.
                 if !cfg!(target_os = "macos") && cx.windows().len() == 1 {
-                    session::finish(cx);
-                    return true;
+                    cx.defer(session::quit);
+                    return false;
                 }
                 if workspace.read(cx).has_changes(cx) {
                     workspace.update(cx, |workspace, cx| workspace.close_window(window, cx));

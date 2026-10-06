@@ -20,6 +20,9 @@ const REWRITE_SLACK: u64 = 4 << 20;
 pub(super) struct JournalState {
     /// Where the journal is kept; `None` turns journaling off.
     dir: Option<PathBuf>,
+    /// Where the journal was kept before an error stopped it: it starts there again once the text
+    /// is saved, or to keep the changes when the program quits.
+    stopped_dir: Option<PathBuf>,
     file: Option<Journal>,
     /// Records were written since the last `sync`.
     unsynced: bool,
@@ -35,6 +38,7 @@ impl Default for JournalState {
     fn default() -> Self {
         JournalState {
             dir: None,
+            stopped_dir: None,
             file: None,
             unsynced: false,
             snapshot_due: false,
@@ -117,9 +121,27 @@ impl Document {
     pub fn remove_journal(&mut self) {
         // Windows does not remove a file that is open.
         self.journal.file = None;
+        self.journal.stopped_dir = None;
         if let Some(dir) = self.journal.dir.take() {
             let _ = fs::remove_file(journal_file(&dir, self.id));
         }
+    }
+
+    /// Makes sure the changes of the document are in a journal, so that the next start brings
+    /// them back: after an error stopped the journal, it is written anew with the text, if it can
+    /// be now. Tells whether the changes are kept — a document without changes has nothing to keep.
+    pub fn keep_changes(&mut self) -> bool {
+        if !self.is_modified() || self.journal.file.is_some() {
+            return true;
+        }
+        if self.journal.dir.is_none() {
+            self.journal.dir = self.journal.stopped_dir.take();
+        }
+        if self.journal.dir.is_none() {
+            return false;
+        }
+        self.rewrite_journal(true);
+        self.journal.file.is_some()
     }
 
     /// Notes that the text was just saved to `path` in `format`, and the file is `disk` now.
@@ -134,6 +156,10 @@ impl Document {
         self.saved_at = Some(self.history.state());
         if self.journal.file.is_some() {
             self.rewrite_journal(false);
+        }
+        // A journal stopped by an error starts again from the file just saved.
+        if self.journal.dir.is_none() {
+            self.journal.dir = self.journal.stopped_dir.take();
         }
         self.journal.snapshot_due = !self.large;
     }
@@ -191,6 +217,8 @@ impl Document {
         };
         doc.journal.dir = dir;
         doc.journal.file = Some(Journal::resume(journal_path, contents.valid_len)?);
+        // The text is the file, as saved: the next edit starts with a copy of it, as after saving.
+        doc.journal.snapshot_due = snapshot.is_none() && !doc.large;
         Ok(Recovered::Restored { doc, file_changed })
     }
 
@@ -300,10 +328,11 @@ impl Document {
     /// Stops the journal after an error. A journal that misses records would restore an older
     /// text, so it is removed; the edits stay in memory.
     fn journal_failed(&mut self, error: io::Error) {
+        self.journal.file = None;
         if let Some(dir) = self.journal.dir.take() {
             let _ = fs::remove_file(journal_file(&dir, self.id));
+            self.journal.stopped_dir = Some(dir);
         }
-        self.journal.file = None;
         self.journal.error = Some(error);
     }
 }
@@ -562,6 +591,44 @@ mod tests {
         // No state of the history is the file any more.
         back.undo();
         assert!(back.is_modified());
+    }
+
+    #[test]
+    fn a_saved_text_is_copied_again_after_a_restart() {
+        let (file, dir) = (TempFile::new("journaling-restart", b"text"), TempDir::new("journaling-restart"));
+        let mut doc = journaled(&file, &dir);
+        insert(&mut doc, 4, "!", EditKind::Other);
+        save(&mut doc);
+        // The next start, then an edit, then a change of the file while MigPad is closed again.
+        let (mut back, _) = restored(recovered(&doc));
+        drop(doc);
+        insert(&mut back, 0, ">", EditKind::Other);
+        std::fs::write(&file.0, b"changed elsewhere").unwrap();
+        let (again, file_changed) = restored(recovered(&back));
+        assert!(file_changed, "the copy of the text keeps the edit, whatever the file is now");
+        assert_eq!(text(&again), b">text!");
+    }
+
+    #[test]
+    fn a_journal_stopped_by_an_error_starts_again() {
+        let (file, dir) = (TempFile::new("journaling-again", b"text"), TempDir::new("journaling-again"));
+        let mut doc = journaled(&file, &dir);
+        insert(&mut doc, 4, "!", EditKind::Other);
+        doc.journal_sync_failed(io::Error::other("the disk is full"));
+        assert!(doc.take_journal_error().is_some() && dir.files().is_empty());
+        // On quitting, the changes are kept in a journal anew.
+        assert!(doc.keep_changes());
+        assert_eq!(text(&restored(recovered(&doc)).0), b"text!");
+        // Once saved, the journal goes on.
+        doc.journal_sync_failed(io::Error::other("the disk is full"));
+        save(&mut doc);
+        insert(&mut doc, 5, "?", EditKind::Other);
+        assert_eq!(text(&restored(recovered(&doc)).0), b"text!?");
+        // Nowhere to keep them.
+        let mut untitled = Document::new();
+        insert(&mut untitled, 0, "draft", EditKind::Other);
+        assert!(!untitled.keep_changes());
+        assert!(Document::new().keep_changes(), "nothing to keep");
     }
 
     #[test]

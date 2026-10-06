@@ -59,12 +59,10 @@ fn main() {
             }
         })
         .detach();
-        // Quitting asks nothing: edits of the last moment reach the disk, and the session is
-        // written for the next start to bring everything back.
+        // However the program ends — from the Dock, on logging out — edits of the last moment reach
+        // the disk, and the session is written for the next start to bring everything back.
         cx.on_app_quit(|cx| {
-            let documents = windows::open_documents(cx);
-            journals::sync_now(&documents, cx);
-            session::finish(cx);
+            session::prepare_quit(cx);
             async {}
         })
         .detach();
@@ -74,7 +72,13 @@ fn main() {
             .or_else(|| windows::open_window(&paths, cx))
             .or_else(|| windows::open_window(&[], cx));
         match window {
-            Some(window) => debug_input::play(window, cx),
+            Some(window) => {
+                // A second copy keeps nothing in the folder of data: it says so.
+                if journals::another_copy(cx) {
+                    let _ = window.update(cx, |workspace, _, cx| workspace.notify(notices::another_copy(), cx));
+                }
+                debug_input::play(window, cx)
+            }
             // The reason is told above; without a window there is nothing to do.
             None => cx.quit(),
         }

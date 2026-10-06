@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use gpui::{
     App, AppContext, Context, DragMoveEvent, Entity, EntityId, ExternalPaths, FocusHandle, Focusable, MouseDownEvent,
     MouseUpEvent, PathPromptOptions, PromptButton, PromptLevel, Render, ScrollHandle, SharedString, Subscription, Task,
-    Window, WindowId, canvas, div, prelude::*, px, rgb,
+    Window, WindowHandle, WindowId, canvas, div, prelude::*, px, rgb,
 };
 use migpad_core::document::{Document, Fingerprint, Format, OpenAs, Opened, open};
 use migpad_core::encoding::Encoding;
@@ -299,6 +299,10 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let Some(index) = self.tab_of(document) else { return };
+        // A save that failed — Save As… too — is done again to the file it aimed at.
+        let target = self.tabs.get(index).and_then(|tab| {
+            tab.notices.iter().find(|(notice, _)| *notice == id).and_then(|(_, notice)| notice.path.clone())
+        });
         if !matches!(action, NoticeAction::ShowFirst(_)) {
             self.close_notice(document, id, cx);
         }
@@ -306,7 +310,7 @@ impl Workspace {
             NoticeAction::SaveInUtf8 => {
                 let format = self.tabs.get(index).map(|tab| tab.document.read(cx).format);
                 let format = format.map(|format| Format { encoding: Encoding::UTF_8, bom: false, ..format });
-                self.save(index, format, false, window, cx).detach();
+                self.save_into(index, target, format, false, window, cx).detach();
             }
             NoticeAction::ShowFirst(pos) => {
                 self.activate(index, window, cx);
@@ -329,7 +333,7 @@ impl Workspace {
                 });
                 let Ok(after) = replaced else { return };
                 editor.update(cx, |editor, cx| editor.select(after, window, cx));
-                self.save(index, None, true, window, cx).detach();
+                self.save_into(index, target, None, true, window, cx).detach();
             }
             NoticeAction::SaveAs => self.save_as(index, window, cx).detach(),
             NoticeAction::LoadFromDisk => self.load_from_disk(index, window, cx),
@@ -383,6 +387,23 @@ impl Workspace {
         Task::ready(self.save_to(index, path, format, accept_losses, cx))
     }
 
+    /// Saves the document of the tab at `index` to `target`, the file a failed save aimed at, or as
+    /// [`Workspace::save`] does without one.
+    fn save_into(
+        &mut self,
+        index: usize,
+        target: Option<PathBuf>,
+        format: Option<Format>,
+        accept_losses: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<bool> {
+        match target {
+            Some(path) => Task::ready(self.save_to(index, path, format, accept_losses, cx)),
+            None => self.save(index, format, accept_losses, window, cx),
+        }
+    }
+
     /// Saves the document of the tab at `index` to `path`.
     fn save_to(
         &mut self,
@@ -410,6 +431,7 @@ impl Workspace {
                     tab.missing = false;
                 }
                 self.clear_notices(index, Topic::Save, cx);
+                self.clear_notices(index, Topic::Disk, cx);
                 cx.add_recent_document(&path);
                 if let Some(tab) = self.tabs.get(index) {
                     let selection = tab.editor.read(cx).selection();
@@ -659,6 +681,55 @@ impl Workspace {
         self.tabs.iter().any(|tab| tab.has_changes(cx))
     }
 
+    /// The documents of the window with changes to save, and their names.
+    pub fn changed_documents(&self, cx: &App) -> Vec<(Entity<Document>, String)> {
+        self.tabs
+            .iter()
+            .filter(|tab| tab.has_changes(cx))
+            .map(|tab| (tab.document.clone(), Self::tab_title(tab, cx)))
+            .collect()
+    }
+
+    /// Asks before quitting whether to save the documents `unkept` — of this window and others —
+    /// whose changes no journal keeps: they would be lost. Save saves each in turn, its tab shown,
+    /// and quits once all are saved; Don't Save quits.
+    pub fn ask_before_quitting(
+        &mut self,
+        unkept: Vec<(WindowHandle<Workspace>, EntityId, String)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.asking {
+            return;
+        }
+        let files: Vec<String> = unkept.iter().map(|(_, _, name)| fill(Key::CloseFile, &[("file", name)])).collect();
+        let detail = fill(Key::CloseQuitDetail, &[("files", &files.join(", "))]);
+        let answer = self.ask_to_save(tr(Key::CloseQuitQuestion), &detail, tr(Key::CloseSaveAll), window, cx);
+        cx.spawn(async move |_, cx| {
+            match answer.await {
+                SaveAnswer::Save => {
+                    for (window, document, _) in unkept {
+                        let save = window.update(cx, |workspace, window, cx| {
+                            if let Some(index) = workspace.tab_of(document) {
+                                workspace.activate(index, window, cx);
+                                window.activate_window();
+                            }
+                            workspace.save_document(document, window, cx)
+                        });
+                        let Ok(save) = save else { return };
+                        if !save.await {
+                            return;
+                        }
+                    }
+                }
+                SaveAnswer::DontSave => {}
+                SaveAnswer::Cancel => return,
+            }
+            cx.update(session::quit_now);
+        })
+        .detach();
+    }
+
     /// Alt or F10: brings the keyboard to the menu bar, or back. Not when the window is not active:
     /// Alt released after switching windows with Alt+Tab is not for the menus.
     pub fn toggle_menu_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -672,11 +743,10 @@ impl Workspace {
     /// Closes the window; its tabs go among the closed ones. Changes to save are asked about
     /// first, in one question for all the documents that have them ([ADR 0020]).
     pub fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // The last window on Windows and Linux: closing it is quitting, which asks nothing and
-        // keeps the window for the next start, as its button does.
+        // The last window on Windows and Linux: closing it is quitting, which keeps the window for
+        // the next start, as its button does — once this window is done with the action.
         if !cfg!(target_os = "macos") && cx.windows().len() == 1 {
-            session::finish(cx);
-            window.remove_window();
+            cx.defer(session::quit);
             return;
         }
         let changed: Vec<(EntityId, String)> = self
@@ -833,8 +903,9 @@ impl Workspace {
         let Some(tab) = self.tabs.get(index) else { return };
         let Some(path) = tab.document.read(cx).path.clone() else { return };
         let selection = tab.pending_selection.unwrap_or_else(|| tab.editor.read(cx).selection());
-        let mine =
-            ClosedTab { document: Some(tab.document.clone()), journal: None, path: Some(path.clone()), selection };
+        // Its text, if it has changes, goes among the closed tabs, not lost.
+        let document = tab.has_changes(cx).then(|| tab.document.clone());
+        let mine = ClosedTab { document, journal: None, path: Some(path.clone()), selection };
         match windows::open_document(&path, cx) {
             Opening::Document(document, loading) => {
                 let replaced = Tab::new(document, None, loading, window, cx);
@@ -883,10 +954,15 @@ impl Workspace {
             let now = match now {
                 Ok(now) => now,
                 // A file that was there when it was read or saved; a new one is not yet.
+                // The text is the only copy now: it has changes to save, which closing asks about and
+                // the next start brings back.
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     if known.is_some() && !tab.missing {
                         tab.missing = true;
-                        cx.notify();
+                        tab.document.update(cx, |doc, cx| {
+                            doc.keep_over_file(None);
+                            cx.notify();
+                        });
                     }
                     continue;
                 }
@@ -925,6 +1001,8 @@ impl Workspace {
         let Some(tab) = self.tabs.get(index) else { return };
         let Some(path) = tab.document.read(cx).path.clone() else { return };
         let document = tab.document.clone();
+        // Saved meanwhile, the document is not the one read over.
+        let disk = document.read(cx).disk;
         let journals = journals::dir(cx);
         let read = cx.background_spawn({
             let path = path.clone();
@@ -944,8 +1022,11 @@ impl Workspace {
                     Err(error) => return workspace.notify_tab(index, notices::open_failed(&path, &error), cx),
                 };
                 let replaced = document.update(cx, |doc, cx| {
+                    if doc.path.as_deref() != Some(path.as_path()) || doc.disk != disk {
+                        return None;
+                    }
                     if doc.is_modified() {
-                        return false;
+                        return Some(false);
                     }
                     doc.remove_journal();
                     if let Some(dir) = journals {
@@ -953,17 +1034,19 @@ impl Workspace {
                     }
                     *doc = loaded;
                     cx.notify();
-                    true
+                    Some(true)
                 });
                 match replaced {
                     // The text of the file may have bytes lost in reading.
-                    true => {
+                    Some(true) => {
                         if let Some(tab) = workspace.tabs.get_mut(index) {
                             tab.losses_checked = false;
                         }
                         workspace.check_losses(index, cx);
                     }
-                    false => workspace.tell_changed(index, cx),
+                    Some(false) => workspace.tell_changed(index, cx),
+                    // Saved, or saved elsewhere, meanwhile: the next check compares again.
+                    None => {}
                 }
             });
         })

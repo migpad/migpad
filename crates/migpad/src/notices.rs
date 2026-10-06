@@ -2,7 +2,7 @@
 //! could not be read in its encoding, a journal that stopped, a file changed by another program.
 
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use migpad_core::document::{Document, OpenError, SaveError};
 use migpad_core::encoding::Losses;
@@ -20,11 +20,13 @@ pub struct Notice {
     pub topic: Option<Topic>,
     /// The buttons for what can be done about it.
     pub actions: Vec<NoticeAction>,
+    /// The file a failed save aimed at: its buttons save there, not to the file of the document.
+    pub path: Option<PathBuf>,
 }
 
 impl Notice {
     fn new(severity: Severity, message: String) -> Self {
-        Notice { severity, message, topic: None, actions: Vec::new() }
+        Notice { severity, message, topic: None, actions: Vec::new(), path: None }
     }
 }
 
@@ -99,6 +101,7 @@ pub fn save_failed(doc: &Document, path: &Path, encoding: &str, error: &SaveErro
                 message: fill(Key::NoticeEncodeLosses, &values),
                 topic: Some(Topic::Save),
                 actions: vec![NoticeAction::SaveInUtf8, NoticeAction::ShowFirst(first), NoticeAction::SaveReplacing],
+                path: None,
             }
             .with_decoding(decoding)
         }
@@ -111,6 +114,7 @@ pub fn save_failed(doc: &Document, path: &Path, encoding: &str, error: &SaveErro
                 message: fill(Key::NoticeDecodedLosses, &values),
                 topic: Some(Topic::Save),
                 actions: vec![NoticeAction::ShowFirst(first), NoticeAction::SaveReplacing, NoticeAction::SaveAs],
+                path: None,
             }
         }
         SaveError::PermissionDenied(_) => Notice {
@@ -118,16 +122,18 @@ pub fn save_failed(doc: &Document, path: &Path, encoding: &str, error: &SaveErro
             message: fill(Key::NoticeNoWritePermission, &[("file", &file)]),
             topic: Some(Topic::Save),
             actions: vec![NoticeAction::SaveAs],
+            path: None,
         },
         SaveError::Io(error) => Notice {
             severity: Severity::Error,
             message: fill(Key::NoticeSaveFailed, &[("file", &file), ("reason", &write_reason(error))]),
             topic: Some(Topic::Save),
             actions: vec![NoticeAction::SaveAs],
+            path: None,
         },
         SaveError::Preview => return None,
     };
-    Some(notice)
+    Some(Notice { path: Some(path.to_owned()), ..notice })
 }
 
 impl Notice {
@@ -156,6 +162,7 @@ pub fn changed_while_closed(file: &str) -> Notice {
         message: fill(Key::NoticeChangedWhileClosed, &[("file", file)]),
         topic: Some(Topic::Disk),
         actions: vec![NoticeAction::LoadFromDisk, NoticeAction::KeepMine],
+        path: None,
     }
 }
 
@@ -167,6 +174,7 @@ pub fn changed_on_disk(file: &str) -> Notice {
         message: fill(Key::NoticeChangedOnDisk, &[("file", file)]),
         topic: Some(Topic::Disk),
         actions: vec![NoticeAction::LoadFromDisk, NoticeAction::KeepMine],
+        path: None,
     }
 }
 
@@ -175,6 +183,11 @@ pub fn changed_on_disk(file: &str) -> Notice {
 pub fn changes_set_aside(file: &str) -> Notice {
     let message = fill(Key::NoticeChangesSetAside, &[("file", file)]);
     Notice { topic: Some(Topic::Disk), ..Notice::new(Severity::Warning, message) }
+}
+
+/// Another running copy of MigPad holds the folder of data: this one keeps nothing there.
+pub fn another_copy() -> Notice {
+    Notice::new(Severity::Warning, tr(Key::NoticeAnotherCopy).to_owned())
 }
 
 /// The recent file `file` is not there any more: it leaves the list.

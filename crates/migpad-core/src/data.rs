@@ -2,6 +2,8 @@
 //! folder `.migpad` next to the program, on macOS next to `MigPad.app`. Settings are there, and the
 //! state the program keeps for itself: journals of documents, the session, recent files.
 
+use std::fs::{self, File, OpenOptions, TryLockError};
+use std::io;
 use std::path::{Path, PathBuf};
 
 /// The name of the folder of the data, at home or next to the program.
@@ -56,6 +58,18 @@ impl DataDir {
     pub fn journals(&self) -> PathBuf {
         self.state().join("journal")
     }
+
+    /// Takes the folder for this running copy of the program: `None` if another copy has it. The
+    /// folder is held while the file returned is open — until the program ends, a crash included.
+    pub fn lock(&self) -> io::Result<Option<File>> {
+        fs::create_dir_all(&self.root)?;
+        let file = OpenOptions::new().create(true).truncate(false).write(true).open(self.root.join("migpad.lock"))?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(file)),
+            Err(TryLockError::WouldBlock) => Ok(None),
+            Err(TryLockError::Error(error)) => Err(error),
+        }
+    }
 }
 
 /// The folder the program is in as one sees it: for a program inside an application bundle of
@@ -103,6 +117,17 @@ mod tests {
         assert_eq!((data.root(), data.is_portable()), (programs.join(".migpad").as_path(), true));
         // Without a home folder too.
         assert_eq!(DataDir::find_for(Some(&programs.join("migpad.exe")), None), Some(data));
+    }
+
+    #[test]
+    fn one_running_copy_holds_the_folder() {
+        let dir = TempDir::new("data-lock");
+        let data = DataDir::at(dir.0.join(".migpad"));
+        let first = data.lock().unwrap();
+        assert!(first.is_some());
+        assert!(data.lock().unwrap().is_none(), "another copy has it");
+        drop(first);
+        assert!(data.lock().unwrap().is_some(), "free once the first is done");
     }
 
     #[test]
