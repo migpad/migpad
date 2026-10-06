@@ -27,7 +27,8 @@ impl Module for ViewModule {
         let indent_guides = Command::new("view.indent_guides", Key::ViewIndentGuides, ToggleIndentGuides)
             .checked(|workspace, cx| workspace.editor().read(cx).shows_indent_guides());
         registry.add(indent_guides, menu(1));
-        let toolbar = Command::new("view.toolbar", Key::ViewToolbar, ToggleToolbar).checked(|_, cx| toolbar_visible(cx));
+        let toolbar =
+            Command::new("view.toolbar", Key::ViewToolbar, ToggleToolbar).checked(|_, cx| toolbar_visible(cx));
         registry.add(toolbar, menu(2));
 
         registry.on_window_action(|workspace, _: &ToggleWordWrap, _, cx| {

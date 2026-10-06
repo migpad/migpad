@@ -23,7 +23,8 @@ impl RenderOnce for Toolbar {
         let mut children: Vec<AnyElement> = Vec::new();
         for (i, group) in self.groups.into_iter().filter(|group| !group.is_empty()).enumerate() {
             if i > 0 {
-                children.push(div().flex_none().w(px(1.)).h(px(16.)).mx(px(4.)).bg(rgb(theme.border)).into_any_element());
+                children
+                    .push(div().flex_none().w(px(1.)).h(px(16.)).mx(px(4.)).bg(rgb(theme.border)).into_any_element());
             }
             children.extend(group.into_iter().map(IntoElement::into_any_element));
         }

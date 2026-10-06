@@ -411,6 +411,7 @@ impl EditorView {
             guides: Vec::new(),
             labels: Vec::new(),
             hitbox: None,
+            view_hitbox: None,
         };
         let mut widest: f64 = 0.0;
         for (i, &at) in rows.iter().enumerate() {

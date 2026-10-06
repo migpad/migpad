@@ -55,7 +55,10 @@ mod tests {
         set_language(Language::Russian);
         assert_eq!(open_failed(path, &denied).message, "Не удалось открыть «план.txt»: нет прав на чтение.");
         assert_eq!(open_failed(path, &folder).message, "Не удалось открыть «план.txt»: это папка.");
-        assert_eq!(open_failed(path, &OpenError::TooLarge).message, "Не удалось открыть «план.txt»: файл больше 4 ГиБ.");
+        assert_eq!(
+            open_failed(path, &OpenError::TooLarge).message,
+            "Не удалось открыть «план.txt»: файл больше 4 ГиБ."
+        );
         set_language(Language::English);
         assert_eq!(open_failed(path, &denied).message, "Could not open “план.txt”: no permission to read it.");
         assert_eq!(open_failed(path, &OpenError::TooLarge).severity, Severity::Error);

@@ -3,10 +3,10 @@
 
 use gpui::actions;
 
-use crate::commands::{ActivateWindow, Command, MenuId, Module, Registry, by_os};
+use crate::commands::{ActivateWindow, Command, MenuId, Module, Registry, by_os, own_menu_bar};
 use crate::strings::Key;
 
-actions!(window, [Minimize, Zoom, NextTab, PreviousTab, LastTab]);
+actions!(window, [Minimize, Zoom, NextTab, PreviousTab, LastTab, ToggleMenuBar]);
 
 /// Switches to a tab by its place from the left, from zero.
 #[derive(Clone, Debug, PartialEq, gpui::Action)]
@@ -26,8 +26,16 @@ const SELECT_KEYS: [[&str; 3]; 8] = [
 ];
 
 /// The identifiers of the commands of Cmd+1…8.
-const SELECT_IDS: [&str; 8] =
-    ["window.tab_1", "window.tab_2", "window.tab_3", "window.tab_4", "window.tab_5", "window.tab_6", "window.tab_7", "window.tab_8"];
+const SELECT_IDS: [&str; 8] = [
+    "window.tab_1",
+    "window.tab_2",
+    "window.tab_3",
+    "window.tab_4",
+    "window.tab_5",
+    "window.tab_6",
+    "window.tab_7",
+    "window.tab_8",
+];
 
 pub struct WindowModule;
 
@@ -45,8 +53,11 @@ impl Module for WindowModule {
             macos(0),
         );
         registry.add(Command::new("window.zoom", Key::WindowZoom, Zoom), macos(0));
-        let next = Command::new("window.next_tab", Key::WindowNextTab, NextTab)
-            .keys(by_os(&["cmd-}", "ctrl-tab"], &["ctrl-tab", "ctrl-pagedown"], &["ctrl-tab", "ctrl-pagedown"]));
+        let next = Command::new("window.next_tab", Key::WindowNextTab, NextTab).keys(by_os(
+            &["cmd-}", "ctrl-tab"],
+            &["ctrl-tab", "ctrl-pagedown"],
+            &["ctrl-tab", "ctrl-pagedown"],
+        ));
         registry.add(next, menu(1));
         let previous = Command::new("window.previous_tab", Key::WindowPreviousTab, PreviousTab).keys(by_os(
             &["cmd-{", "ctrl-shift-tab"],
@@ -58,19 +69,27 @@ impl Module for WindowModule {
             let keys = by_os(&keys[0..1], &keys[1..2], &keys[2..3]);
             registry.add(Command::new(id, Key::WindowSelectTab, SelectTab(i)).keys(keys), None);
         }
-        let last = Command::new("window.last_tab", Key::WindowSelectTab, LastTab)
-            .keys(by_os(&["cmd-9"], &["ctrl-9"], &["ctrl-9"]));
+        let last = Command::new("window.last_tab", Key::WindowSelectTab, LastTab).keys(by_os(
+            &["cmd-9"],
+            &["ctrl-9"],
+            &["ctrl-9"],
+        ));
         registry.add(last, None);
         if cfg!(target_os = "macos") {
             registry.add_window_list(MenuId::Window, 2);
         }
+        // Alt pressed and released alone, or F10, brings the keyboard to the menu bar MigPad draws.
+        let menu_keys: &[&str] = if own_menu_bar() { &["alt", "f10"] } else { &[] };
+        registry.add(Command::new("window.menu_bar", Key::WindowMenu, ToggleMenuBar).keys(menu_keys), None);
 
         registry.on_window_action(|_, _: &Minimize, window, _| window.minimize_window());
         registry.on_window_action(|_, _: &Zoom, window, _| window.zoom_window());
         registry.on_window_action(|workspace, _: &NextTab, window, cx| workspace.activate_next(window, cx));
         registry.on_window_action(|workspace, _: &PreviousTab, window, cx| workspace.activate_previous(window, cx));
-        registry.on_window_action(|workspace, select: &SelectTab, window, cx| workspace.select(Some(select.0), window, cx));
+        registry
+            .on_window_action(|workspace, select: &SelectTab, window, cx| workspace.select(Some(select.0), window, cx));
         registry.on_window_action(|workspace, _: &LastTab, window, cx| workspace.select(None, window, cx));
+        registry.on_window_action(|workspace, _: &ToggleMenuBar, window, cx| workspace.toggle_menu_bar(window, cx));
         registry.on_app_action(|action: &ActivateWindow, cx| {
             if let Some(window) = cx.windows().into_iter().find(|window| window.window_id() == action.0) {
                 let _ = window.update(cx, |_, window, _| window.activate_window());

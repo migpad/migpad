@@ -20,17 +20,29 @@ impl Module for FileModule {
         let new = Command::new("file.new", Key::FileNew, NewTab).keys(by_os(&["cmd-n"], &["ctrl-n"], &["ctrl-n"]));
         registry.add(new, menu(0));
         registry.add_to_toolbar("file.new", 0);
-        let new_window = Command::new("file.new_window", Key::FileNewWindow, NewWindow)
-            .keys(by_os(&["cmd-shift-n"], &["ctrl-shift-n"], &["ctrl-shift-n"]));
+        let new_window = Command::new("file.new_window", Key::FileNewWindow, NewWindow).keys(by_os(
+            &["cmd-shift-n"],
+            &["ctrl-shift-n"],
+            &["ctrl-shift-n"],
+        ));
         registry.add(new_window, menu(0));
-        let reopen = Command::new("file.reopen_closed", Key::FileReopenClosed, ReopenClosed)
-            .keys(by_os(&["cmd-shift-t"], &["ctrl-shift-t"], &["ctrl-shift-t"]));
+        let reopen = Command::new("file.reopen_closed", Key::FileReopenClosed, ReopenClosed).keys(by_os(
+            &["cmd-shift-t"],
+            &["ctrl-shift-t"],
+            &["ctrl-shift-t"],
+        ));
         registry.add(reopen, menu(1));
-        let close_tab = Command::new("file.close_tab", Key::FileCloseTab, CloseTab)
-            .keys(by_os(&["cmd-w"], &["ctrl-w", "ctrl-f4"], &["ctrl-w"]));
+        let close_tab = Command::new("file.close_tab", Key::FileCloseTab, CloseTab).keys(by_os(
+            &["cmd-w"],
+            &["ctrl-w", "ctrl-f4"],
+            &["ctrl-w"],
+        ));
         registry.add(close_tab, menu(2));
-        let close_window = Command::new("file.close_window", Key::FileCloseWindow, CloseWindow)
-            .keys(by_os(&["cmd-shift-w"], &["ctrl-shift-w"], &["ctrl-shift-w"]));
+        let close_window = Command::new("file.close_window", Key::FileCloseWindow, CloseWindow).keys(by_os(
+            &["cmd-shift-w"],
+            &["ctrl-shift-w"],
+            &["ctrl-shift-w"],
+        ));
         registry.add(close_window, menu(2));
 
         registry.on_window_action(|workspace, _: &NewTab, window, cx| workspace.new_tab(window, cx));

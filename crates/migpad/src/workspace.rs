@@ -6,15 +6,14 @@ use std::time::Duration;
 
 use gpui::{
     App, AppContext, Context, Entity, EntityId, ExternalPaths, FocusHandle, Focusable, Global, Render, ScrollHandle,
-    SharedString,
-    Subscription, Task, Window, WindowId, div, prelude::*, px, rgb,
+    SharedString, Subscription, Task, Window, WindowId, div, prelude::*, px, rgb,
 };
 use migpad_core::document::Document;
 use migpad_editor::EditorView;
 use migpad_ui::notification::NotificationBar;
-use migpad_ui::{TabBar, TabInfo, Toolbar, theme};
+use migpad_ui::{MenuBar, TabBar, TabInfo, Toolbar, theme};
 
-use crate::commands::{Registry, update_menus};
+use crate::commands::{Registry, own_menu_bar, update_menus};
 use crate::notices::{self, Notice};
 use crate::status::{self, COUNT_STEP, Loading, SelectionCount, count_chars};
 use crate::strings::{Key, tr};
@@ -58,6 +57,8 @@ pub struct Tab {
 
 pub struct Workspace {
     window_id: WindowId,
+    /// The menu bar MigPad draws, on Windows and Linux.
+    menu_bar: Option<Entity<MenuBar>>,
     tabs: Tabs<Tab>,
     tab_scroll: ScrollHandle,
     /// Whether the bar of tabs is yet to scroll to the active tab.
@@ -92,8 +93,21 @@ impl Workspace {
         // Colors follow the appearance of the system, unless a theme is chosen.
         let appearance = migpad_ui::theme::follow_system(window, cx);
         let first = Tab::new(document, untitled, loading, window, cx);
+        let menu_bar = own_menu_bar().then(|| {
+            let workspace = cx.weak_entity();
+            cx.new(|cx| {
+                MenuBar::new(
+                    move |target, window, cx| {
+                        let Some(workspace) = workspace.upgrade() else { return Vec::new() };
+                        cx.global::<Registry>().menu_bar(workspace.read(cx), target, window, cx)
+                    },
+                    cx,
+                )
+            })
+        });
         let mut workspace = Workspace {
             window_id: window.window_handle().window_id(),
+            menu_bar,
             tabs: Tabs::new(first),
             tab_scroll: ScrollHandle::new(),
             reveal_tab: true,
@@ -144,7 +158,8 @@ impl Workspace {
 
     /// The tab of the file at `path`, if the window has it open.
     pub fn find(&self, path: &Path, cx: &App) -> Option<usize> {
-        self.tabs.position(|tab| tab.document.read(cx).path.as_deref().is_some_and(|open| windows::same_file(open, path)))
+        self.tabs
+            .position(|tab| tab.document.read(cx).path.as_deref().is_some_and(|open| windows::same_file(open, path)))
     }
 
     /// Adds a tab with `document` at the end and switches to it.
@@ -218,7 +233,8 @@ impl Workspace {
                 self.activate(index, window, cx);
                 continue;
             }
-            let elsewhere = windows::workspaces(cx).find_map(|(other, workspace)| Some((other, workspace.find(path, cx)?)));
+            let elsewhere =
+                windows::workspaces(cx).find_map(|(other, workspace)| Some((other, workspace.find(path, cx)?)));
             if let Some((other, index)) = elsewhere {
                 let _ = other.update(cx, |workspace, window, cx| {
                     workspace.activate(index, window, cx);
@@ -295,6 +311,16 @@ impl Workspace {
         }
     }
 
+    /// Alt or F10: brings the keyboard to the menu bar, or back. Not when the window is not active:
+    /// Alt released after switching windows with Alt+Tab is not for the menus.
+    pub fn toggle_menu_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(menu_bar) = &self.menu_bar
+            && window.is_window_active()
+        {
+            menu_bar.update(cx, |menu_bar, cx| menu_bar.toggle(window, cx));
+        }
+    }
+
     /// Closes the window; its tabs go among the closed ones.
     pub fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.remember_tabs(cx);
@@ -305,8 +331,12 @@ impl Workspace {
     pub fn remember_tabs(&mut self, cx: &mut App) {
         let active = self.tabs.active_index();
         let tabs = self.tabs.iter().enumerate();
-        let closed: Vec<ClosedTab> =
-            tabs.clone().filter(|(i, _)| *i != active).chain(tabs.filter(|(i, _)| *i == active)).map(|(_, tab)| tab.closed(cx)).collect();
+        let closed: Vec<ClosedTab> = tabs
+            .clone()
+            .filter(|(i, _)| *i != active)
+            .chain(tabs.filter(|(i, _)| *i == active))
+            .map(|(_, tab)| tab.closed(cx))
+            .collect();
         for tab in closed {
             windows::remember_closed(tab, cx);
         }
@@ -338,7 +368,9 @@ impl Workspace {
     /// The name of the document of a tab: its file, or "Untitled 2".
     fn tab_title(tab: &Tab, cx: &App) -> String {
         match (&tab.document.read(cx).path, tab.untitled) {
-            (Some(path), _) => path.file_name().map_or_else(|| path.display().to_string(), |name| name.to_string_lossy().into_owned()),
+            (Some(path), _) => {
+                path.file_name().map_or_else(|| path.display().to_string(), |name| name.to_string_lossy().into_owned())
+            }
             (None, Some(number)) if number > 1 => format!("{} {number}", tr(Key::FileUntitled)),
             (None, _) => tr(Key::FileUntitled).to_owned(),
         }
@@ -418,7 +450,7 @@ impl Workspace {
         let text = tab.document.read(cx).text();
         if range.len() <= COUNT_STEP {
             let chars = count_chars(text, range.clone());
-            self.selection_count = Some(SelectionCount { key, counted_to: range.end, chars, task: None });
+            self.selection_count = Some(SelectionCount { key, counted_to: range.end, chars, _task: None });
             return Some(Some(chars));
         }
         let task = cx.spawn(async move |workspace, cx| {
@@ -430,7 +462,7 @@ impl Workspace {
                 }
             }
         });
-        self.selection_count = Some(SelectionCount { key, counted_to: range.start, chars: 0, task: Some(task) });
+        self.selection_count = Some(SelectionCount { key, counted_to: range.start, chars: 0, _task: Some(task) });
         Some(None)
     }
 
@@ -568,12 +600,39 @@ impl Render for Workspace {
                 workspace.open_paths(paths.paths(), window, cx);
             }));
         let root = handlers.iter().fold(root, |root, handler| handler(root, cx));
+        let root = match self.menu_bar.clone() {
+            // Alt with a letter opens the menu with that mnemonic; Alt held shows the mnemonics.
+            Some(menu_bar) => {
+                let mnemonics = menu_bar.clone();
+                let alt = menu_bar.clone();
+                root.capture_key_down(move |event, window, cx| {
+                    let modifiers = &event.keystroke.modifiers;
+                    if modifiers.alt && !modifiers.control && !modifiers.platform && !mnemonics.read(cx).is_active() {
+                        let opened = mnemonics
+                            .update(cx, |menu_bar, cx| menu_bar.open_by_mnemonic(&event.keystroke, window, cx));
+                        if opened {
+                            cx.stop_propagation();
+                        }
+                    }
+                })
+                .on_modifiers_changed(move |event, _, cx| {
+                    let modifiers = &event.modifiers;
+                    let held = modifiers.alt && !modifiers.control && !modifiers.platform;
+                    alt.update(cx, |menu_bar, cx| menu_bar.set_alt_held(held, cx));
+                })
+                .child(menu_bar)
+            }
+            None => root,
+        };
         let toolbar = toolbar_visible(cx).then(|| Toolbar::new(cx.global::<Registry>().toolbar(self, window, cx)));
         let status_bar = self.status_bar(cx);
         if !self.drawn {
-            // Once the first frame is drawn, the toolbar knows which of its commands can act.
-            self.drawn = true;
-            window.request_animation_frame();
+            // Once the first frame is drawn, the toolbar and the menus know which of their commands
+            // can act: until then the window has no elements to ask.
+            cx.on_next_frame(window, |workspace, _, cx| {
+                workspace.drawn = true;
+                cx.notify();
+            });
         }
         root.children(toolbar)
             .child(self.tab_bar(cx))

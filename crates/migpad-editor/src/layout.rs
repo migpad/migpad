@@ -225,4 +225,6 @@ pub(crate) struct Layout {
     pub labels: Vec<(ShapedLine, Point<Pixels>, Bounds<Pixels>)>,
     /// The text area, for the I-beam mouse cursor; the element adds it.
     pub hitbox: Option<Hitbox>,
+    /// The whole view, for presses and the wheel; the element adds it.
+    pub view_hitbox: Option<Hitbox>,
 }

@@ -66,6 +66,7 @@ impl Element for EditorElement {
         cx: &mut App,
     ) -> Layout {
         let mut layout = self.view.update(cx, |view, cx| view.layout(bounds, window, cx));
+        layout.view_hitbox = Some(window.insert_hitbox(bounds, HitboxBehavior::Normal));
         layout.hitbox = Some(window.insert_hitbox(layout.geometry.text_area, HitboxBehavior::Normal));
         layout
     }
@@ -115,10 +116,13 @@ impl Element for EditorElement {
         let focus = self.view.read(cx).focus_handle(cx);
         window.handle_input(&focus, ElementInputHandler::new(bounds, self.view.clone()), cx);
 
-        // Moves and releases are heard outside the element too: a drag goes on past its edges.
+        // Presses and the wheel only where nothing covers the view, such as an open menu; moves and
+        // releases are heard outside the element too: a drag goes on past its edges.
+        let Some(hitbox) = layout.view_hitbox.clone() else { return };
         let view = self.view.clone();
+        let pressed = hitbox.clone();
         window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
-            if phase == DispatchPhase::Bubble && event.button == MouseButton::Left && bounds.contains(&event.position) {
+            if phase == DispatchPhase::Bubble && event.button == MouseButton::Left && pressed.is_hovered(window) {
                 view.update(cx, |view, cx| view.mouse_down(event, window, cx));
                 cx.stop_propagation();
             }
@@ -137,7 +141,7 @@ impl Element for EditorElement {
         });
         let view = self.view.clone();
         window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
-            if phase == DispatchPhase::Bubble && bounds.contains(&event.position) {
+            if phase == DispatchPhase::Bubble && hitbox.should_handle_scroll(window) {
                 view.update(cx, |view, cx| view.scroll(event, window, cx));
             }
         });

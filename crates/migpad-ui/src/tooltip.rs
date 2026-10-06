@@ -1,6 +1,8 @@
 //! Tooltips: a line of text, with the keys of a command after it.
 
-use gpui::{AnyView, App, AppContext, BoxShadow, Context, Render, SharedString, Window, div, point, prelude::*, px, rgb, rgba};
+use gpui::{
+    AnyView, App, AppContext, BoxShadow, Context, Render, SharedString, Window, div, point, prelude::*, px, rgb, rgba,
+};
 
 use crate::theme::theme;
 

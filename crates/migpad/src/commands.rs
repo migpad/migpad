@@ -2,17 +2,20 @@
 //! registers its commands, where they go in the menus and what handles them; the menu bar and
 //! the key bindings are built from that registry.
 
+use std::any::TypeId;
+use std::collections::HashSet;
 use std::rc::Rc;
 
 use gpui::{
-    Action, App, Context, Div, DummyKeyboardMapper, Focusable, Global, InteractiveElement, KeyBinding, Menu, MenuItem,
-    OsAction, SharedString, SystemMenuType, Window, WindowId,
+    Action, App, Context, Div, DummyKeyboardMapper, FocusHandle, Focusable, Global, InteractiveElement, KeyBinding,
+    Menu, MenuItem, OsAction, SharedString, SystemMenuType, Window, WindowId,
 };
 
 use migpad_ui::Button;
+use migpad_ui::menu_bar::{ItemSpec, MenuSpec};
 
 use crate::keys;
-use crate::strings::{Key, tr};
+use crate::strings::{Key, mnemonic, tr};
 use crate::windows;
 use crate::workspace::Workspace;
 
@@ -63,13 +66,6 @@ impl Command {
     pub fn enabled(self, enabled: fn(&Workspace, &App) -> bool) -> Self {
         Command { enabled: Some(enabled), ..self }
     }
-
-    /// Whether the command can act in `window`, whose root is `workspace`. Which actions the
-    /// window handles is known once it has drawn a frame: before, only `enabled` tells.
-    pub fn is_enabled(&self, workspace: &Workspace, window: &Window, cx: &App) -> bool {
-        (!workspace.has_drawn() || window.is_action_available(self.action.as_ref(), cx))
-            && self.enabled.is_none_or(|enabled| enabled(workspace, cx))
-    }
 }
 
 /// The keys of a command on this system: they are fixed, and follow each system.
@@ -102,14 +98,25 @@ impl MenuId {
     const ALL: [MenuId; 5] = [MenuId::App, MenuId::File, MenuId::Edit, MenuId::View, MenuId::Window];
 
     fn title(self) -> &'static str {
+        self.key().map_or("MigPad", tr)
+    }
+
+    /// The key of the title; the menu of the application is named after it.
+    fn key(self) -> Option<Key> {
         match self {
-            MenuId::App => "MigPad",
-            MenuId::File => tr(Key::FileMenu),
-            MenuId::Edit => tr(Key::EditMenu),
-            MenuId::View => tr(Key::ViewMenu),
-            MenuId::Window => tr(Key::WindowMenu),
+            MenuId::App => None,
+            MenuId::File => Some(Key::FileMenu),
+            MenuId::Edit => Some(Key::EditMenu),
+            MenuId::View => Some(Key::ViewMenu),
+            MenuId::Window => Some(Key::WindowMenu),
         }
     }
+}
+
+/// Whether windows have the menu bar MigPad draws: on Windows and Linux, where GPUI makes none.
+/// A debug build shows it on macOS too with `MIGPAD_MENU_BAR=1`, to try it there.
+pub fn own_menu_bar() -> bool {
+    !cfg!(target_os = "macos") || (cfg!(debug_assertions) && std::env::var_os("MIGPAD_MENU_BAR").is_some())
 }
 
 /// What a menu item is.
@@ -146,6 +153,8 @@ pub struct Registry {
     placements: Vec<Placement>,
     /// The buttons of the toolbar: commands, by groups.
     toolbar: Vec<(u8, &'static str)>,
+    /// The actions the application handles whatever window they come from.
+    app_actions: HashSet<TypeId>,
     window_handlers: Vec<WindowHandler>,
     app_handlers: Vec<AppHandler>,
 }
@@ -176,6 +185,28 @@ impl Registry {
         self.commands.iter().find(|command| command.id == id).expect("a command of the registry")
     }
 
+    /// Whether `command` can act in `window`, whose root is `workspace`: the application handles
+    /// its action, or the window does where the focus is — or is to go back to, from the menus —
+    /// and the command has something to do. Which actions the window handles is known once it has
+    /// drawn a frame: before, they are taken as handled.
+    fn is_enabled(
+        &self,
+        command: &Command,
+        workspace: &Workspace,
+        focus: Option<&FocusHandle>,
+        window: &Window,
+        cx: &App,
+    ) -> bool {
+        let action = command.action.as_ref();
+        let handled = !workspace.has_drawn()
+            || self.app_actions.contains(&action.as_any().type_id())
+            || focus.map_or_else(
+                || window.is_action_available(action, cx),
+                |focus| window.is_action_available_in(action, focus),
+            );
+        handled && command.enabled.is_none_or(|enabled| enabled(workspace, cx))
+    }
+
     /// The buttons of the toolbar of `window`, by groups.
     pub fn toolbar(&self, workspace: &Workspace, window: &Window, cx: &App) -> Vec<Vec<Button>> {
         let focus = workspace.editor().focus_handle(cx);
@@ -191,13 +222,52 @@ impl Registry {
                     let action = command.action.boxed_clone();
                     let keys = keys::for_action(action.as_ref(), &focus, window).map(SharedString::from);
                     Button::new(SharedString::new_static(id), tr(command.label))
-                        .disabled(!command.is_enabled(workspace, window, cx))
+                        .disabled(!self.is_enabled(command, workspace, None, window, cx))
                         .tooltip(tr(command.label), keys)
                         .on_click(move |_, window, cx| window.dispatch_action(action.boxed_clone(), cx))
                 })
                 .collect()
             })
             .collect()
+    }
+
+    /// The menus of the bar MigPad draws, for the window of `workspace`: those of macOS, without the
+    /// menu of the application and what macOS fills in. `target` has the focus the chosen command
+    /// goes to.
+    pub fn menu_bar(
+        &self,
+        workspace: &Workspace,
+        target: Option<&FocusHandle>,
+        window: &Window,
+        cx: &App,
+    ) -> Vec<MenuSpec> {
+        let focus = workspace.editor().focus_handle(cx);
+        let menu = |id: MenuId| {
+            let mut placements: Vec<&Placement> =
+                self.placements.iter().filter(|placement| placement.menu == id).collect();
+            placements.sort_by_key(|placement| placement.group);
+            let mut items = Vec::with_capacity(placements.len() + 2);
+            let mut group = None;
+            for placement in placements {
+                let Entry::Command(command) = placement.entry else { continue };
+                if group.is_some_and(|group| group != placement.group) {
+                    items.push(ItemSpec::Separator);
+                }
+                group = Some(placement.group);
+                let command = self.command(command);
+                items.push(ItemSpec::Action {
+                    label: tr(command.label).into(),
+                    mnemonic: mnemonic(command.label),
+                    keys: keys::for_action(command.action.as_ref(), &focus, window).map(SharedString::from),
+                    checked: command.checked.is_some_and(|checked| checked(workspace, cx)),
+                    enabled: self.is_enabled(command, workspace, target, window, cx),
+                    action: command.action.boxed_clone(),
+                });
+            }
+            let title = id.key().map(|key| (SharedString::from(tr(key)), mnemonic(key)));
+            title.filter(|_| !items.is_empty()).map(|(title, mnemonic)| MenuSpec { title, mnemonic, items })
+        };
+        MenuId::ALL.into_iter().filter_map(menu).collect()
     }
 
     /// Adds the list of open windows to a group of a menu.
@@ -216,6 +286,7 @@ impl Registry {
 
     /// Handles `A` in the application, whichever window it comes from.
     pub fn on_app_action<A: Action>(&mut self, handler: fn(&A, &mut App)) {
+        self.app_actions.insert(TypeId::of::<A>());
         self.app_handlers.push(Box::new(move |cx: &mut App| {
             cx.on_action(handler);
         }));
@@ -351,6 +422,46 @@ mod tests {
                 panic!("{keys} is bound to both {before} and {action}");
             }
         }
+    }
+
+    #[test]
+    fn mnemonics_tell_the_menus_and_their_items_apart() {
+        use crate::strings::{LANGUAGE_LOCK, Language, mnemonic, set_language};
+
+        let _lock = LANGUAGE_LOCK.lock();
+        let registry = registry();
+        let letter = |key: Key| {
+            let at = mnemonic(key)?;
+            tr(key)[at..].chars().next().map(|c| c.to_lowercase().to_string())
+        };
+        for language in [Language::English, Language::Russian] {
+            set_language(language);
+            let menus: Vec<MenuId> = MenuId::ALL.into_iter().filter(|id| *id != MenuId::App).collect();
+            let mut titles: Vec<String> = menus.iter().filter_map(|id| letter(id.key()?)).collect();
+            assert_eq!(titles.len(), menus.len(), "{language:?}: every menu has a mnemonic");
+            titles.sort();
+            titles.dedup();
+            assert_eq!(titles.len(), menus.len(), "{language:?}: mnemonics of menus repeat");
+            for menu in menus {
+                let labels: Vec<Key> = registry
+                    .placements
+                    .iter()
+                    .filter(|placement| placement.menu == menu)
+                    .filter_map(|placement| match placement.entry {
+                        Entry::Command(id) => Some(registry.command(id).label),
+                        Entry::Services | Entry::Windows => None,
+                    })
+                    // The items of the Window menu that only macOS has go without mnemonics.
+                    .filter(|key| ![Key::WindowMinimize, Key::WindowZoom].contains(key))
+                    .collect();
+                let mut letters: Vec<String> = labels.iter().filter_map(|key| letter(*key)).collect();
+                assert_eq!(letters.len(), labels.len(), "{language:?} {menu:?}: every item has a mnemonic");
+                letters.sort();
+                letters.dedup();
+                assert_eq!(letters.len(), labels.len(), "{language:?} {menu:?}: mnemonics of items repeat");
+            }
+        }
+        set_language(Language::English);
     }
 
     #[test]

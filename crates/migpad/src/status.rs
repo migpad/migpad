@@ -32,7 +32,8 @@ pub struct SelectionCount {
     /// How far the selection is counted, and how many characters were there.
     pub counted_to: usize,
     pub chars: usize,
-    pub task: Option<Task<()>>,
+    /// Counts the rest a part a frame; dropped, it stops.
+    pub _task: Option<Task<()>>,
 }
 
 impl SelectionCount {
@@ -70,7 +71,8 @@ pub fn status_bar(
     loading: Option<&Loading>,
 ) -> StatusBar {
     let (line, column) = caret;
-    let position = fill(Key::StatusPosition, &[("line", &number(line as u64 + 1)), ("column", &number(column as u64 + 1))]);
+    let position =
+        fill(Key::StatusPosition, &[("line", &number(line as u64 + 1)), ("column", &number(column as u64 + 1))]);
     let mut bar = StatusBar::new().left(position);
     if let Some(chars) = selection {
         let count = chars.map_or_else(|| "…".to_owned(), |chars| number(chars as u64));
@@ -79,7 +81,7 @@ pub fn status_bar(
     let lines = match loading {
         Some(loading) if doc.is_preview() => {
             let read = loading.read.load(Ordering::Relaxed).min(loading.total);
-            let share = if loading.total == 0 { 100 } else { read * 100 / loading.total };
+            let share = (read * 100).checked_div(loading.total).unwrap_or(100);
             fill(Key::StatusLoading, &[("percent", &percent(share))])
         }
         _ => fill(Key::StatusLines, &[("count", &number(doc.lines().count() as u64))]),
@@ -127,7 +129,8 @@ mod tests {
         let line = "жёлтый €uro ".repeat(COUNT_STEP / 8);
         let t = text(line.as_bytes());
         let range = 1..t.len();
-        let mut count = SelectionCount { key: (EntityId::from(1u64), range.clone(), 0), counted_to: 1, chars: 0, task: None };
+        let mut count =
+            SelectionCount { key: (EntityId::from(1u64), range.clone(), 0), counted_to: 1, chars: 0, _task: None };
         let mut steps = 0;
         while !count.step(&t) {
             steps += 1;

@@ -5,8 +5,8 @@
 use std::rc::Rc;
 
 use gpui::{
-    App, AppContext, Context, EntityId, IntoElement, MouseButton, Render, RenderOnce, Role, ScrollHandle,
-    SharedString, Window, div, prelude::*, px, rgb,
+    App, AppContext, Context, EntityId, IntoElement, MouseButton, Render, RenderOnce, Role, ScrollHandle, SharedString,
+    Window, div, prelude::*, px, rgb,
 };
 
 use crate::theme::theme;
@@ -157,9 +157,11 @@ impl RenderOnce for TabBar {
                 .on_mouse_down(MouseButton::Left, move |_, window, cx| on_select(i, window, cx))
                 .on_mouse_up(MouseButton::Middle, move |_, window, cx| on_close_middle(i, window, cx))
                 .on_drag(dragged, |dragged, _, _, cx| cx.new(|_| dragged.clone()))
-                .drag_over::<DraggedTab>(move |style, dragged, _, _| {
-                    if dragged.owner == owner { style.bg(rgb(theme.pressed)) } else { style }
-                })
+                .drag_over::<DraggedTab>(
+                    move |style, dragged, _, _| {
+                        if dragged.owner == owner { style.bg(rgb(theme.pressed)) } else { style }
+                    },
+                )
                 .on_drop(move |dragged: &DraggedTab, window, cx| {
                     if dragged.owner == owner {
                         on_move((dragged.index, i), window, cx);
@@ -167,8 +169,18 @@ impl RenderOnce for TabBar {
                 })
                 .when_some(tab.tooltip, |tab, path| tab.tooltip(Tooltip::builder(path, None)))
                 // The active tab is marked by a line over it.
-                .when(active, |tab| tab.child(div().absolute().top_0().left_0().right_0().h(px(2.)).bg(rgb(theme.accent))))
-                .child(div().flex_shrink(1.).min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(tab.title))
+                .when(active, |tab| {
+                    tab.child(div().absolute().top_0().left_0().right_0().h(px(2.)).bg(rgb(theme.accent)))
+                })
+                .child(
+                    div()
+                        .flex_shrink(1.)
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(tab.title),
+                )
                 .child(close)
         });
         let (on_move, on_new) = (self.on_move.clone(), self.on_new.clone());
@@ -188,9 +200,11 @@ impl RenderOnce for TabBar {
                     .id("tab-bar-rest")
                     .flex_1()
                     .h_full()
-                    .drag_over::<DraggedTab>(move |style, dragged, _, _| {
-                        if dragged.owner == owner { style.bg(rgb(theme.pressed)) } else { style }
-                    })
+                    .drag_over::<DraggedTab>(
+                        move |style, dragged, _, _| {
+                            if dragged.owner == owner { style.bg(rgb(theme.pressed)) } else { style }
+                        },
+                    )
                     .on_drop(move |dragged: &DraggedTab, window, cx| {
                         if dragged.owner == owner {
                             on_move((dragged.index, count - 1), window, cx);
