@@ -19,7 +19,9 @@ impl Workspace {
                 update_menus(Some(workspace), cx);
             }
         });
-        Workspace { editor, _subscriptions: vec![activation] }
+        // Colors follow the appearance of the system, unless a theme is chosen.
+        let appearance = migpad_ui::theme::follow_system(window, cx);
+        Workspace { editor, _subscriptions: vec![activation, appearance] }
     }
 
     /// The view of the document that the commands act on.

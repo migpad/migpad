@@ -8,7 +8,7 @@ use gpui::{
 };
 
 use crate::layout::Layout;
-use crate::view::{EditorView, colors};
+use crate::view::EditorView;
 
 pub(crate) struct EditorElement {
     view: Entity<EditorView>,
@@ -81,32 +81,33 @@ impl Element for EditorElement {
         cx: &mut App,
     ) {
         let geometry = layout.geometry;
-        window.paint_quad(fill(geometry.bounds, rgb(colors::BACKGROUND)));
-        window.paint_quad(fill(geometry.gutter, rgb(colors::GUTTER)));
+        let colors = layout.colors;
+        window.paint_quad(fill(geometry.bounds, rgb(colors.background)));
+        window.paint_quad(fill(geometry.gutter, rgb(colors.gutter)));
         window.with_content_mask(Some(ContentMask { bounds: layout.clip }), |window| {
             for &rect in &layout.selection {
                 window.paint_quad(fill(rect, rgb(layout.selection_color)));
             }
             for &guide in &layout.guides {
-                window.paint_quad(fill(guide, rgb(colors::GUIDE)));
+                window.paint_quad(fill(guide, rgb(colors.guide)));
             }
             for (line, origin) in &layout.lines {
                 let _ = line.paint(*origin, layout.line_height, TextAlign::Left, None, window, cx);
             }
             for (label, origin, background) in &layout.labels {
-                window.paint_quad(fill(*background, rgb(colors::LABEL_BACKGROUND)).corner_radii(px(3.)));
+                window.paint_quad(fill(*background, rgb(colors.label_background)).corner_radii(px(3.)));
                 let _ = label.paint(*origin, layout.line_height, TextAlign::Left, None, window, cx);
             }
             if let Some(caret) = layout.caret {
-                window.paint_quad(fill(caret, rgb(colors::CARET)));
+                window.paint_quad(fill(caret, rgb(colors.caret)));
             }
         });
         for (number, origin) in &layout.numbers {
             let _ = number.paint(*origin, layout.line_height, TextAlign::Left, None, window, cx);
         }
-        window.paint_quad(fill(geometry.track, rgb(colors::TRACK)));
+        window.paint_quad(fill(geometry.track, rgb(colors.track)));
         if let Some(thumb) = geometry.thumb {
-            window.paint_quad(fill(thumb, rgb(colors::THUMB)));
+            window.paint_quad(fill(thumb, rgb(colors.thumb)));
         }
         if let Some(hitbox) = &layout.hitbox {
             window.set_cursor_style(CursorStyle::IBeam, hitbox);

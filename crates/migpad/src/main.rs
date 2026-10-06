@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use gpui::{App, AppContext, Bounds, Entity, Focusable, TitlebarOptions, WindowBounds, WindowOptions, px, size};
 use migpad_core::document::{Document, OpenAs, Opened, open};
 use migpad_editor::EditorView;
+use migpad_ui::ThemeMode;
 
 use crate::strings::Language;
 use crate::workspace::Workspace;
@@ -23,6 +24,7 @@ fn main() {
     let path = file_argument(std::env::args_os().skip(1));
     gpui_platform::application().run(move |cx: &mut App| {
         strings::set_language(Language::of_system());
+        migpad_ui::theme::set_mode(theme_mode(), cx);
         migpad_editor::init(cx);
         commands::init(&modules::all(), cx);
         commands::update_menus(None, cx);
@@ -56,6 +58,16 @@ fn main() {
         debug_input::play(window, cx);
         cx.activate(true);
     });
+}
+
+/// Light or dark as the system is; a debug build takes `MIGPAD_THEME=light` or `dark` for
+/// screenshots, until the settings can choose.
+fn theme_mode() -> ThemeMode {
+    match std::env::var("MIGPAD_THEME") {
+        Ok(theme) if cfg!(debug_assertions) && theme == "light" => ThemeMode::Light,
+        Ok(theme) if cfg!(debug_assertions) && theme == "dark" => ThemeMode::Dark,
+        _ => ThemeMode::System,
+    }
 }
 
 /// The file to open: the first argument that is not an option. An option such as

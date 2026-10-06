@@ -7,9 +7,9 @@ use gpui::{Bounds, Font, Hitbox, Hsla, Pixels, Point, ShapedLine, TextRun, Under
 use migpad_core::document::Text;
 use migpad_core::text::{LineIndex, TextStore};
 
+use crate::colors::EditorColors;
 use crate::columns::Columns;
 use crate::display::{DisplayText, MAX_SHAPED, OffsetMap};
-use crate::view::colors;
 
 /// Columns between tab stops, until the settings give it.
 pub(crate) const TAB_WIDTH: usize = 8;
@@ -68,6 +68,7 @@ pub(crate) struct ScreenLine {
 /// How a view lays out its lines.
 pub(crate) struct LineStyle<'a> {
     pub metrics: &'a Metrics,
+    pub colors: &'a EditorColors,
     /// Columns of the long lines.
     pub columns: &'a Columns,
     /// Pixels scrolled to the right.
@@ -114,7 +115,7 @@ impl ScreenLine {
             let at = |pos: usize| map.display_offset(pos.clamp(shown.start, shown.end) - shown.start);
             at(underline.start)..at(underline.end)
         });
-        let runs = runs(shown_text.len(), &marks, underline, style.metrics);
+        let runs = runs(shown_text.len(), &marks, underline, style.metrics, style.colors);
         let shaped = window.text_system().shape_line(shown_text.into(), style.metrics.font_size, &runs, None);
         ScreenLine { range, shown, x: 0.0, shaped, map }
     }
@@ -161,18 +162,24 @@ impl ScreenLine {
 
 /// The runs of a shown text of `len` bytes: marks in their faint color, and the bytes of
 /// `underline` underlined.
-fn runs(len: usize, marks: &[Range<usize>], underline: Option<Range<usize>>, metrics: &Metrics) -> Vec<TextRun> {
+fn runs(
+    len: usize,
+    marks: &[Range<usize>],
+    underline: Option<Range<usize>>,
+    metrics: &Metrics,
+    colors: &EditorColors,
+) -> Vec<TextRun> {
     let mut cuts: Vec<usize> = marks.iter().flat_map(|mark| [mark.start, mark.end]).collect();
     cuts.extend(underline.iter().flat_map(|underline| [underline.start, underline.end]));
     cuts.extend([0, len]);
     cuts.sort_unstable();
     cuts.dedup();
-    let style = UnderlineStyle { color: Some(rgb(colors::TEXT).into()), thickness: px(1.), wavy: false };
+    let style = UnderlineStyle { color: Some(rgb(colors.text).into()), thickness: px(1.), wavy: false };
     let mut runs: Vec<TextRun> = Vec::new();
     for piece in cuts.windows(2) {
         let (from, to) = (piece[0], piece[1]);
         let marked = marks.get(marks.partition_point(|mark| mark.end <= from)).is_some_and(|mark| mark.start <= from);
-        let mut run = metrics.run(to - from, if marked { colors::MARK } else { colors::TEXT });
+        let mut run = metrics.run(to - from, if marked { colors.mark } else { colors.text });
         run.underline = underline.as_ref().is_some_and(|underline| underline.contains(&from)).then_some(style);
         // Pieces that look the same make one run.
         match runs.last_mut() {
@@ -181,7 +188,7 @@ fn runs(len: usize, marks: &[Range<usize>], underline: Option<Range<usize>>, met
         }
     }
     if runs.is_empty() {
-        runs.push(metrics.run(0, colors::TEXT));
+        runs.push(metrics.run(0, colors.text));
     }
     runs
 }
@@ -210,6 +217,7 @@ pub(crate) struct Layout {
     pub numbers: Vec<(ShapedLine, Point<Pixels>)>,
     pub selection: Vec<Bounds<Pixels>>,
     pub selection_color: u32,
+    pub colors: EditorColors,
     pub caret: Option<Bounds<Pixels>>,
     /// Indent guides: thin vertical lines.
     pub guides: Vec<Bounds<Pixels>>,
