@@ -103,9 +103,12 @@ impl Element for EditorElement {
                 window.paint_quad(fill(caret, rgb(colors.caret)));
             }
         });
-        for (number, origin) in &layout.numbers {
-            let _ = number.paint(*origin, layout.line_height, TextAlign::Left, None, window, cx);
-        }
+        // The number of a row scrolled half out of view stays in the gutter, off the bars around.
+        window.with_content_mask(Some(ContentMask { bounds: geometry.gutter }), |window| {
+            for (number, origin) in &layout.numbers {
+                let _ = number.paint(*origin, layout.line_height, TextAlign::Left, None, window, cx);
+            }
+        });
         window.paint_quad(fill(geometry.track, rgb(colors.track)));
         if let Some(thumb) = geometry.thumb {
             window.paint_quad(fill(thumb, rgb(colors.thumb)));
