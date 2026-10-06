@@ -89,6 +89,9 @@ pub struct EditorView {
     drag: Option<Drag>,
     /// Scrolls while a selection is dragged past the edges of the text.
     autoscroll: Option<Task<()>>,
+    /// Whether the next layout scrolls to show the caret: the view of a selection set before it
+    /// knew its size.
+    reveal_pending: bool,
     /// Whether the blinking caret is shown at the moment.
     caret_on: bool,
     blink: Option<Task<()>>,
@@ -144,6 +147,7 @@ impl EditorView {
             goal_x: None,
             drag: None,
             autoscroll: None,
+            reveal_pending: false,
             caret_on: true,
             blink: None,
             _subscriptions: subscriptions,
@@ -170,7 +174,10 @@ impl EditorView {
         self.goal_x = None;
         self.caret_at_row_end = false;
         self.seal_undo_step(cx);
-        self.caret_moved(window, cx);
+        // Scrolled to at the next layout, which knows the size of the view.
+        self.reveal_pending = true;
+        self.restart_blink(window, cx);
+        window.invalidate_character_coordinates();
     }
 
     /// The line of the caret and its column on screen, both from zero: a tab reaches to its stop,
@@ -350,6 +357,9 @@ impl EditorView {
         }
         if self.wrapping() {
             self.scroll_x = 0.0;
+        }
+        if std::mem::take(&mut self.reveal_pending) {
+            self.reveal_caret(window, cx);
         }
         let doc = self.document.read(cx);
         let (text, lines) = (doc.text(), doc.lines());
