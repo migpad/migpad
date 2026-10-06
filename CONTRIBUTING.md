@@ -50,15 +50,21 @@ CI also runs [cargo-deny](https://github.com/EmbarkStudios/cargo-deny) (`cargo d
 Debug builds play input from the `MIGPAD_DEBUG_INPUT` environment variable through GPUI, as if it were typed and clicked: key bindings, actions and mouse handlers run as for real input. Changes to the interface can then be checked with screenshots:
 
 ```sh
-MIGPAD_DEBUG_INPUT="down shift-end click:300,40,2" cargo run -- notes.txt
+MIGPAD_DEBUG_INPUT="down shift-end click:300,120,2" cargo run -- notes.txt
 ```
 
 Steps are keystrokes (`shift-end`, `cmd-a`), text as typed or committed by an input method (`type:TEXT`), text an input method composes (`mark:TEXT`, then `unmark` or `type:TEXT`), `click:X,Y` with an optional number of clicks, `press:X,Y`, `move:X,Y`, `release:X,Y` and `wait:MS`; see `crates/migpad/src/debug_input.rs`. The input bypasses the system (keyboard layouts, input methods, menus), so real keyboards and mice still need a check by hand.
 
-The interface is in the language of the system: Russian on a Russian system, English otherwise. The strings are in `crates/migpad/locales/`; `en.toml` and `ru.toml` have the same keys, or the build fails. On macOS the other language can be tried without changing the system:
+The interface is in the language of the system: Russian on a Russian system, English otherwise. The strings are in `crates/migpad/locales/`; `en.toml` and `ru.toml` have the same keys and placeholders, or the build fails; in the strings of menus `&` marks the mnemonic, the letter that chooses the item with Alt on Windows and Linux. On macOS the other language can be tried without changing the system:
 
 ```sh
 cargo run -- -AppleLanguages '(en)' notes.txt
+```
+
+The theme follows the appearance of the system; a debug build can be held light or dark, and on macOS it can show the menu bar that MigPad draws on Windows and Linux:
+
+```sh
+MIGPAD_THEME=dark MIGPAD_MENU_BAR=1 cargo run -- notes.txt
 ```
 
 Input fields — the single-line mode of the editor view — can be tried in an example window with two fields, as in a find bar:

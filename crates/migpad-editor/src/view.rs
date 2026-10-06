@@ -25,6 +25,7 @@ pub(crate) use caret::Motion;
 pub(crate) use edit::Deletion;
 use mouse::Drag;
 
+use crate::colors::EditorColors;
 use crate::columns::Columns;
 use crate::element::EditorElement;
 use crate::indent;
@@ -40,26 +41,8 @@ const CARET_WIDTH: f32 = 2.0;
 const BLINK: Duration = Duration::from_millis(500);
 /// Lines do not wrap in a view narrower than this many cells.
 const MIN_WRAP_CELLS: usize = 8;
-
-/// Colors of the light theme, until the theme of the interface takes over.
-pub(crate) mod colors {
-    pub const BACKGROUND: u32 = 0xffffff;
-    pub const TEXT: u32 = 0x1f1f1f;
-    pub const GUTTER: u32 = 0xf5f5f5;
-    pub const LINE_NUMBER: u32 = 0x8a8a8a;
-    pub const TRACK: u32 = 0xf4f4f4;
-    pub const THUMB: u32 = 0xc0c0c0;
-    pub const SELECTION: u32 = 0xb4d5fe;
-    /// The selection of a view without focus or in an inactive window.
-    pub const SELECTION_INACTIVE: u32 = 0xdcdcdc;
-    pub const CARET: u32 = 0x1f1f1f;
-    /// Marks of what is otherwise invisible: whitespace, control characters.
-    pub const MARK: u32 = 0xb0b0b0;
-    pub const GUIDE: u32 = 0xe2e2e2;
-    /// Labels of line breaks: LF, CRLF, CR.
-    pub const LABEL: u32 = 0xffffff;
-    pub const LABEL_BACKGROUND: u32 = 0xbcbcbc;
-}
+/// Bytes of a long line walked at a time to find the column of the caret.
+pub const COLUMN_STEP: usize = 4 << 20;
 
 /// The view of a document in a window, or the one line of an input field.
 pub struct EditorView {
@@ -68,6 +51,8 @@ pub struct EditorView {
     /// An input field: one line, without line numbers, a scrollbar or wrapping.
     single_line: bool,
     metrics: Metrics,
+    /// The colors of the last layout: those of the theme.
+    colors: EditorColors,
     /// The first visible line, with a fraction for smooth scrolling. Lines rather than pixels:
     /// millions of lines times their height do not fit the precision of `Pixels`.
     scroll_top: f64,
@@ -106,6 +91,9 @@ pub struct EditorView {
     drag: Option<Drag>,
     /// Scrolls while a selection is dragged past the edges of the text.
     autoscroll: Option<Task<()>>,
+    /// Whether the next layout scrolls to show the caret: the view of a selection set before it
+    /// knew its size.
+    reveal_pending: bool,
     /// Whether the blinking caret is shown at the moment.
     caret_on: bool,
     blink: Option<Task<()>>,
@@ -141,6 +129,7 @@ impl EditorView {
             focus,
             single_line,
             metrics: Metrics::new(window),
+            colors: EditorColors::current(cx),
             scroll_top: 0.0,
             scroll_x: 0.0,
             page_lines: 1,
@@ -160,6 +149,7 @@ impl EditorView {
             goal_x: None,
             drag: None,
             autoscroll: None,
+            reveal_pending: false,
             caret_on: true,
             blink: None,
             _subscriptions: subscriptions,
@@ -169,6 +159,40 @@ impl EditorView {
     /// The document of the view; the owner of an input field observes it to hear of edits.
     pub fn document(&self) -> &Entity<Document> {
         &self.document
+    }
+
+    /// The selection: where it was started, and the caret.
+    pub fn selection(&self) -> Selection {
+        self.selection
+    }
+
+    /// Selects from `selection.anchor` to the caret at `selection.head`, both kept within the text
+    /// and on character boundaries, and scrolls to show the caret: the view of a reopened document
+    /// comes back to where it was.
+    pub fn select(&mut self, selection: Selection, window: &mut Window, cx: &mut Context<Self>) {
+        let doc = self.document.read(cx);
+        let snap = |pos| movement::snap(doc.text(), doc.lines(), pos);
+        self.selection = Selection { anchor: snap(selection.anchor), head: snap(selection.head) };
+        self.goal_x = None;
+        self.caret_at_row_end = false;
+        self.seal_undo_step(cx);
+        // Scrolled to at the next layout, which knows the size of the view.
+        self.reveal_pending = true;
+        self.restart_blink(window, cx);
+        window.invalidate_character_coordinates();
+    }
+
+    /// The line of the caret and its column on screen, both from zero: a tab reaches to its stop,
+    /// any other character takes one column. The column of a caret far into a long line takes
+    /// walking the line up to it: each call walks it [`COLUMN_STEP`] further, and the column is
+    /// `None` until it is found.
+    pub fn caret_position(&self, cx: &App) -> (usize, Option<usize>) {
+        let doc = self.document.read(cx);
+        let (text, lines) = (doc.text(), doc.lines());
+        let head = self.selection.head.min(text.len());
+        let line = lines.line_of(head);
+        let (range, _) = lines.line_range(text, line);
+        (line, self.columns.column_within(text, &range, head, COLUMN_STEP))
     }
 
     /// The text, invalid UTF-8 as U+FFFD: what an input field holds.
@@ -225,6 +249,7 @@ impl EditorView {
     fn line_style(&self) -> LineStyle<'_> {
         LineStyle {
             metrics: &self.metrics,
+            colors: &self.colors,
             columns: &self.columns,
             scroll_x: self.scroll_x,
             whitespace: self.show_whitespace,
@@ -269,6 +294,9 @@ impl EditorView {
     /// Without focus, what is being composed stays as it is, and typing after the focus is back
     /// starts a new undo step.
     fn blurred(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A selection being dragged ends: the view of a tab switched away from no longer sees the
+        // mouse.
+        self.mouse_up();
         self.marked = None;
         self.seal_undo_step(cx);
         self.restart_blink(window, cx);
@@ -299,6 +327,8 @@ impl EditorView {
     /// Lays out the rows that fit in `bounds`, with the selection and the caret.
     pub(crate) fn layout(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut Context<Self>) -> Layout {
         let active = self.focus.is_focused(window) && window.is_window_active();
+        self.colors = EditorColors::current(cx);
+        let colors = self.colors;
         let (count, large) = {
             let doc = self.document.read(cx);
             (doc.lines().count(), doc.is_large())
@@ -334,6 +364,9 @@ impl EditorView {
         }
         if self.wrapping() {
             self.scroll_x = 0.0;
+        }
+        if std::mem::take(&mut self.reveal_pending) {
+            self.reveal_caret(window, cx);
         }
         let doc = self.document.read(cx);
         let (text, lines) = (doc.text(), doc.lines());
@@ -389,11 +422,13 @@ impl EditorView {
             lines: Vec::with_capacity(rows.len()),
             numbers: Vec::with_capacity(rows.len()),
             selection: Vec::new(),
-            selection_color: if active { colors::SELECTION } else { colors::SELECTION_INACTIVE },
+            selection_color: if active { colors.selection } else { colors.selection_inactive },
+            colors,
             caret: None,
             guides: Vec::new(),
             labels: Vec::new(),
             hitbox: None,
+            view_hitbox: None,
         };
         let mut widest: f64 = 0.0;
         for (i, &at) in rows.iter().enumerate() {
@@ -418,7 +453,7 @@ impl EditorView {
                     (_, b'\r') => "CR",
                     _ => "LF",
                 };
-                let run = metrics.run(label.len(), colors::LABEL);
+                let run = metrics.run(label.len(), colors.label);
                 let font_size = metrics.font_size * 0.75;
                 let shaped = window.text_system().shape_line(label.into(), font_size, &[run], None);
                 let x = screen_x(row.x_of(row.range.end)) + px(3.);
@@ -452,7 +487,7 @@ impl EditorView {
 
             if first && !self.single_line {
                 let number = (at.line + 1).to_string();
-                let run = metrics.run(number.len(), colors::LINE_NUMBER);
+                let run = metrics.run(number.len(), colors.line_number);
                 let shaped = window.text_system().shape_line(number.into(), metrics.font_size, &[run], None);
                 let x = gutter.right() - px(7.) - shaped.width();
                 layout.numbers.push((shaped, point(x, y)));

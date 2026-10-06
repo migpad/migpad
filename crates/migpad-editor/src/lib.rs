@@ -1,6 +1,7 @@
 //! MigPad editor view: line layout, rendering, selections, caret, text input and IME,
 //! and the single-line mode used by input fields.
 
+mod colors;
 mod columns;
 mod display;
 mod element;
@@ -12,6 +13,7 @@ mod utf16;
 mod view;
 mod wrap;
 
+pub use colors::EditorColors;
 pub use keymap::key_bindings;
 pub use view::EditorView;
 

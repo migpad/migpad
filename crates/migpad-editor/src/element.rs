@@ -8,7 +8,7 @@ use gpui::{
 };
 
 use crate::layout::Layout;
-use crate::view::{EditorView, colors};
+use crate::view::EditorView;
 
 pub(crate) struct EditorElement {
     view: Entity<EditorView>,
@@ -66,6 +66,7 @@ impl Element for EditorElement {
         cx: &mut App,
     ) -> Layout {
         let mut layout = self.view.update(cx, |view, cx| view.layout(bounds, window, cx));
+        layout.view_hitbox = Some(window.insert_hitbox(bounds, HitboxBehavior::Normal));
         layout.hitbox = Some(window.insert_hitbox(layout.geometry.text_area, HitboxBehavior::Normal));
         layout
     }
@@ -81,32 +82,36 @@ impl Element for EditorElement {
         cx: &mut App,
     ) {
         let geometry = layout.geometry;
-        window.paint_quad(fill(geometry.bounds, rgb(colors::BACKGROUND)));
-        window.paint_quad(fill(geometry.gutter, rgb(colors::GUTTER)));
+        let colors = layout.colors;
+        window.paint_quad(fill(geometry.bounds, rgb(colors.background)));
+        window.paint_quad(fill(geometry.gutter, rgb(colors.gutter)));
         window.with_content_mask(Some(ContentMask { bounds: layout.clip }), |window| {
             for &rect in &layout.selection {
                 window.paint_quad(fill(rect, rgb(layout.selection_color)));
             }
             for &guide in &layout.guides {
-                window.paint_quad(fill(guide, rgb(colors::GUIDE)));
+                window.paint_quad(fill(guide, rgb(colors.guide)));
             }
             for (line, origin) in &layout.lines {
                 let _ = line.paint(*origin, layout.line_height, TextAlign::Left, None, window, cx);
             }
             for (label, origin, background) in &layout.labels {
-                window.paint_quad(fill(*background, rgb(colors::LABEL_BACKGROUND)).corner_radii(px(3.)));
+                window.paint_quad(fill(*background, rgb(colors.label_background)).corner_radii(px(3.)));
                 let _ = label.paint(*origin, layout.line_height, TextAlign::Left, None, window, cx);
             }
             if let Some(caret) = layout.caret {
-                window.paint_quad(fill(caret, rgb(colors::CARET)));
+                window.paint_quad(fill(caret, rgb(colors.caret)));
             }
         });
-        for (number, origin) in &layout.numbers {
-            let _ = number.paint(*origin, layout.line_height, TextAlign::Left, None, window, cx);
-        }
-        window.paint_quad(fill(geometry.track, rgb(colors::TRACK)));
+        // The number of a row scrolled half out of view stays in the gutter, off the bars around.
+        window.with_content_mask(Some(ContentMask { bounds: geometry.gutter }), |window| {
+            for (number, origin) in &layout.numbers {
+                let _ = number.paint(*origin, layout.line_height, TextAlign::Left, None, window, cx);
+            }
+        });
+        window.paint_quad(fill(geometry.track, rgb(colors.track)));
         if let Some(thumb) = geometry.thumb {
-            window.paint_quad(fill(thumb, rgb(colors::THUMB)));
+            window.paint_quad(fill(thumb, rgb(colors.thumb)));
         }
         if let Some(hitbox) = &layout.hitbox {
             window.set_cursor_style(CursorStyle::IBeam, hitbox);
@@ -114,10 +119,13 @@ impl Element for EditorElement {
         let focus = self.view.read(cx).focus_handle(cx);
         window.handle_input(&focus, ElementInputHandler::new(bounds, self.view.clone()), cx);
 
-        // Moves and releases are heard outside the element too: a drag goes on past its edges.
+        // Presses and the wheel only where nothing covers the view, such as an open menu; moves and
+        // releases are heard outside the element too: a drag goes on past its edges.
+        let Some(hitbox) = layout.view_hitbox.clone() else { return };
         let view = self.view.clone();
+        let pressed = hitbox.clone();
         window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
-            if phase == DispatchPhase::Bubble && event.button == MouseButton::Left && bounds.contains(&event.position) {
+            if phase == DispatchPhase::Bubble && event.button == MouseButton::Left && pressed.is_hovered(window) {
                 view.update(cx, |view, cx| view.mouse_down(event, window, cx));
                 cx.stop_propagation();
             }
@@ -136,7 +144,7 @@ impl Element for EditorElement {
         });
         let view = self.view.clone();
         window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
-            if phase == DispatchPhase::Bubble && bounds.contains(&event.position) {
+            if phase == DispatchPhase::Bubble && hitbox.should_handle_scroll(window) {
                 view.update(cx, |view, cx| view.scroll(event, window, cx));
             }
         });

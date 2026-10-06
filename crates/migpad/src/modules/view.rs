@@ -17,8 +17,12 @@ impl Module for ViewModule {
 
     fn register(&self, registry: &mut Registry) {
         let menu = |group| Some((MenuId::View, group));
+        // A large file is never wrapped: there the item is off and does nothing.
         let word_wrap = Command::new("view.word_wrap", Key::ViewWordWrap, ToggleWordWrap)
-            .checked(|workspace, cx| workspace.editor().read(cx).wraps_lines());
+            .checked(|workspace, cx| {
+                workspace.editor().read(cx).wraps_lines() && !workspace.document().read(cx).is_large()
+            })
+            .enabled(|workspace, cx| !workspace.document().read(cx).is_large());
         registry.add(word_wrap, menu(0));
         let invisibles = Command::new("view.invisibles", Key::ViewInvisibles, ToggleInvisibles)
             .checked(|workspace, cx| workspace.editor().read(cx).shows_whitespace());
@@ -28,6 +32,9 @@ impl Module for ViewModule {
         registry.add(indent_guides, menu(1));
 
         registry.on_window_action(|workspace, _: &ToggleWordWrap, _, cx| {
+            if workspace.document().read(cx).is_large() {
+                return;
+            }
             workspace.editor().update(cx, |editor, cx| editor.set_word_wrap(!editor.wraps_lines(), cx));
             update_menus(Some(workspace), cx);
         });

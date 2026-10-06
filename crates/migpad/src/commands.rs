@@ -2,14 +2,20 @@
 //! registers its commands, where they go in the menus and what handles them; the menu bar and
 //! the key bindings are built from that registry.
 
+use std::any::TypeId;
+use std::collections::HashSet;
 use std::rc::Rc;
 
 use gpui::{
-    Action, App, Context, Div, DummyKeyboardMapper, Global, InteractiveElement, KeyBinding, Menu, MenuItem, OsAction,
-    SystemMenuType, Window,
+    Action, App, Context, Div, DummyKeyboardMapper, FocusHandle, Focusable, Global, InteractiveElement, KeyBinding,
+    Menu, MenuItem, OsAction, SharedString, SystemMenuType, Window, WindowId,
 };
 
-use crate::strings::{Key, tr};
+use migpad_ui::menu_bar::{ItemSpec, MenuSpec};
+
+use crate::keys;
+use crate::strings::{Key, mnemonic, tr};
+use crate::windows;
 use crate::workspace::Workspace;
 
 /// A feature of the application, which registers its part of the commands and the menus.
@@ -33,11 +39,15 @@ pub struct Command {
     pub keys: &'static [&'static str],
     /// Whether a toggle is on, for its check mark in the menus.
     pub checked: Option<fn(&Workspace, &App) -> bool>,
+    /// Whether the command has something to do now, for the menus MigPad draws: undo without steps
+    /// to undo is gray. Without it, a command is available when something
+    /// handles its action.
+    pub enabled: Option<fn(&Workspace, &App) -> bool>,
 }
 
 impl Command {
     pub fn new(id: &'static str, label: Key, action: impl Action) -> Self {
-        Command { id, label, action: Box::new(action), os_action: None, keys: &[], checked: None }
+        Command { id, label, action: Box::new(action), os_action: None, keys: &[], checked: None, enabled: None }
     }
 
     pub fn keys(self, keys: &'static [&'static str]) -> Self {
@@ -50,6 +60,10 @@ impl Command {
 
     pub fn checked(self, checked: fn(&Workspace, &App) -> bool) -> Self {
         Command { checked: Some(checked), ..self }
+    }
+
+    pub fn enabled(self, enabled: fn(&Workspace, &App) -> bool) -> Self {
+        Command { enabled: Some(enabled), ..self }
     }
 }
 
@@ -73,22 +87,35 @@ pub fn by_os(
 pub enum MenuId {
     /// The menu of the application on macOS, named after it.
     App,
+    File,
     Edit,
     View,
     Window,
 }
 
 impl MenuId {
-    const ALL: [MenuId; 4] = [MenuId::App, MenuId::Edit, MenuId::View, MenuId::Window];
+    const ALL: [MenuId; 5] = [MenuId::App, MenuId::File, MenuId::Edit, MenuId::View, MenuId::Window];
 
     fn title(self) -> &'static str {
+        self.key().map_or("MigPad", tr)
+    }
+
+    /// The key of the title; the menu of the application is named after it.
+    fn key(self) -> Option<Key> {
         match self {
-            MenuId::App => "MigPad",
-            MenuId::Edit => tr(Key::EditMenu),
-            MenuId::View => tr(Key::ViewMenu),
-            MenuId::Window => tr(Key::WindowMenu),
+            MenuId::App => None,
+            MenuId::File => Some(Key::FileMenu),
+            MenuId::Edit => Some(Key::EditMenu),
+            MenuId::View => Some(Key::ViewMenu),
+            MenuId::Window => Some(Key::WindowMenu),
         }
     }
+}
+
+/// Whether windows have the menu bar MigPad draws: on Windows and Linux, where GPUI makes none.
+/// A debug build shows it on macOS too with `MIGPAD_MENU_BAR=1`, to try it there.
+pub fn own_menu_bar() -> bool {
+    !cfg!(target_os = "macos") || (cfg!(debug_assertions) && std::env::var_os("MIGPAD_MENU_BAR").is_some())
 }
 
 /// What a menu item is.
@@ -96,7 +123,14 @@ enum Entry {
     Command(&'static str),
     /// The Services menu of macOS, which the system fills.
     Services,
+    /// The open windows, one item each, to bring forward.
+    Windows,
 }
+
+/// Brings the window forward: an item of the list of windows.
+#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[action(namespace = window, no_json)]
+pub struct ActivateWindow(pub WindowId);
 
 /// An item in a group of a menu: groups go in the order of their numbers, separated by lines,
 /// and items within a group in the order they were added.
@@ -116,6 +150,8 @@ type AppHandler = Box<dyn FnOnce(&mut App)>;
 pub struct Registry {
     commands: Vec<Command>,
     placements: Vec<Placement>,
+    /// The actions the application handles whatever window they come from.
+    app_actions: HashSet<TypeId>,
     window_handlers: Vec<WindowHandler>,
     app_handlers: Vec<AppHandler>,
 }
@@ -136,6 +172,76 @@ impl Registry {
         self.placements.push(Placement { menu, group, entry: Entry::Services });
     }
 
+    fn command(&self, id: &str) -> &Command {
+        self.commands.iter().find(|command| command.id == id).expect("a command of the registry")
+    }
+
+    /// Whether `command` can act in `window`, whose root is `workspace`: the application handles
+    /// its action, or the window does where the focus is — or is to go back to, from the menus —
+    /// and the command has something to do. Which actions the window handles is known once it has
+    /// drawn a frame: before, they are taken as handled.
+    fn is_enabled(
+        &self,
+        command: &Command,
+        workspace: &Workspace,
+        focus: Option<&FocusHandle>,
+        window: &Window,
+        cx: &App,
+    ) -> bool {
+        let action = command.action.as_ref();
+        let handled = !workspace.has_drawn()
+            || self.app_actions.contains(&action.as_any().type_id())
+            || focus.map_or_else(
+                || window.is_action_available(action, cx),
+                |focus| window.is_action_available_in(action, focus),
+            );
+        handled && command.enabled.is_none_or(|enabled| enabled(workspace, cx))
+    }
+
+    /// The menus of the bar MigPad draws, for the window of `workspace`: those of macOS, without the
+    /// menu of the application and what macOS fills in. `target` has the focus the chosen command
+    /// goes to.
+    pub fn menu_bar(
+        &self,
+        workspace: &Workspace,
+        target: Option<&FocusHandle>,
+        window: &Window,
+        cx: &App,
+    ) -> Vec<MenuSpec> {
+        let focus = workspace.editor().focus_handle(cx);
+        let menu = |id: MenuId| {
+            let mut placements: Vec<&Placement> =
+                self.placements.iter().filter(|placement| placement.menu == id).collect();
+            placements.sort_by_key(|placement| placement.group);
+            let mut items = Vec::with_capacity(placements.len() + 2);
+            let mut group = None;
+            for placement in placements {
+                let Entry::Command(command) = placement.entry else { continue };
+                if group.is_some_and(|group| group != placement.group) {
+                    items.push(ItemSpec::Separator);
+                }
+                group = Some(placement.group);
+                let command = self.command(command);
+                items.push(ItemSpec::Action {
+                    label: tr(command.label).into(),
+                    mnemonic: mnemonic(command.label),
+                    keys: keys::for_action(command.action.as_ref(), &focus, window).map(SharedString::from),
+                    checked: command.checked.map(|checked| checked(workspace, cx)),
+                    enabled: self.is_enabled(command, workspace, target, window, cx),
+                    action: command.action.boxed_clone(),
+                });
+            }
+            let title = id.key().map(|key| (SharedString::from(tr(key)), mnemonic(key)));
+            title.filter(|_| !items.is_empty()).map(|(title, mnemonic)| MenuSpec { title, mnemonic, items })
+        };
+        MenuId::ALL.into_iter().filter_map(menu).collect()
+    }
+
+    /// Adds the list of open windows to a group of a menu.
+    pub fn add_window_list(&mut self, menu: MenuId, group: u8) {
+        self.placements.push(Placement { menu, group, entry: Entry::Windows });
+    }
+
     /// Handles `A` in each window: the command acts on its document or on the window itself.
     pub fn on_window_action<A: Action>(
         &mut self,
@@ -147,6 +253,7 @@ impl Registry {
 
     /// Handles `A` in the application, whichever window it comes from.
     pub fn on_app_action<A: Action>(&mut self, handler: fn(&A, &mut App)) {
+        self.app_actions.insert(TypeId::of::<A>());
         self.app_handlers.push(Box::new(move |cx: &mut App| {
             cx.on_action(handler);
         }));
@@ -174,30 +281,60 @@ impl Registry {
             placements.sort_by_key(|placement| placement.group);
             let mut items = Vec::with_capacity(placements.len() + 2);
             for (i, placement) in placements.iter().enumerate() {
-                if i > 0 && placements[i - 1].group != placement.group {
+                let entries = self.menu_items(&placement.entry, workspace, cx);
+                if !entries.is_empty() && !items.is_empty() && placements[i - 1].group != placement.group {
                     items.push(MenuItem::separator());
                 }
-                items.push(self.menu_item(&placement.entry, workspace, cx));
+                items.extend(entries);
             }
             (!items.is_empty()).then(|| Menu::new(id.title()).items(items))
         };
         MenuId::ALL.into_iter().filter_map(menu).collect()
     }
 
-    fn menu_item(&self, entry: &Entry, workspace: Option<&Workspace>, cx: &App) -> MenuItem {
+    fn menu_items(&self, entry: &Entry, workspace: Option<&Workspace>, cx: &App) -> Vec<MenuItem> {
         let id = match entry {
             Entry::Command(id) => id,
-            Entry::Services => return MenuItem::os_submenu(tr(Key::AppServices), SystemMenuType::Services),
+            Entry::Services => return vec![MenuItem::os_submenu(tr(Key::AppServices), SystemMenuType::Services)],
+            Entry::Windows => return window_list(workspace, cx),
         };
-        let command = self.commands.iter().find(|command| command.id == *id).expect("menu items are of commands");
-        MenuItem::Action {
+        let command = self.command(id);
+        vec![MenuItem::Action {
             name: tr(command.label).into(),
             action: command.action.boxed_clone(),
             os_action: command.os_action,
             checked: command.checked.zip(workspace).is_some_and(|(checked, workspace)| checked(workspace, cx)),
             disabled: false,
-        }
+        }]
     }
+}
+
+/// The items of the open windows, the active one checked. macOS lists the windows itself in the
+/// menu called "Window", as it is in English: then there is no list of ours.
+fn window_list(workspace: Option<&Workspace>, cx: &App) -> Vec<MenuItem> {
+    if !cfg!(target_os = "macos") || MenuId::Window.title() == "Window" {
+        return Vec::new();
+    }
+    let active = cx.active_window().map(|window| window.window_id());
+    let mut windows: Vec<(WindowId, String)> =
+        windows::workspaces(cx).map(|(window, workspace)| (window.window_id(), workspace.title().to_owned())).collect();
+    // The workspace being updated is not among those that can be read.
+    if let Some(workspace) = workspace
+        && !windows.iter().any(|(id, _)| *id == workspace.window_id())
+    {
+        windows.push((workspace.window_id(), workspace.title().to_owned()));
+    }
+    windows.sort_by_key(|(id, _)| *id);
+    windows
+        .into_iter()
+        .map(|(id, title)| MenuItem::Action {
+            name: title.into(),
+            action: Box::new(ActivateWindow(id)),
+            os_action: None,
+            checked: Some(id) == active,
+            disabled: false,
+        })
+        .collect()
 }
 
 /// Registers the commands of `modules`, binds their keys and handles them.
@@ -255,6 +392,46 @@ mod tests {
     }
 
     #[test]
+    fn mnemonics_tell_the_menus_and_their_items_apart() {
+        use crate::strings::{LANGUAGE_LOCK, Language, mnemonic, set_language};
+
+        let _lock = LANGUAGE_LOCK.lock();
+        let registry = registry();
+        let letter = |key: Key| {
+            let at = mnemonic(key)?;
+            tr(key)[at..].chars().next().map(|c| c.to_lowercase().to_string())
+        };
+        for language in [Language::English, Language::Russian] {
+            set_language(language);
+            let menus: Vec<MenuId> = MenuId::ALL.into_iter().filter(|id| *id != MenuId::App).collect();
+            let mut titles: Vec<String> = menus.iter().filter_map(|id| letter(id.key()?)).collect();
+            assert_eq!(titles.len(), menus.len(), "{language:?}: every menu has a mnemonic");
+            titles.sort();
+            titles.dedup();
+            assert_eq!(titles.len(), menus.len(), "{language:?}: mnemonics of menus repeat");
+            for menu in menus {
+                let labels: Vec<Key> = registry
+                    .placements
+                    .iter()
+                    .filter(|placement| placement.menu == menu)
+                    .filter_map(|placement| match placement.entry {
+                        Entry::Command(id) => Some(registry.command(id).label),
+                        Entry::Services | Entry::Windows => None,
+                    })
+                    // The items of the Window menu that only macOS has go without mnemonics.
+                    .filter(|key| ![Key::WindowMinimize, Key::WindowZoom].contains(key))
+                    .collect();
+                let mut letters: Vec<String> = labels.iter().filter_map(|key| letter(*key)).collect();
+                assert_eq!(letters.len(), labels.len(), "{language:?} {menu:?}: every item has a mnemonic");
+                letters.sort();
+                letters.dedup();
+                assert_eq!(letters.len(), labels.len(), "{language:?} {menu:?}: mnemonics of items repeat");
+            }
+        }
+        set_language(Language::English);
+    }
+
+    #[test]
     fn commands_are_named_once_and_in_the_menus_once() {
         let registry = registry();
         let mut ids: Vec<&str> = registry.commands.iter().map(|command| command.id).collect();
@@ -266,7 +443,7 @@ mod tests {
             .iter()
             .filter_map(|placement| match placement.entry {
                 Entry::Command(id) => Some(id),
-                Entry::Services => None,
+                Entry::Services | Entry::Windows => None,
             })
             .collect();
         assert!(items.iter().all(|item| ids.contains(item)));
