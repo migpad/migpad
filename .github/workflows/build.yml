@@ -16,6 +16,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - target: macos-arm64
+            os: macos-latest
+            binary: migpad
           - target: linux-x64
             os: ubuntu-latest
             binary: migpad
@@ -33,6 +36,10 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             pkg-config libfontconfig-dev libfreetype-dev \
             libxcb1-dev libxkbcommon-x11-dev
+
+      - name: Ensure the Metal toolchain
+        if: runner.os == 'macOS'
+        run: xcrun -sdk macosx metal --version || xcodebuild -downloadComponent MetalToolchain
 
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
