@@ -159,6 +159,17 @@ pub fn changed_while_closed(file: &str) -> Notice {
     }
 }
 
+/// The file `file` was changed by another program, and the document has changes of its own: they
+/// are shown, and the file on disk is a choice away.
+pub fn changed_on_disk(file: &str) -> Notice {
+    Notice {
+        severity: Severity::Warning,
+        message: fill(Key::NoticeChangedOnDisk, &[("file", file)]),
+        topic: Some(Topic::Disk),
+        actions: vec![NoticeAction::LoadFromDisk, NoticeAction::KeepMine],
+    }
+}
+
 /// The large file `file` was changed while MigPad was closed, and its journal has no copy of it
 /// for the changes to go on: it opens as it is, and the changes are set aside.
 pub fn changes_set_aside(file: &str) -> Notice {

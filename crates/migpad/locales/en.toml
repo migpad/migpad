@@ -35,6 +35,8 @@ no_closed = "Nothing Closed Lately"
 recent_label = "{name} — {folder}"
 # A closed window in the menu, by the names of its tabs.
 closed_window = "Window: {tabs}"
+# The tooltip of a tab whose file another program removed.
+missing = "{path} — not on disk any more"
 
 [edit]
 menu = "&Edit"
@@ -93,6 +95,7 @@ save_failed = "Could not save “{file}”: {reason}."
 journal_failed = "Changes to “{file}” are no longer kept safe from a crash: the journal could not be written ({reason})."
 write_denied = "no permission to write"
 disk_full = "the disk is full"
+changed_on_disk = "“{file}” was changed by another program. Your changes are shown."
 changed_while_closed = "“{file}” was changed by another program while MigPad was closed. Your changes are shown."
 changes_set_aside = "“{file}” was changed by another program while MigPad was closed, and your changes could not go onto it: it shows as it is on disk, and the changes are set aside in the folder of MigPad's data."
 recover_failed = "Could not recover the changes to “{file}”: {reason}. Its journal is set aside in the folder of MigPad's data."

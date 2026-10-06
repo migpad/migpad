@@ -9,7 +9,7 @@ use gpui::{
     MouseUpEvent, PathPromptOptions, PromptButton, PromptLevel, Render, ScrollHandle, SharedString, Subscription, Task,
     Window, WindowId, canvas, div, prelude::*, px, rgb,
 };
-use migpad_core::document::{Document, Fingerprint, Format};
+use migpad_core::document::{Document, Fingerprint, Format, OpenAs, Opened, open};
 use migpad_core::encoding::Encoding;
 use migpad_core::history::Selection;
 use migpad_core::state::TabState;
@@ -58,6 +58,8 @@ pub struct Tab {
     losses_checked: bool,
     /// Flushes the journal to the disk a moment after the last edit.
     journal_sync: Option<Task<()>>,
+    /// Whether its file is not there any more: another program removed it.
+    missing: bool,
     _observe: Subscription,
     /// Shows the progress of the loading in the status bar.
     _progress: Option<Task<()>>,
@@ -95,6 +97,8 @@ pub struct Workspace {
     asking: bool,
     /// Where the window is, for the session: its bounds, how it shows, and its screen.
     place: (Rect, WindowMode, Option<String>),
+    /// Compares the files of the documents with the disk, after the window comes back.
+    file_check: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -115,6 +119,8 @@ impl Workspace {
             if window.is_window_active() {
                 update_menus(Some(workspace), cx);
                 session::activated(workspace.window_id, cx);
+                // Back in the window: other programs may have changed its files meanwhile.
+                workspace.check_files(cx);
             } else {
                 for tab in workspace.tabs.iter() {
                     journals::sync(&tab.document, cx);
@@ -158,6 +164,7 @@ impl Workspace {
             dragged_files: None,
             asking: false,
             place: session::place(window, cx),
+            file_check: None,
             _subscriptions: vec![activation, appearance, moved],
         };
         workspace.settle(0, first.selection, first.notice, window, cx);
@@ -396,9 +403,11 @@ impl Workspace {
         });
         match result {
             Ok(()) => {
-                // An untitled document has a name now: its number is free for a new one.
+                // An untitled document has a name now: its number is free for a new one; a file that
+                // was gone is there again.
                 if let Some(tab) = self.tabs.get_mut(index) {
                     tab.untitled = None;
+                    tab.missing = false;
                 }
                 self.clear_notices(index, Topic::Save, cx);
                 cx.add_recent_document(&path);
@@ -838,6 +847,129 @@ impl Workspace {
         }
     }
 
+    /// Compares the files of the documents with what they were when read or saved, in the
+    /// background, and acts on those that other programs changed or removed.
+    fn check_files(&mut self, cx: &mut Context<Self>) {
+        let files: Vec<(EntityId, PathBuf, Option<Fingerprint>)> = self
+            .tabs
+            .iter()
+            .filter_map(|tab| {
+                let doc = tab.document.read(cx);
+                (!doc.is_preview()).then(|| Some((tab.document.entity_id(), doc.path.clone()?, doc.disk)))?
+            })
+            .collect();
+        if files.is_empty() {
+            return;
+        }
+        let check = cx.background_spawn(async move {
+            files.into_iter().map(|(id, path, known)| (id, known, Fingerprint::of_path(&path))).collect::<Vec<_>>()
+        });
+        self.file_check = Some(cx.spawn(async move |workspace, cx| {
+            let checked = check.await;
+            let _ = workspace.update(cx, |workspace, cx| workspace.files_checked(checked, cx));
+        }));
+    }
+
+    /// What [`Workspace::check_files`] found: a document without changes whose file changed is
+    /// read again, one with changes tells; a file that is gone is marked on its tab.
+    fn files_checked(
+        &mut self,
+        checked: Vec<(EntityId, Option<Fingerprint>, std::io::Result<Fingerprint>)>,
+        cx: &mut Context<Self>,
+    ) {
+        for (document, known, now) in checked {
+            let Some(index) = self.tab_of(document) else { continue };
+            let Some(tab) = self.tabs.get_mut(index) else { continue };
+            let now = match now {
+                Ok(now) => now,
+                // A file that was there when it was read or saved; a new one is not yet.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    if known.is_some() && !tab.missing {
+                        tab.missing = true;
+                        cx.notify();
+                    }
+                    continue;
+                }
+                Err(_) => continue,
+            };
+            if std::mem::take(&mut tab.missing) {
+                cx.notify();
+            }
+            // Changed since this check began: nothing to tell about the file as it was.
+            if Some(now) == known || tab.document.read(cx).disk != known {
+                continue;
+            }
+            if tab.document.read(cx).is_modified() {
+                self.tell_changed(index, cx);
+            } else {
+                self.reload(index, cx);
+            }
+        }
+    }
+
+    /// Tells over the text of the tab at `index` that another program changed its file while it
+    /// has changes of its own — once.
+    fn tell_changed(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(index) else { return };
+        if tab.notices.iter().any(|(_, notice)| notice.topic == Some(Topic::Disk)) {
+            return;
+        }
+        let notice = notices::changed_on_disk(&Self::tab_title(tab, cx));
+        self.notify_tab(index, notice, cx);
+    }
+
+    /// Reads the file of the tab at `index` again, in the background, into its document: the view
+    /// keeps the caret and the scroll. If the document gets changes meanwhile, they stay and the
+    /// tab tells of the file instead.
+    fn reload(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(index) else { return };
+        let Some(path) = tab.document.read(cx).path.clone() else { return };
+        let document = tab.document.clone();
+        let journals = journals::dir(cx);
+        let read = cx.background_spawn({
+            let path = path.clone();
+            async move {
+                match open(&path, OpenAs::Detect { tld: None })? {
+                    Opened::Complete(doc) => Ok(doc),
+                    Opened::Partial { loader, .. } => loader.load(),
+                }
+            }
+        });
+        cx.spawn(async move |workspace, cx| {
+            let read = read.await;
+            let _ = workspace.update(cx, |workspace, cx| {
+                let Some(index) = workspace.tab_of(document.entity_id()) else { return };
+                let mut loaded = match read {
+                    Ok(loaded) => loaded,
+                    Err(error) => return workspace.notify_tab(index, notices::open_failed(&path, &error), cx),
+                };
+                let replaced = document.update(cx, |doc, cx| {
+                    if doc.is_modified() {
+                        return false;
+                    }
+                    doc.remove_journal();
+                    if let Some(dir) = journals {
+                        loaded.journal_in(dir);
+                    }
+                    *doc = loaded;
+                    cx.notify();
+                    true
+                });
+                match replaced {
+                    // The text of the file may have bytes lost in reading.
+                    true => {
+                        if let Some(tab) = workspace.tabs.get_mut(index) {
+                            tab.losses_checked = false;
+                        }
+                        workspace.check_losses(index, cx);
+                    }
+                    false => workspace.tell_changed(index, cx),
+                }
+            });
+        })
+        .detach();
+    }
+
     /// The text of the tab at `index` stays over its file changed by another program: saving
     /// writes it over that.
     fn keep_mine(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -1046,10 +1178,15 @@ impl Workspace {
             .iter()
             .map(|tab| {
                 let doc = tab.document.read(cx);
+                let tooltip = doc.path.as_ref().map(|path| match tab.missing {
+                    true => fill(Key::FileMissing, &[("path", &path.display().to_string())]),
+                    false => path.display().to_string(),
+                });
                 TabInfo {
                     title: Self::tab_title(tab, cx).into(),
-                    tooltip: doc.path.as_ref().map(|path| SharedString::from(path.display().to_string())),
+                    tooltip: tooltip.map(SharedString::from),
                     modified: doc.is_modified(),
+                    missing: tab.missing,
                 }
             })
             .collect();
@@ -1121,6 +1258,7 @@ impl Tab {
             discarded: false,
             losses_checked: false,
             journal_sync: None,
+            missing: false,
             _observe: observe,
             _progress: progress,
         }
