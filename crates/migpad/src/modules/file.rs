@@ -1,12 +1,14 @@
-//! Documents and windows: a new tab or window, closing them, and opening a closed tab again.
+//! Documents and windows: a new tab or window, opening and saving files, closing tabs and
+//! windows, and opening a closed tab again.
 
 use gpui::{App, actions};
 
 use crate::commands::{Command, MenuId, Module, Registry, by_os};
 use crate::strings::Key;
 use crate::windows;
+use crate::workspace::open_options;
 
-actions!(file, [NewTab, NewWindow, ReopenClosed, CloseTab, CloseWindow]);
+actions!(file, [NewTab, NewWindow, Open, Save, SaveAs, ReopenClosed, CloseTab, CloseWindow]);
 
 pub struct FileModule;
 
@@ -25,26 +27,48 @@ impl Module for FileModule {
             &["ctrl-shift-n"],
         ));
         registry.add(new_window, menu(0));
+        let open = Command::new("file.open", Key::FileOpen, Open).keys(by_os(&["cmd-o"], &["ctrl-o"], &["ctrl-o"]));
+        registry.add(open, menu(1));
         let reopen = Command::new("file.reopen_closed", Key::FileReopenClosed, ReopenClosed).keys(by_os(
             &["cmd-shift-t"],
             &["ctrl-shift-t"],
             &["ctrl-shift-t"],
         ));
         registry.add(reopen, menu(1));
+        // A file still loading cannot be saved: its beginning would replace it.
+        let save = Command::new("file.save", Key::FileSave, Save)
+            .keys(by_os(&["cmd-s"], &["ctrl-s"], &["ctrl-s"]))
+            .enabled(|workspace, cx| !workspace.document().read(cx).is_preview());
+        registry.add(save, menu(2));
+        let save_as = Command::new("file.save_as", Key::FileSaveAs, SaveAs)
+            .keys(by_os(&["cmd-shift-s"], &["ctrl-shift-s"], &["ctrl-shift-s"]))
+            .enabled(|workspace, cx| !workspace.document().read(cx).is_preview());
+        registry.add(save_as, menu(2));
         let close_tab = Command::new("file.close_tab", Key::FileCloseTab, CloseTab).keys(by_os(
             &["cmd-w"],
             &["ctrl-w", "ctrl-f4"],
             &["ctrl-w"],
         ));
-        registry.add(close_tab, menu(2));
+        registry.add(close_tab, menu(3));
         let close_window = Command::new("file.close_window", Key::FileCloseWindow, CloseWindow).keys(by_os(
             &["cmd-shift-w"],
             &["ctrl-shift-w"],
             &["ctrl-shift-w"],
         ));
-        registry.add(close_window, menu(2));
+        registry.add(close_window, menu(3));
 
         registry.on_window_action(|workspace, _: &NewTab, window, cx| workspace.new_tab(window, cx));
+        registry.on_window_action(|workspace, _: &Open, window, cx| workspace.open_dialog(window, cx));
+        registry.on_window_action(|workspace, _: &Save, window, cx| {
+            if !workspace.document().read(cx).is_preview() {
+                workspace.save_active(window, cx);
+            }
+        });
+        registry.on_window_action(|workspace, _: &SaveAs, window, cx| {
+            if !workspace.document().read(cx).is_preview() {
+                workspace.save_as_active(window, cx);
+            }
+        });
         registry.on_window_action(|workspace, _: &ReopenClosed, window, cx| workspace.reopen_closed(window, cx));
         registry.on_window_action(|workspace, _: &CloseTab, window, cx| {
             let active = workspace.active_tab();
@@ -57,6 +81,15 @@ impl Module for FileModule {
         registry.on_app_action(|_: &NewTab, cx| cx.defer(open_window));
         registry.on_app_action(|_: &NewWindow, cx| cx.defer(open_window));
         registry.on_app_action(|_: &ReopenClosed, cx| cx.defer(windows::reopen_in_new_window));
+        registry.on_app_action(|_: &Open, cx| {
+            let chosen = cx.prompt_for_paths(open_options());
+            cx.spawn(async move |cx| {
+                if let Ok(Ok(Some(paths))) = chosen.await {
+                    cx.update(|cx| windows::open_window(&paths, cx));
+                }
+            })
+            .detach();
+        });
     }
 }
 

@@ -6,23 +6,29 @@ use std::time::Duration;
 
 use gpui::{
     App, AppContext, Context, DragMoveEvent, Entity, EntityId, ExternalPaths, FocusHandle, Focusable, MouseDownEvent,
-    MouseUpEvent, Render, ScrollHandle, SharedString, Subscription, Task, Window, WindowId, canvas, div, prelude::*,
-    px, rgb,
+    MouseUpEvent, PathPromptOptions, Render, ScrollHandle, SharedString, Subscription, Task, Window, WindowId, canvas,
+    div, prelude::*, px, rgb,
 };
-use migpad_core::document::Document;
+use migpad_core::document::{Document, Format};
+use migpad_core::encoding::Encoding;
 use migpad_core::history::Selection;
 use migpad_editor::EditorView;
 use migpad_ui::notification::NotificationBar;
-use migpad_ui::{MenuBar, TabBar, TabInfo, theme};
+use migpad_ui::{Button, MenuBar, TabBar, TabInfo, theme};
 
 use crate::commands::{Registry, own_menu_bar, update_menus};
 use crate::keys;
 use crate::modules::file::NewTab;
-use crate::notices::{self, Notice};
+use crate::notices::{self, Notice, NoticeAction, Topic};
 use crate::status::{self, COUNT_STEP, Loading, SelectionCount, count_chars};
 use crate::strings::{Key, tr};
 use crate::tabs::Tabs;
 use crate::windows::{self, Closed, ClosedTab, ForTab, Opening};
+
+/// The dialog of the system that opens files: several at once.
+pub fn open_options() -> PathPromptOptions {
+    PathPromptOptions { files: true, directories: false, multiple: true, prompt: Some(tr(Key::FileOpenButton).into()) }
+}
 
 /// How often the status bar shows how far a file has loaded.
 const PROGRESS_TICK: Duration = Duration::from_millis(100);
@@ -202,13 +208,158 @@ impl Workspace {
         self.notify_tab(index, notice, cx);
     }
 
+    /// Shows a notification over the text of the tab at `index`, in place of one about the same.
     fn notify_tab(&mut self, index: usize, notice: Notice, cx: &mut Context<Self>) {
         let id = self.next_notice;
         self.next_notice += 1;
         if let Some(tab) = self.tabs.get_mut(index) {
+            if let Some(topic) = notice.topic {
+                tab.notices.retain(|(_, old)| old.topic != Some(topic));
+            }
             tab.notices.push((id, notice));
             cx.notify();
         }
+    }
+
+    /// Closes the notifications about `topic` of the tab at `index`: what they told is over.
+    fn clear_notices(&mut self, index: usize, topic: Topic, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tabs.get_mut(index) {
+            tab.notices.retain(|(_, notice)| notice.topic != Some(topic));
+            cx.notify();
+        }
+    }
+
+    /// A button of the notification `id` of the tab with `document`: what the button says is done,
+    /// and the notification closes — but for showing the first place, after which the rest of its
+    /// buttons are still to choose from.
+    fn run_notice_action(
+        &mut self,
+        document: EntityId,
+        id: u64,
+        action: NoticeAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self.tab_of(document) else { return };
+        if !matches!(action, NoticeAction::ShowFirst(_)) {
+            self.close_notice(document, id, cx);
+        }
+        match action {
+            NoticeAction::SaveInUtf8 => {
+                let format = self.tabs.get(index).map(|tab| tab.document.read(cx).format);
+                let format = format.map(|format| Format { encoding: Encoding::UTF_8, bom: false, ..format });
+                self.save(index, format, false, window, cx);
+            }
+            NoticeAction::ShowFirst(pos) => {
+                self.activate(index, window, cx);
+                self.editor().update(cx, |editor, cx| editor.select(Selection::caret(pos), window, cx));
+            }
+            NoticeAction::SaveReplacing => {
+                self.save(index, None, true, window, cx);
+            }
+            NoticeAction::SaveAs => self.save_as(index, window, cx),
+        }
+    }
+
+    /// Opens files chosen in the dialog of the system into tabs.
+    pub fn open_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let chosen = cx.prompt_for_paths(open_options());
+        cx.spawn_in(window, async move |workspace, cx| {
+            if let Ok(Ok(Some(paths))) = chosen.await {
+                let _ = workspace.update_in(cx, |workspace, window, cx| workspace.open_paths(&paths, window, cx));
+            }
+        })
+        .detach();
+    }
+
+    /// Saves the document of the active tab: to its file, or to one chosen if it has none.
+    pub fn save_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let index = self.tabs.active_index();
+        self.save(index, None, false, window, cx);
+    }
+
+    pub fn save_as_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let index = self.tabs.active_index();
+        self.save_as(index, window, cx);
+    }
+
+    /// Saves the document of the tab at `index` to its file in `format`, or in its own format; an
+    /// untitled one goes to a file chosen in the dialog of the system. With `accept_losses`
+    /// characters that cannot be written are replaced; without, the file is not written and a
+    /// notification tells why ([ADR 0015]). Returns whether the file was written.
+    pub fn save(
+        &mut self,
+        index: usize,
+        format: Option<Format>,
+        accept_losses: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(tab) = self.tabs.get(index) else { return false };
+        let Some(path) = tab.document.read(cx).path.clone() else {
+            self.save_as(index, window, cx);
+            return false;
+        };
+        self.save_to(index, path, format, accept_losses, cx)
+    }
+
+    /// Saves the document of the tab at `index` to `path`.
+    fn save_to(
+        &mut self,
+        index: usize,
+        path: PathBuf,
+        format: Option<Format>,
+        accept_losses: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(document) = self.tabs.get(index).map(|tab| tab.document.clone()) else { return false };
+        let format = format.unwrap_or(document.read(cx).format);
+        let result = document.update(cx, |doc, cx| {
+            let result = doc.save(&path, format, accept_losses);
+            if result.is_ok() {
+                cx.notify();
+            }
+            result
+        });
+        match result {
+            Ok(()) => {
+                self.clear_notices(index, Topic::Save, cx);
+                cx.add_recent_document(&path);
+                true
+            }
+            Err(error) => {
+                let notice = notices::save_failed(document.read(cx), &path, format.encoding.name(), &error);
+                if let Some(notice) = notice {
+                    self.notify_tab(index, notice, cx);
+                }
+                false
+            }
+        }
+    }
+
+    /// Saves the document of the tab at `index` to a file chosen in the dialog of the system,
+    /// next to its own file or in the home folder, under its name.
+    pub fn save_as(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(index) else { return };
+        let document = tab.document.entity_id();
+        let (folder, name) = match &tab.document.read(cx).path {
+            Some(path) => {
+                (path.parent().map(Path::to_path_buf), path.file_name().map(|name| name.to_string_lossy().into_owned()))
+            }
+            None => (None, Some(format!("{}.txt", Self::tab_title(tab, cx)))),
+        };
+        let folder = folder.or_else(std::env::home_dir).unwrap_or_default();
+        let chosen = cx.prompt_for_new_path(&folder, name.as_deref());
+        cx.spawn_in(window, async move |workspace, cx| {
+            if let Ok(Ok(Some(path))) = chosen.await {
+                let _ = workspace.update(cx, |workspace, cx| {
+                    if let Some(index) = workspace.tab_of(document) {
+                        workspace.save_to(index, path, None, false, cx);
+                    }
+                });
+            }
+        })
+        .detach();
     }
 
     /// Shows a notification over the text of the tab with `document`.
@@ -478,12 +629,20 @@ impl Workspace {
             .iter()
             .map(|(id, notice)| {
                 let (workspace, id) = (cx.entity().downgrade(), *id);
-                NotificationBar::new(("notice", id), notice.severity, notice.message.clone()).on_close(
-                    tr(Key::NoticeClose),
-                    move |_, cx| {
-                        let _ = workspace.update(cx, |workspace, cx| workspace.close_notice(document, id, cx));
-                    },
-                )
+                let actions = notice.actions.iter().enumerate().map(|(i, &action)| {
+                    let workspace = workspace.clone();
+                    Button::new(SharedString::from(format!("notice-{id}-{i}")), action.label()).on_click(
+                        move |_, window, cx| {
+                            let _ = workspace.update(cx, |workspace, cx| {
+                                workspace.run_notice_action(document, id, action, window, cx)
+                            });
+                        },
+                    )
+                });
+                let bar = NotificationBar::new(("notice", id), notice.severity, notice.message.clone());
+                actions.fold(bar, NotificationBar::action).on_close(tr(Key::NoticeClose), move |_, cx| {
+                    let _ = workspace.update(cx, |workspace, cx| workspace.close_notice(document, id, cx));
+                })
             })
             .collect()
     }

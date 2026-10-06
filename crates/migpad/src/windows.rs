@@ -128,8 +128,12 @@ pub struct ForTab {
 pub fn open_document(path: &Path, cx: &mut App) -> Opening {
     let path = std::path::absolute(path).unwrap_or_else(|_| path.to_owned());
     match open(&path, OpenAs::Detect { tld: None }) {
-        Ok(Opened::Complete(loaded)) => Opening::Document(cx.new(|_| loaded), None),
+        Ok(Opened::Complete(loaded)) => {
+            cx.add_recent_document(&path);
+            Opening::Document(cx.new(|_| loaded), None)
+        }
         Ok(Opened::Partial { preview, loader }) => {
+            cx.add_recent_document(&path);
             let document = cx.new(|_| preview);
             let progress = Loading {
                 read: loader.progress(),
