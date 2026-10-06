@@ -34,6 +34,10 @@ impl Language {
 /// Whether the interface is in Russian rather than English.
 static RUSSIAN: AtomicBool = AtomicBool::new(false);
 
+/// Held by tests that change the language, as tests run at the same time.
+#[cfg(test)]
+pub static LANGUAGE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Shows the interface in `language` from now on; menus built before keep their strings.
 pub fn set_language(language: Language) {
     RUSSIAN.store(language == Language::Russian, Ordering::Relaxed);

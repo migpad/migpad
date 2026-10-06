@@ -2,19 +2,24 @@
 //! which act on the window or on the document of the active tab whatever has the focus.
 
 use std::path::Path;
+use std::time::Duration;
 
 use gpui::{
     App, AppContext, Context, Entity, ExternalPaths, FocusHandle, Focusable, Render, ScrollHandle, SharedString,
-    Subscription, Window, WindowId, div, prelude::*, px, rgb,
+    Subscription, Task, Window, WindowId, div, prelude::*, px, rgb,
 };
 use migpad_core::document::Document;
 use migpad_editor::EditorView;
 use migpad_ui::{TabBar, TabInfo, theme};
 
 use crate::commands::{Registry, update_menus};
+use crate::status::{self, COUNT_STEP, Loading, SelectionCount, count_chars};
 use crate::strings::{Key, tr};
 use crate::tabs::Tabs;
 use crate::windows::{self, ClosedTab, Opening};
+
+/// How often the status bar shows how far a file has loaded.
+const PROGRESS_TICK: Duration = Duration::from_millis(100);
 
 /// A document in a tab of the window, and its view.
 pub struct Tab {
@@ -22,7 +27,11 @@ pub struct Tab {
     pub editor: Entity<EditorView>,
     /// The number of an untitled document: "Untitled", "Untitled 2"…
     untitled: Option<u32>,
+    /// How far the file has loaded, while it is loading.
+    loading: Option<Loading>,
     _observe: Subscription,
+    /// Shows the progress of the loading in the status bar.
+    _progress: Option<Task<()>>,
 }
 
 pub struct Workspace {
@@ -33,12 +42,21 @@ pub struct Workspace {
     reveal_tab: bool,
     /// The title the window shows, and whether its document has changes to save.
     title: (String, bool),
+    /// Counts the changes to the documents of the window: counts of selections go stale with them.
+    revision: u64,
+    selection_count: Option<SelectionCount>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl Workspace {
     /// A window with one tab: `document`, untitled with the number `untitled`, or a file.
-    pub fn new(document: Entity<Document>, untitled: Option<u32>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        document: Entity<Document>,
+        untitled: Option<u32>,
+        loading: Option<Loading>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         // The check marks of the menus are those of the document of the active window.
         let activation = cx.observe_window_activation(window, |workspace, window, cx| {
             if window.is_window_active() {
@@ -47,13 +65,15 @@ impl Workspace {
         });
         // Colors follow the appearance of the system, unless a theme is chosen.
         let appearance = migpad_ui::theme::follow_system(window, cx);
-        let first = Tab::new(document, untitled, window, cx);
+        let first = Tab::new(document, untitled, loading, window, cx);
         let mut workspace = Workspace {
             window_id: window.window_handle().window_id(),
             tabs: Tabs::new(first),
             tab_scroll: ScrollHandle::new(),
             reveal_tab: true,
             title: (String::new(), false),
+            revision: 0,
+            selection_count: None,
             _subscriptions: vec![activation, appearance],
         };
         workspace.update_title(window, cx);
@@ -93,10 +113,11 @@ impl Workspace {
         &mut self,
         document: Entity<Document>,
         untitled: Option<u32>,
+        loading: Option<Loading>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let tab = Tab::new(document, untitled, window, cx);
+        let tab = Tab::new(document, untitled, loading, window, cx);
         let index = self.tabs.push(tab);
         self.activate(index, window, cx);
     }
@@ -105,7 +126,7 @@ impl Workspace {
     pub fn new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let number = windows::untitled_number(self.untitled_numbers(), Some(self.window_id), cx);
         let document = cx.new(|_| Document::new());
-        self.add_tab(document, Some(number), window, cx);
+        self.add_tab(document, Some(number), None, window, cx);
     }
 
     /// Opens files into tabs: a file open in a window already comes forward there.
@@ -125,7 +146,7 @@ impl Workspace {
                 continue;
             }
             match windows::open_document(path, cx) {
-                Opening::Document(document) => self.add_tab(document, None, window, cx),
+                Opening::Document(document, loading) => self.add_tab(document, None, loading, window, cx),
                 Opening::Failed(path, error) => eprintln!("{}: {error}", path.display()),
             }
         }
@@ -213,12 +234,12 @@ impl Workspace {
     /// Opens the tab closed last again; one with a file that is open now comes forward instead.
     pub fn reopen_closed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(closed) = windows::take_closed(cx) else { return };
-        let document = match (closed.document, &closed.path) {
-            (Some(document), _) => document,
+        let (document, loading) = match (closed.document, &closed.path) {
+            (Some(document), _) => (document, None),
             (None, Some(path)) => match self.find(path, cx) {
                 Some(index) => return self.activate(index, window, cx),
                 None => match windows::open_document(path, cx) {
-                    Opening::Document(document) => document,
+                    Opening::Document(document, loading) => (document, loading),
                     Opening::Failed(path, error) => return eprintln!("{}: {error}", path.display()),
                 },
             },
@@ -229,7 +250,7 @@ impl Workspace {
             .path
             .is_none()
             .then(|| windows::untitled_number(self.untitled_numbers(), Some(self.window_id), cx));
-        self.add_tab(document, untitled, window, cx);
+        self.add_tab(document, untitled, loading, window, cx);
         self.editor().update(cx, |editor, cx| editor.select(closed.selection, window, cx));
     }
 
@@ -271,8 +292,66 @@ impl Workspace {
 
     /// A document of the window has changed: its text, or its file.
     fn document_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.revision += 1;
         self.update_title(window, cx);
         cx.notify();
+    }
+
+    /// The characters of the selection of the active tab, or `None` while a long one is counted a
+    /// part a frame.
+    fn selection_chars(&mut self, cx: &mut Context<Self>) -> Option<Option<usize>> {
+        let tab = self.tabs.active();
+        let selection = tab.editor.read(cx).selection();
+        let range = selection.anchor.min(selection.head)..selection.anchor.max(selection.head);
+        if range.is_empty() {
+            self.selection_count = None;
+            return None;
+        }
+        let key = (tab.document.entity_id(), range.clone(), self.revision);
+        if let Some(count) = &self.selection_count
+            && count.key == key
+        {
+            return Some(count.done());
+        }
+        let text = tab.document.read(cx).text();
+        if range.len() <= COUNT_STEP {
+            let chars = count_chars(text, range.clone());
+            self.selection_count = Some(SelectionCount { key, counted_to: range.end, chars, task: None });
+            return Some(Some(chars));
+        }
+        let task = cx.spawn(async move |workspace, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_millis(1)).await;
+                let done = workspace.update(cx, |workspace, cx| workspace.count_selection_step(cx));
+                if done.unwrap_or(true) {
+                    break;
+                }
+            }
+        });
+        self.selection_count = Some(SelectionCount { key, counted_to: range.start, chars: 0, task: Some(task) });
+        Some(None)
+    }
+
+    /// Counts the next part of a long selection; returns whether the count is over: done, or stale.
+    fn count_selection_step(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(count) = &mut self.selection_count else { return true };
+        let (document, _, revision) = count.key.clone();
+        let Some(tab) = self.tabs.iter().find(|tab| tab.document.entity_id() == document) else { return true };
+        if revision != self.revision {
+            return true;
+        }
+        let done = count.step(tab.document.read(cx).text());
+        if done {
+            cx.notify();
+        }
+        done
+    }
+
+    fn status_bar(&mut self, cx: &mut Context<Self>) -> migpad_ui::StatusBar {
+        let selection = self.selection_chars(cx);
+        let tab = self.tabs.active();
+        let caret = tab.editor.read(cx).caret_position(cx);
+        status::status_bar(tab.document.read(cx), caret, selection, tab.loading.as_ref())
     }
 
     fn tab_bar(&self, cx: &mut Context<Self>) -> TabBar {
@@ -308,10 +387,29 @@ impl Workspace {
 }
 
 impl Tab {
-    fn new(document: Entity<Document>, untitled: Option<u32>, window: &mut Window, cx: &mut Context<Workspace>) -> Tab {
+    fn new(
+        document: Entity<Document>,
+        untitled: Option<u32>,
+        loading: Option<Loading>,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) -> Tab {
         let editor = cx.new(|cx| EditorView::new(document.clone(), window, cx));
         let observe = cx.observe_in(&document, window, |workspace, _, window, cx| workspace.document_changed(window, cx));
-        Tab { document, editor, untitled, _observe: observe }
+        // The status bar shows how far the file has loaded, a few times a second.
+        let progress = loading.is_some().then(|| {
+            let document = document.downgrade();
+            cx.spawn(async move |workspace, cx| {
+                loop {
+                    cx.background_executor().timer(PROGRESS_TICK).await;
+                    let loading = document.read_with(cx, |doc, _| doc.is_preview()).unwrap_or(false);
+                    if !loading || workspace.update(cx, |_, cx| cx.notify()).is_err() {
+                        break;
+                    }
+                }
+            })
+        });
+        Tab { document, editor, untitled, loading, _observe: observe, _progress: progress }
     }
 
     /// What is kept of the tab once it is closed: the document, if it has changes to save.
@@ -357,6 +455,7 @@ impl Render for Workspace {
                 workspace.open_paths(paths.paths(), window, cx);
             }));
         let root = handlers.iter().fold(root, |root, handler| handler(root, cx));
-        root.child(self.tab_bar(cx)).child(div().flex_1().min_h_0().child(self.editor().clone()))
+        let status_bar = self.status_bar(cx);
+        root.child(self.tab_bar(cx)).child(div().flex_1().min_h_0().child(self.editor().clone())).child(status_bar)
     }
 }

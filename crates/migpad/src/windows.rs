@@ -2,6 +2,7 @@
 //! a tab, and the tabs closed lately.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 
 use gpui::{
     App, AppContext, Bounds, Entity, Focusable, Global, Pixels, Point, TitlebarOptions, WindowBounds, WindowHandle,
@@ -11,6 +12,7 @@ use migpad_core::document::{Document, OpenAs, OpenError, Opened, open};
 use migpad_core::history::Selection;
 
 use crate::commands::update_menus;
+use crate::status::Loading;
 use crate::tabs::{ClosedTabs, lowest_free};
 use crate::workspace::Workspace;
 
@@ -69,8 +71,8 @@ pub fn untitled_number(own: impl IntoIterator<Item = u32>, own_window: Option<Wi
 
 /// What a path is opened as.
 pub enum Opening {
-    /// The document; a large one still loading in the background.
-    Document(Entity<Document>),
+    /// The document; a large one still loading in the background, as far as `Loading` tells.
+    Document(Entity<Document>, Option<Loading>),
     Failed(PathBuf, OpenError),
 }
 
@@ -79,9 +81,13 @@ pub enum Opening {
 pub fn open_document(path: &Path, cx: &mut App) -> Opening {
     let path = std::path::absolute(path).unwrap_or_else(|_| path.to_owned());
     match open(&path, OpenAs::Detect { tld: None }) {
-        Ok(Opened::Complete(loaded)) => Opening::Document(cx.new(|_| loaded)),
+        Ok(Opened::Complete(loaded)) => Opening::Document(cx.new(|_| loaded), None),
         Ok(Opened::Partial { preview, loader }) => {
             let document = cx.new(|_| preview);
+            let progress = Loading { read: loader.progress(), total: loader.file_len() };
+            // A tab closed while its file loads stops the loading.
+            let cancel = loader.cancel_flag();
+            cx.observe_release(&document, move |_, _| cancel.store(true, Ordering::Relaxed)).detach();
             let loading = cx.background_executor().spawn(async move { loader.load() });
             let target = document.clone();
             cx.spawn(async move |cx| match loading.await {
@@ -89,10 +95,11 @@ pub fn open_document(path: &Path, cx: &mut App) -> Opening {
                     *doc = loaded;
                     cx.notify();
                 }),
+                Err(OpenError::Cancelled) => {}
                 Err(error) => eprintln!("{}: {error}", path.display()),
             })
             .detach();
-            Opening::Document(document)
+            Opening::Document(document, Some(progress))
         }
         Err(error) => Opening::Failed(path, error),
     }
@@ -123,10 +130,10 @@ pub fn open_window(paths: &[PathBuf], cx: &mut App) -> Option<WindowHandle<Works
     if !paths.is_empty() && opened.is_empty() {
         return None;
     }
-    let documents: Vec<Entity<Document>> = opened
+    let documents: Vec<(Entity<Document>, Option<Loading>)> = opened
         .into_iter()
         .filter_map(|(opening, _)| match opening {
-            Opening::Document(document) => Some(document),
+            Opening::Document(document, loading) => Some((document, loading)),
             Opening::Failed(path, error) => {
                 eprintln!("{}: {error}", path.display());
                 None
@@ -140,10 +147,10 @@ pub fn open_window(paths: &[PathBuf], cx: &mut App) -> Option<WindowHandle<Works
                 let mut documents = documents.into_iter();
                 let first = documents.next();
                 let untitled = first.is_none().then(|| untitled_number([], None, cx));
-                let first = first.unwrap_or_else(|| cx.new(|_| Document::new()));
-                let mut workspace = Workspace::new(first, untitled, window, cx);
-                for document in documents {
-                    workspace.add_tab(document, None, window, cx);
+                let (first, loading) = first.unwrap_or_else(|| (cx.new(|_| Document::new()), None));
+                let mut workspace = Workspace::new(first, untitled, loading, window, cx);
+                for (document, loading) in documents {
+                    workspace.add_tab(document, None, loading, window, cx);
                 }
                 workspace
             });

@@ -1,12 +1,14 @@
 //! MigPad interface elements: controls, theme, the menu bar for Windows and Linux,
 //! context menus and notification bars.
 
+pub mod status_bar;
 pub mod tab_bar;
 pub mod theme;
 pub mod tooltip;
 
 use gpui::{Pixels, px};
 
+pub use status_bar::StatusBar;
 pub use tab_bar::{TabBar, TabInfo};
 pub use theme::{Theme, ThemeMode, theme};
 pub use tooltip::Tooltip;

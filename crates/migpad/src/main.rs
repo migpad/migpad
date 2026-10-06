@@ -6,6 +6,7 @@
 mod commands;
 mod debug_input;
 mod modules;
+mod status;
 mod strings;
 mod tabs;
 mod windows;
