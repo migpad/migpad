@@ -239,6 +239,18 @@ mod tests {
     }
 
     #[test]
+    fn the_saved_file_is_modified_now() {
+        let (_dir, path, mut doc) = edited("save-time", b"old");
+        let long_ago = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        File::options().write(true).open(&path).unwrap().set_modified(long_ago).unwrap();
+        let format = doc.format;
+        doc.save(&path, format, false).unwrap();
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
+        assert!(modified > long_ago + std::time::Duration::from_secs(86_400 * 365 * 20), "{modified:?}");
+        assert_eq!(doc.disk.and_then(|disk| disk.modified), Some(modified));
+    }
+
+    #[test]
     fn writes_the_byte_order_mark() {
         let (_dir, path, mut doc) = edited("save-bom", b"hi");
         let format = Format { encoding: Encoding::UTF_16LE, bom: true, ..doc.format };
