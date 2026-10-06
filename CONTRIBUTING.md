@@ -15,7 +15,7 @@ Platform requirements:
   sudo apt install gcc pkg-config libfontconfig-dev libfreetype-dev libxcb1-dev libxkbcommon-x11-dev
   ```
 
-- **Windows:** the MSVC build tools that rustup asks for (Visual Studio Build Tools with the C++ workload), including a Windows SDK — GPUI compiles its shaders with `fxc.exe` from it.
+- **Windows:** the MSVC build tools that rustup asks for (Visual Studio Build Tools with the C++ workload), including a Windows SDK — GPUI compiles its shaders with `fxc.exe` from it. The C runtime is linked statically (`.cargo/config.toml`), so `migpad.exe` starts without the Visual C++ Redistributable; `RUSTFLAGS` set in the environment would replace that flag.
 
 Then:
 

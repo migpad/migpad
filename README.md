@@ -17,6 +17,8 @@ A fast cross-platform text editor for macOS, Linux and Windows, inspired by [Ake
 
 macOS, Linux (X11 and Wayland) and Windows from a single Rust codebase built on GPUI, the UI framework of the Zed editor. The interface will be available in English and Russian.
 
+Windows: Windows 10 version 1903 or later and Windows 11, 64-bit, with nothing else to install. Windows 7, 8 and 8.1 are not supported: neither Rust nor GPUI supports them.
+
 ## Building
 
 See [CONTRIBUTING.md](CONTRIBUTING.md): build requirements, checks and pull requests.
