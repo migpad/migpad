@@ -1,0 +1,47 @@
+name: Build
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/build.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x64
+            os: ubuntu-latest
+            binary: migpad
+          - target: windows-x64
+            os: windows-latest
+            binary: migpad.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libfontconfig-dev libfreetype-dev \
+            libxcb1-dev libxkbcommon-x11-dev
+
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+
+      - run: cargo build --release --locked -p migpad
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: migpad-${{ matrix.target }}
+          path: target/release/${{ matrix.binary }}
