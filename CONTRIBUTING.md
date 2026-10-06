@@ -67,6 +67,12 @@ The theme follows the appearance of the system; a debug build can be held light 
 MIGPAD_THEME=dark MIGPAD_MENU_BAR=1 cargo run -- notes.txt
 ```
 
+MigPad keeps its data — the journals of the documents, the session, the recent files — in `~/.migpad`, or in a folder `.migpad` next to the program if there is one (next to `MigPad.app` on macOS), which makes it portable. A debug build takes another folder from `MIGPAD_DATA_DIR`, so that a check starts from nothing and leaves the data of every day alone:
+
+```sh
+MIGPAD_DATA_DIR=/tmp/migpad-check cargo run -- notes.txt
+```
+
 Input fields — the single-line mode of the editor view — can be tried in an example window with two fields, as in a find bar:
 
 ```sh

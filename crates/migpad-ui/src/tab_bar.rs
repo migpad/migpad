@@ -21,6 +21,8 @@ pub struct TabInfo {
     pub tooltip: Option<SharedString>,
     /// Whether the document has changes to save: ● instead of × until the pointer is over the tab.
     pub modified: bool,
+    /// Whether its file is not there any more: the title is struck through.
+    pub missing: bool,
 }
 
 type Handler<T> = Rc<dyn Fn(T, &mut Window, &mut App)>;
@@ -189,6 +191,7 @@ impl RenderOnce for TabBar {
                         .overflow_hidden()
                         .whitespace_nowrap()
                         .text_ellipsis()
+                        .when(tab.missing, |title| title.line_through())
                         .child(tab.title),
                 )
                 .child(close)

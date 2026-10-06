@@ -3,6 +3,7 @@
 use gpui::actions;
 
 use crate::commands::{Command, MenuId, Module, Registry, by_os};
+use crate::session;
 use crate::strings::Key;
 
 actions!(app, [Quit, Hide, HideOthers, ShowAll]);
@@ -26,7 +27,9 @@ impl Module for AppModule {
         let (label, place) =
             if cfg!(target_os = "macos") { (Key::AppQuit, menu(2)) } else { (Key::AppExit, Some((MenuId::File, 9))) };
         registry.add(Command::new("app.quit", label, Quit).keys(by_os(&["cmd-q"], &[], &["ctrl-q"])), place);
-        registry.on_app_action(|_: &Quit, cx| cx.quit());
+        // Once the window the keys came from is done with them: the documents of every window are
+        // asked whether their changes are kept.
+        registry.on_app_action(|_: &Quit, cx| cx.defer(session::quit));
         registry.on_app_action(|_: &Hide, cx| cx.hide());
         registry.on_app_action(|_: &HideOthers, cx| cx.hide_other_apps());
         registry.on_app_action(|_: &ShowAll, cx| cx.unhide_other_apps());

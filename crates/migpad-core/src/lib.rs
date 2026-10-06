@@ -3,12 +3,14 @@
 //!
 //! The core knows nothing about GPUI or windows, so it is tested and benchmarked on its own.
 
+pub mod data;
 pub mod document;
 pub mod encoding;
 pub mod history;
 pub mod line_ending;
 mod platform;
 pub mod search;
+pub mod state;
 pub mod text;
 
 #[cfg(test)]

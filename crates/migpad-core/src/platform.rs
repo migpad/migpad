@@ -37,11 +37,14 @@ mod unix {
     }
 
     /// ACL and extended attributes: Finder tags and comments, the text encoding hint and the like.
+    /// Not `COPYFILE_METADATA`: its `COPYFILE_STAT` takes the times of the old file as well, and
+    /// the saved file would look unchanged — to `make`, to backups.
     #[cfg(target_os = "macos")]
     fn copy_attributes(from: &File, to: &File) {
+        let flags = libc::COPYFILE_ACL | libc::COPYFILE_XATTR;
         // SAFETY: both descriptors are open for the duration of the call; no state is passed.
         unsafe {
-            libc::fcopyfile(from.as_raw_fd(), to.as_raw_fd(), std::ptr::null_mut(), libc::COPYFILE_METADATA);
+            libc::fcopyfile(from.as_raw_fd(), to.as_raw_fd(), std::ptr::null_mut(), flags);
         }
     }
 

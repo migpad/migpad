@@ -137,9 +137,14 @@ impl<T> ClosedTabs<T> {
         }
     }
 
-    /// The tab closed last.
-    pub fn pop(&mut self) -> Option<T> {
-        self.items.pop_front()
+    /// The tab closed `index`-th from the last, the last being 0.
+    pub fn take(&mut self, index: usize) -> Option<T> {
+        self.items.remove(index)
+    }
+
+    /// The closed tabs, the last one first.
+    pub fn iter(&self) -> impl Iterator<Item = &T> {
+        self.items.iter()
     }
 }
 
@@ -246,14 +251,25 @@ mod tests {
     #[test]
     fn closed_tabs_come_back_last_first() {
         let mut closed = ClosedTabs::default();
-        assert_eq!(closed.pop(), None);
+        assert_eq!(closed.take(0), None);
         for i in 0..ClosedTabs::<usize>::LIMIT + 5 {
             closed.push(i, |_| false);
         }
-        assert_eq!(closed.pop(), Some(ClosedTabs::<usize>::LIMIT + 4));
-        let rest: Vec<usize> = std::iter::from_fn(|| closed.pop()).collect();
+        assert_eq!(closed.take(0), Some(ClosedTabs::<usize>::LIMIT + 4));
+        let rest: Vec<usize> = std::iter::from_fn(|| closed.take(0)).collect();
         assert_eq!(rest.len(), ClosedTabs::<usize>::LIMIT - 1);
         assert_eq!(rest.last(), Some(&5), "the oldest are forgotten");
+    }
+
+    #[test]
+    fn any_closed_tab_can_come_back() {
+        let mut closed = ClosedTabs::default();
+        for i in 0..4 {
+            closed.push(i, |_| false);
+        }
+        assert_eq!(closed.take(2), Some(1));
+        assert_eq!(closed.take(9), None);
+        assert_eq!(closed.iter().copied().collect::<Vec<_>>(), [3, 2, 0]);
     }
 
     #[test]
@@ -263,7 +279,7 @@ mod tests {
         for i in 0..ClosedTabs::<usize>::LIMIT * 3 {
             closed.push(i, precious);
         }
-        let kept: Vec<usize> = std::iter::from_fn(|| closed.pop()).collect();
+        let kept: Vec<usize> = std::iter::from_fn(|| closed.take(0)).collect();
         // The last ones closed, and every precious one however old.
         assert!([0, 10, 20, 30, 40, 50].iter().all(|i| kept.contains(i)), "{kept:?}");
         assert_eq!(kept.len(), ClosedTabs::<usize>::LIMIT);

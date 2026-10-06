@@ -4,10 +4,13 @@
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Write};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
-use super::{Document, Fingerprint, Format};
-use crate::encoding::{Encoder, Losses};
+use super::{Document, EditError, Fingerprint, Format};
+use crate::encoding::{Encoder, Encoding, Losses};
+use crate::history::{EditKind, Selection};
 use crate::platform;
 use crate::text::TextStore;
 
@@ -152,9 +155,50 @@ impl Document {
         Ok(())
     }
 
+    /// Replaces in the text what saving in `encoding` would lose — characters it lacks or writes
+    /// as others, and invalid UTF-8 — with what is written for them: `?`, or U+FFFD in UTF-16.
+    /// Then the document shows what its file gets. One undo step, in which `selection` moves with
+    /// the text; returns the selection after it.
+    pub fn replace_losses(
+        &mut self,
+        encoding: Encoding,
+        selection: Selection,
+        now: Instant,
+    ) -> Result<Selection, EditError> {
+        let mut encoder = Encoder::new(encoding, false).recording_places();
+        self.encode_with(&mut encoder, &mut io::sink()).expect("a sink takes everything");
+        let places = encoder.lost_places();
+        if places.is_empty() {
+            return Ok(selection);
+        }
+        let replacement: &[u8] = if encoding.is_utf16() { "\u{FFFD}".as_bytes() } else { b"?" };
+        // The last first, so that each range still holds when the ones after it are replaced.
+        let edits: Vec<(Range<usize>, &[u8])> = places.iter().rev().map(|place| (place.clone(), replacement)).collect();
+        let moved = |pos: usize| {
+            let mut moved = pos;
+            for place in places.iter().take_while(|place| place.start < pos) {
+                if place.end > pos {
+                    // Within a replaced sequence: to the start of its replacement.
+                    return moved - (pos - place.start);
+                }
+                moved = moved + replacement.len() - place.len();
+            }
+            moved
+        };
+        let after = Selection { anchor: moved(selection.anchor), head: moved(selection.head) };
+        self.edit(&edits, selection, after, EditKind::Other, now)?;
+        Ok(after)
+    }
+
     /// Encodes the text in `format` into `out`; returns what was lost.
     fn encode_into(&self, format: Format, out: &mut impl Write) -> io::Result<Losses> {
         let mut encoder = Encoder::new(format.encoding, format.bom);
+        self.encode_with(&mut encoder, out)?;
+        Ok(encoder.losses())
+    }
+
+    /// Encodes the text with `encoder` into `out`.
+    fn encode_with(&self, encoder: &mut Encoder, out: &mut impl Write) -> io::Result<()> {
         let mut encoded = Vec::with_capacity(PIECE);
         let len = self.text.len();
         let mut pos = 0;
@@ -168,8 +212,7 @@ impl Document {
             pos = end;
         }
         encoder.encode(&[], true, &mut encoded);
-        out.write_all(&encoded)?;
-        Ok(encoder.losses())
+        out.write_all(&encoded)
     }
 
     fn finish_save(&mut self, path: &Path, format: Format, target: &Path) -> Result<(), SaveError> {
@@ -236,6 +279,37 @@ mod tests {
         assert!(!doc.is_modified());
         assert_eq!(doc.disk, Some(Fingerprint::of_path(&path).unwrap()));
         assert_eq!(dir.files(), [path], "no temporary file is left");
+    }
+
+    #[test]
+    fn losses_are_replaced_in_the_text_as_saving_writes_them() {
+        let (_dir, path, mut doc) = edited("save-replace", b"text");
+        append(&mut doc, " \u{1F600} and \u{20AC}\u{1F600}.");
+        let windows_1251 = Encoding::for_name("windows-1251").unwrap();
+        // The anchor within the first emoji, the caret after the second.
+        let selected = Selection { anchor: 7, head: 22 };
+        let after = doc.replace_losses(windows_1251, selected, Instant::now()).unwrap();
+        assert_eq!(doc.text().to_vec(0..doc.text().len()), "text! ? and €?.".as_bytes());
+        assert_eq!(after, Selection { anchor: 6, head: 16 });
+        doc.save(&path, Format { encoding: windows_1251, ..doc.format }, false).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"text! ? and \x88?.");
+        // One step back to the characters, which saving would lose again.
+        assert_eq!(doc.undo(), Some(selected));
+        assert!(doc.is_modified());
+        assert_eq!(doc.replace_losses(Encoding::UTF_8, selected, Instant::now()), Ok(selected), "nothing to lose");
+        assert!(doc.can_redo(), "no edit made");
+    }
+
+    #[test]
+    fn the_saved_file_is_modified_now() {
+        let (_dir, path, mut doc) = edited("save-time", b"old");
+        let long_ago = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        File::options().write(true).open(&path).unwrap().set_modified(long_ago).unwrap();
+        let format = doc.format;
+        doc.save(&path, format, false).unwrap();
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
+        assert!(modified > long_ago + std::time::Duration::from_secs(86_400 * 365 * 20), "{modified:?}");
+        assert_eq!(doc.disk.and_then(|disk| disk.modified), Some(modified));
     }
 
     #[test]

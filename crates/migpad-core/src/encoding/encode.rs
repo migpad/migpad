@@ -1,5 +1,7 @@
 //! Encoding of the text for saving.
 
+use std::ops::Range;
+
 use encoding_rs::EncoderResult;
 
 use super::{Encoding, Losses};
@@ -22,7 +24,24 @@ pub struct Encoder {
     pending: Vec<u8>,
     /// Bytes of text encoded so far; pending bytes do not count yet.
     pos: usize,
+    lost: Lost,
+}
+
+/// What an encoder has lost so far.
+#[derive(Default)]
+struct Lost {
     losses: Losses,
+    /// Where each loss is in the text, if asked for: see [`Encoder::recording_places`].
+    places: Option<Vec<Range<usize>>>,
+}
+
+impl Lost {
+    fn record(&mut self, place: Range<usize>) {
+        self.losses.record(place.start);
+        if let Some(places) = &mut self.places {
+            places.push(place);
+        }
+    }
 }
 
 impl Encoder {
@@ -36,8 +55,13 @@ impl Encoder {
             bom,
             pending: Vec::with_capacity(4),
             pos: 0,
-            losses: Losses::default(),
+            lost: Lost::default(),
         }
+    }
+
+    /// Records where each loss is, not only the first: see [`Encoder::lost_places`].
+    pub fn recording_places(self) -> Self {
+        Encoder { lost: Lost { places: Some(Vec::new()), ..self.lost }, ..self }
     }
 
     /// Encodes the next chunk of the text and appends the result to `out`; `last` marks the final
@@ -77,7 +101,13 @@ impl Encoder {
 
     /// Characters lost so far; positions are offsets in the text.
     pub fn losses(&self) -> Losses {
-        self.losses
+        self.lost.losses
+    }
+
+    /// The text of each loss so far, in order: a character, or an invalid sequence. Empty unless
+    /// the encoder was made [`recording_places`](Encoder::recording_places).
+    pub fn lost_places(&self) -> &[Range<usize>] {
+        self.lost.places.as_deref().unwrap_or_default()
     }
 
     /// Encodes `bytes` that end at a character boundary.
@@ -85,8 +115,7 @@ impl Encoder {
         for chunk in bytes.utf8_chunks() {
             self.encode_str(chunk.valid(), out);
             if !chunk.invalid().is_empty() {
-                self.lose(out);
-                self.pos += chunk.invalid().len();
+                self.lose(chunk.invalid().len(), out);
             }
         }
     }
@@ -105,8 +134,7 @@ impl Encoder {
         if let Some(substituted) = self.substituted {
             while let Some((at, c)) = text.char_indices().find(|&(_, c)| substituted(c)) {
                 self.encode_legacy(&text[..at], out);
-                self.lose(out);
-                self.pos += c.len_utf8();
+                self.lose(c.len_utf8(), out);
                 text = &text[at + c.len_utf8()..];
             }
         }
@@ -125,21 +153,23 @@ impl Encoder {
                 EncoderResult::InputEmpty => return,
                 EncoderResult::OutputFull => {}
                 EncoderResult::Unmappable(c) => {
-                    self.losses.record(self.pos - c.len_utf8());
                     write_question_mark(encoder, out);
+                    self.lost.record(self.pos - c.len_utf8()..self.pos);
                 }
             }
         }
     }
 
-    /// Writes the replacement for a lost character at the current position.
-    fn lose(&mut self, out: &mut Vec<u8>) {
-        self.losses.record(self.pos);
+    /// Writes the replacement for the `len` bytes at the current position, which are lost, and
+    /// goes past them.
+    fn lose(&mut self, len: usize, out: &mut Vec<u8>) {
         match &mut self.legacy {
             Some(encoder) => write_question_mark(encoder, out),
             None if self.encoding == Encoding::UTF_16LE => out.extend_from_slice(&0xFFFDu16.to_le_bytes()),
             None => out.extend_from_slice(&0xFFFDu16.to_be_bytes()),
         }
+        self.lost.record(self.pos..self.pos + len);
+        self.pos += len;
     }
 
     fn finish(&mut self, out: &mut Vec<u8>) {
@@ -296,6 +326,30 @@ mod tests {
         let (utf16, losses) = encode(Encoding::UTF_16BE, false, &[text]);
         assert_eq!(utf16, b"\0a\xFF\xFD\0b\xFF\xFD\0c\xFF\xFD");
         assert_eq!(losses, three);
+    }
+
+    #[test]
+    fn the_places_of_losses_are_recorded_if_asked() {
+        // An emoji, invalid UTF-8, then ¥, which Shift_JIS writes as a backslash.
+        let text = [b"a".as_slice(), "😀".as_bytes(), b"b\xFF", "¥".as_bytes(), b"c"].concat();
+        let places = |name: &str, record: bool| {
+            let encoding = Encoding::for_name(name).unwrap();
+            let mut encoder = Encoder::new(encoding, false);
+            if record {
+                encoder = encoder.recording_places();
+            }
+            let mut out = Vec::new();
+            // A byte at a time: places hold across chunks that split characters.
+            for (i, byte) in text.iter().enumerate() {
+                encoder.encode(&[*byte], i + 1 == text.len(), &mut out);
+            }
+            encoder.lost_places().to_vec()
+        };
+        assert_eq!(places("windows-1251", true), [1..5, 6..7, 7..9]);
+        assert_eq!(places("Shift_JIS", true), [1..5, 6..7, 7..9]);
+        assert_eq!(places("UTF-16LE", true), vec![6..7]);
+        assert!(places("UTF-8", true).is_empty());
+        assert!(places("windows-1251", false).is_empty());
     }
 
     #[test]
