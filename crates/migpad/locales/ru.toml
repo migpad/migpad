@@ -44,6 +44,17 @@ next_tab = "&Следующая вкладка"
 previous_tab = "&Предыдущая вкладка"
 select_tab = "Выбрать вкладку"
 
+[close]
+question = "Сохранить изменения в «{file}»?"
+detail = "Если не сохранить, правки пропадут."
+window_question = "Сохранить изменения в документах этого окна?"
+window_detail = "Документы с правками: {files}. Если не сохранить, правки пропадут."
+file = "«{file}»"
+save = "Сохранить"
+save_all = "Сохранить все"
+dont_save = "Не сохранять"
+cancel = "Отмена"
+
 [status]
 position = "Стр {line}, стлб {column}"
 selection = "Выделено: {count}"

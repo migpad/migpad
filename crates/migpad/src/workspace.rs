@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     App, AppContext, Context, DragMoveEvent, Entity, EntityId, ExternalPaths, FocusHandle, Focusable, MouseDownEvent,
-    MouseUpEvent, PathPromptOptions, Render, ScrollHandle, SharedString, Subscription, Task, Window, WindowId, canvas,
-    div, prelude::*, px, rgb,
+    MouseUpEvent, PathPromptOptions, PromptButton, PromptLevel, Render, ScrollHandle, SharedString, Subscription, Task,
+    Window, WindowId, canvas, div, prelude::*, px, rgb,
 };
 use migpad_core::document::{Document, Fingerprint, Format};
 use migpad_core::encoding::Encoding;
@@ -22,7 +22,7 @@ use crate::keys;
 use crate::modules::file::NewTab;
 use crate::notices::{self, Notice, NoticeAction, Topic};
 use crate::status::{self, COUNT_STEP, Loading, SelectionCount, count_chars};
-use crate::strings::{Key, tr};
+use crate::strings::{Key, fill, tr};
 use crate::tabs::Tabs;
 use crate::windows::{self, Closed, ClosedTab, ForTab, Opening};
 
@@ -47,6 +47,8 @@ pub struct Tab {
     pending_selection: Option<Selection>,
     /// Notifications over the text, each with its number in the window.
     notices: Vec<(u64, Notice)>,
+    /// Whether its changes are to be dropped: the question on closing it was answered so.
+    discarded: bool,
     /// Whether the text was checked for bytes lost in reading: once it is loaded.
     losses_checked: bool,
     _observe: Subscription,
@@ -81,7 +83,18 @@ pub struct Workspace {
     next_notice: u64,
     /// The files dragged over the window from another program, to open once they are dropped.
     dragged_files: Option<Vec<PathBuf>>,
+    /// Whether a question is open over the window: one at a time — a second one would wait behind
+    /// it on macOS, and take its place on Linux.
+    asking: bool,
     _subscriptions: Vec<Subscription>,
+}
+
+/// The answer to "Save the changes?" on closing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SaveAnswer {
+    Save,
+    DontSave,
+    Cancel,
 }
 
 impl Workspace {
@@ -123,6 +136,7 @@ impl Workspace {
             drawn: false,
             next_notice: 0,
             dragged_files: None,
+            asking: false,
             _subscriptions: vec![activation, appearance],
         };
         workspace.settle(0, first.selection, window, cx);
@@ -249,7 +263,7 @@ impl Workspace {
             NoticeAction::SaveInUtf8 => {
                 let format = self.tabs.get(index).map(|tab| tab.document.read(cx).format);
                 let format = format.map(|format| Format { encoding: Encoding::UTF_8, bom: false, ..format });
-                self.save(index, format, false, window, cx);
+                self.save(index, format, false, window, cx).detach();
             }
             NoticeAction::ShowFirst(pos) => {
                 self.activate(index, window, cx);
@@ -272,9 +286,9 @@ impl Workspace {
                 });
                 let Ok(after) = replaced else { return };
                 editor.update(cx, |editor, cx| editor.select(after, window, cx));
-                self.save(index, None, true, window, cx);
+                self.save(index, None, true, window, cx).detach();
             }
-            NoticeAction::SaveAs => self.save_as(index, window, cx),
+            NoticeAction::SaveAs => self.save_as(index, window, cx).detach(),
         }
     }
 
@@ -292,18 +306,19 @@ impl Workspace {
     /// Saves the document of the active tab: to its file, or to one chosen if it has none.
     pub fn save_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let index = self.tabs.active_index();
-        self.save(index, None, false, window, cx);
+        self.save(index, None, false, window, cx).detach();
     }
 
     pub fn save_as_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let index = self.tabs.active_index();
-        self.save_as(index, window, cx);
+        self.save_as(index, window, cx).detach();
     }
 
     /// Saves the document of the tab at `index` to its file in `format`, or in its own format; an
     /// untitled one goes to a file chosen in the dialog of the system. With `accept_losses`
     /// characters that cannot be written are replaced; without, the file is not written and a
-    /// notification tells why ([ADR 0015]). Returns whether the file was written.
+    /// notification tells why ([ADR 0015]). Returns whether the file was written — once the dialog
+    /// is answered, for an untitled one.
     pub fn save(
         &mut self,
         index: usize,
@@ -311,19 +326,16 @@ impl Workspace {
         accept_losses: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> bool {
-        let Some(tab) = self.tabs.get(index) else { return false };
+    ) -> Task<bool> {
+        let Some(tab) = self.tabs.get(index) else { return Task::ready(false) };
         let doc = tab.document.read(cx);
-        let Some(path) = doc.path.clone() else {
-            self.save_as(index, window, cx);
-            return false;
-        };
+        let Some(path) = doc.path.clone() else { return self.save_as(index, window, cx) };
         // Nothing to write: the file is as it was read or saved, and so is the text.
         if format.is_none() && !doc.is_modified() && doc.disk.is_some() && Fingerprint::of_path(&path).ok() == doc.disk
         {
-            return true;
+            return Task::ready(true);
         }
-        self.save_to(index, path, format, accept_losses, cx)
+        Task::ready(self.save_to(index, path, format, accept_losses, cx))
     }
 
     /// Saves the document of the tab at `index` to `path`.
@@ -365,9 +377,9 @@ impl Workspace {
     }
 
     /// Saves the document of the tab at `index` to a file chosen in the dialog of the system,
-    /// next to its own file or in the home folder, under its name.
-    pub fn save_as(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(tab) = self.tabs.get(index) else { return };
+    /// next to its own file or in the home folder, under its name; tells whether it was saved.
+    pub fn save_as(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) -> Task<bool> {
+        let Some(tab) = self.tabs.get(index) else { return Task::ready(false) };
         let document = tab.document.entity_id();
         let (folder, name) = match &tab.document.read(cx).path {
             Some(path) => {
@@ -378,15 +390,13 @@ impl Workspace {
         let folder = folder.or_else(std::env::home_dir).unwrap_or_default();
         let chosen = cx.prompt_for_new_path(&folder, name.as_deref());
         cx.spawn_in(window, async move |workspace, cx| {
-            if let Ok(Ok(Some(path))) = chosen.await {
-                let _ = workspace.update(cx, |workspace, cx| {
-                    if let Some(index) = workspace.tab_of(document) {
-                        workspace.save_to(index, path, None, false, cx);
-                    }
-                });
-            }
+            let Ok(Ok(Some(path))) = chosen.await else { return false };
+            workspace
+                .update(cx, |workspace, cx| {
+                    workspace.tab_of(document).is_some_and(|index| workspace.save_to(index, path, None, false, cx))
+                })
+                .unwrap_or(false)
         })
-        .detach();
     }
 
     /// Shows a notification over the text of the tab with `document`.
@@ -491,11 +501,79 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Closes the tab at `index` without asking: changes to save stay among the closed tabs. The
+    /// Closes the tab at `index`; if its document has changes, asks first whether to save them
+    /// ([ADR 0020]): the tab stays if the question is cancelled or the document is not saved. The
     /// last tab closes the window.
     pub fn close_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(index) else { return };
+        if !tab.has_changes(cx) {
+            return self.close_tab_now(index, window, cx);
+        }
+        if self.asking {
+            return;
+        }
+        let (document, title) = (tab.document.entity_id(), Self::tab_title(tab, cx));
+        // The tab asked about is the one shown.
+        self.activate(index, window, cx);
+        let question = fill(Key::CloseQuestion, &[("file", &title)]);
+        let answer = self.ask_to_save(&question, tr(Key::CloseDetail), tr(Key::CloseSave), window, cx);
+        cx.spawn_in(window, async move |workspace, cx| {
+            let close = match answer.await {
+                SaveAnswer::Save => {
+                    let save =
+                        workspace.update_in(cx, |workspace, window, cx| workspace.save_document(document, window, cx));
+                    let Ok(save) = save else { return };
+                    save.await
+                }
+                SaveAnswer::DontSave => workspace.update(cx, |workspace, _| workspace.discard(document)).is_ok(),
+                SaveAnswer::Cancel => false,
+            };
+            if close {
+                let _ = workspace.update_in(cx, |workspace, window, cx| {
+                    if let Some(index) = workspace.tab_of(document) {
+                        workspace.close_tab_now(index, window, cx);
+                    }
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Asks over the window whether to save the changes before closing: `question`, `detail`, and
+    /// the buttons `save`, Don't Save and Cancel. Escape cancels; the answer is Cancel too if the
+    /// question goes away unanswered.
+    fn ask_to_save(
+        &mut self,
+        question: &str,
+        detail: &str,
+        save: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<SaveAnswer> {
+        let buttons = [
+            PromptButton::new(save),
+            PromptButton::new(tr(Key::CloseDontSave)),
+            PromptButton::cancel(tr(Key::CloseCancel)),
+        ];
+        self.asking = true;
+        let answer = window.prompt(PromptLevel::Warning, question, Some(detail), &buttons, cx);
+        cx.spawn(async move |workspace, cx| {
+            let answer = answer.await;
+            let _ = workspace.update(cx, |workspace, _| workspace.asking = false);
+            match answer {
+                Ok(0) => SaveAnswer::Save,
+                Ok(1) => SaveAnswer::DontSave,
+                _ => SaveAnswer::Cancel,
+            }
+        })
+    }
+
+    /// Closes the tab at `index` as it is: its changes, if any, were saved or are to be dropped. The
+    /// last tab closes the window.
+    fn close_tab_now(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if self.tabs.len() == 1 {
-            self.close_window(window, cx);
+            self.remember_tabs(cx);
+            window.remove_window();
             return;
         }
         let was_active = index == self.tabs.active_index();
@@ -509,6 +587,29 @@ impl Workspace {
         }
     }
 
+    /// Saves the document `document`: to its file, or to one chosen if it has none. Tells whether
+    /// it was saved, once the dialog of an untitled one is answered.
+    fn save_document(&mut self, document: EntityId, window: &mut Window, cx: &mut Context<Self>) -> Task<bool> {
+        match self.tab_of(document) {
+            Some(index) => self.save(index, None, false, window, cx),
+            None => Task::ready(false),
+        }
+    }
+
+    /// Drops the changes of the document `document` as its tab closes: they were not to be saved.
+    fn discard(&mut self, document: EntityId) {
+        if let Some(index) = self.tab_of(document)
+            && let Some(tab) = self.tabs.get_mut(index)
+        {
+            tab.discarded = true;
+        }
+    }
+
+    /// Whether a document of the window has changes to save.
+    pub fn has_changes(&self, cx: &App) -> bool {
+        self.tabs.iter().any(|tab| tab.has_changes(cx))
+    }
+
     /// Alt or F10: brings the keyboard to the menu bar, or back. Not when the window is not active:
     /// Alt released after switching windows with Alt+Tab is not for the menus.
     pub fn toggle_menu_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -519,10 +620,72 @@ impl Workspace {
         }
     }
 
-    /// Closes the window; its tabs go among the closed ones.
+    /// Closes the window; its tabs go among the closed ones. Changes to save are asked about
+    /// first, in one question for all the documents that have them ([ADR 0020]).
     pub fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.remember_tabs(cx);
-        window.remove_window();
+        let changed: Vec<(EntityId, String)> = self
+            .tabs
+            .iter()
+            .filter(|tab| tab.has_changes(cx))
+            .map(|tab| (tab.document.entity_id(), Self::tab_title(tab, cx)))
+            .collect();
+        if changed.is_empty() {
+            self.remember_tabs(cx);
+            window.remove_window();
+            return;
+        }
+        if self.asking {
+            return;
+        }
+        let (question, detail, save) = match changed.as_slice() {
+            [(document, title)] => {
+                if let Some(index) = self.tab_of(*document) {
+                    self.activate(index, window, cx);
+                }
+                let question = fill(Key::CloseQuestion, &[("file", title)]);
+                (question, tr(Key::CloseDetail).to_owned(), tr(Key::CloseSave))
+            }
+            _ => {
+                let files: Vec<String> =
+                    changed.iter().map(|(_, title)| fill(Key::CloseFile, &[("file", title)])).collect();
+                let detail = fill(Key::CloseWindowDetail, &[("files", &files.join(", "))]);
+                (tr(Key::CloseWindowQuestion).to_owned(), detail, tr(Key::CloseSaveAll))
+            }
+        };
+        let answer = self.ask_to_save(&question, &detail, save, window, cx);
+        cx.spawn_in(window, async move |workspace, cx| {
+            match answer.await {
+                SaveAnswer::Save => {
+                    // Each in turn, its tab shown: the dialog of an untitled one and what went
+                    // wrong are about the document in view. One not saved keeps the window open.
+                    for (document, _) in changed {
+                        let save = workspace.update_in(cx, |workspace, window, cx| {
+                            if let Some(index) = workspace.tab_of(document) {
+                                workspace.activate(index, window, cx);
+                            }
+                            workspace.save_document(document, window, cx)
+                        });
+                        let Ok(save) = save else { return };
+                        if !save.await {
+                            return;
+                        }
+                    }
+                }
+                SaveAnswer::DontSave => {
+                    let _ = workspace.update(cx, |workspace, _| {
+                        for (document, _) in &changed {
+                            workspace.discard(*document);
+                        }
+                    });
+                }
+                SaveAnswer::Cancel => return,
+            }
+            let _ = workspace.update_in(cx, |workspace, window, cx| {
+                workspace.remember_tabs(cx);
+                window.remove_window();
+            });
+        })
+        .detach();
     }
 
     /// Keeps the window among the closed ones, with its tabs: it comes back whole.
@@ -814,17 +977,23 @@ impl Tab {
             loading,
             pending_selection: None,
             notices: Vec::new(),
+            discarded: false,
             losses_checked: false,
             _observe: observe,
             _progress: progress,
         }
     }
 
+    /// Whether the document has changes to save, not dropped by the question on closing it.
+    fn has_changes(&self, cx: &App) -> bool {
+        !self.discarded && self.document.read(cx).is_modified()
+    }
+
     /// What is kept of the tab once it is closed: the document, if it has changes to save.
     fn closed(&self, cx: &App) -> ClosedTab {
         let doc = self.document.read(cx);
         ClosedTab {
-            document: doc.is_modified().then(|| self.document.clone()),
+            document: self.has_changes(cx).then(|| self.document.clone()),
             path: doc.path.clone(),
             selection: self.pending_selection.unwrap_or_else(|| self.editor.read(cx).selection()),
         }

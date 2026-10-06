@@ -238,12 +238,18 @@ pub fn open_window_with(tabs: Vec<ForTab>, notices: Vec<Notice>, cx: &mut App) -
         .ok()?;
     window
         .update(cx, |_, window, cx| {
-            // Closing the window with its button keeps its tabs among the closed ones.
+            // The button of the window closes it as Close Window does, asking about changes to
+            // save first — but the last window on Windows and Linux, which is quitting: then
+            // nothing is asked and everything comes back at the next start ([ADR 0020]).
             window.on_window_should_close(cx, |window, cx| {
-                if let Some(Some(workspace)) = window.root::<Workspace>() {
+                let Some(Some(workspace)) = window.root::<Workspace>() else { return true };
+                let quitting = !cfg!(target_os = "macos") && cx.windows().len() == 1;
+                if quitting || !workspace.read(cx).has_changes(cx) {
                     workspace.update(cx, |workspace, cx| workspace.remember_tabs(cx));
+                    return true;
                 }
-                true
+                workspace.update(cx, |workspace, cx| workspace.close_window(window, cx));
+                false
             });
         })
         .ok();

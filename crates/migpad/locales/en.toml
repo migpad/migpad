@@ -50,6 +50,18 @@ next_tab = "&Next Tab"
 previous_tab = "&Previous Tab"
 select_tab = "Select Tab"
 
+[close]
+question = "Save the changes to “{file}”?"
+detail = "If you don't save them, your changes will be lost."
+window_question = "Save the changes to the documents of this window?"
+window_detail = "Documents with changes: {files}. If you don't save them, your changes will be lost."
+# A document in the list of window_detail.
+file = "“{file}”"
+save = "Save"
+save_all = "Save All"
+dont_save = "Don't Save"
+cancel = "Cancel"
+
 [status]
 position = "Ln {line}, Col {column}"
 selection = "Selected: {count}"
