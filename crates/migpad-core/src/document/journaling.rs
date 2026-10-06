@@ -83,9 +83,43 @@ impl Document {
         }
     }
 
+    /// The journal file to flush to the disk in the background, if anything was written since the
+    /// last time: what [`Document::sync_journal`] does, off the main thread. If the flush fails,
+    /// tell [`Document::journal_sync_failed`].
+    pub fn journal_to_sync(&mut self) -> Option<fs::File> {
+        let journal = self.journal.file.as_ref().filter(|_| self.journal.unsynced)?;
+        match journal.handle() {
+            Ok(file) => {
+                self.journal.unsynced = false;
+                Some(file)
+            }
+            Err(error) => {
+                self.journal_failed(error);
+                None
+            }
+        }
+    }
+
+    /// The journal could not be flushed to the disk: it stops, as after any error of writing it.
+    pub fn journal_sync_failed(&mut self, error: io::Error) {
+        if self.journal.file.is_some() {
+            self.journal_failed(error);
+        }
+    }
+
     /// The error that stopped the journal, if any: edits are no longer protected from a crash.
     pub fn take_journal_error(&mut self) -> Option<io::Error> {
         self.journal.error.take()
+    }
+
+    /// Stops the journal and removes its file: the document is closed, and has nothing that its
+    /// file has not ([ADR 0020]).
+    pub fn remove_journal(&mut self) {
+        // Windows does not remove a file that is open.
+        self.journal.file = None;
+        if let Some(dir) = self.journal.dir.take() {
+            let _ = fs::remove_file(journal_file(&dir, self.id));
+        }
     }
 
     /// Notes that the text was just saved to `path` in `format`, and the file is `disk` now.
@@ -514,6 +548,37 @@ mod tests {
         insert(&mut doc, 5, "?", EditKind::Other);
         assert_eq!((text(&doc), doc.journal_path()), (b"text!?".to_vec(), None));
         assert!(doc.take_journal_error().is_none(), "the journal stopped");
+    }
+
+    #[test]
+    fn the_journal_is_flushed_in_the_background_once_per_writes() {
+        let (file, dir) = (TempFile::new("journaling-flush", b"text"), TempDir::new("journaling-flush"));
+        let mut doc = journaled(&file, &dir);
+        assert!(doc.journal_to_sync().is_none(), "no journal yet");
+        insert(&mut doc, 4, "!", EditKind::Other);
+        let handle = doc.journal_to_sync().expect("written since the last flush");
+        handle.sync_data().unwrap();
+        assert!(doc.journal_to_sync().is_none(), "nothing written since");
+        insert(&mut doc, 5, "?", EditKind::Other);
+        assert!(doc.journal_to_sync().is_some());
+        // A flush that fails stops the journal, as a failed write does.
+        doc.journal_sync_failed(io::Error::other("the disk is gone"));
+        assert!(doc.take_journal_error().is_some());
+        assert!(dir.files().is_empty(), "a journal that may miss records is removed");
+        assert_eq!(text(&doc), b"text!?");
+    }
+
+    #[test]
+    fn a_closed_document_removes_its_journal() {
+        let (file, dir) = (TempFile::new("journaling-remove", b"text"), TempDir::new("journaling-remove"));
+        let mut doc = journaled(&file, &dir);
+        insert(&mut doc, 4, "!", EditKind::Other);
+        assert_eq!(dir.files().len(), 1);
+        doc.remove_journal();
+        assert!(dir.files().is_empty());
+        insert(&mut doc, 5, "?", EditKind::Other);
+        assert!(dir.files().is_empty(), "no journal after it");
+        assert!(doc.take_journal_error().is_none());
     }
 
     #[test]

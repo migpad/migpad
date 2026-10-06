@@ -18,6 +18,7 @@ use migpad_ui::notification::NotificationBar;
 use migpad_ui::{Button, MenuBar, TabBar, TabInfo, theme};
 
 use crate::commands::{Registry, own_menu_bar, update_menus};
+use crate::journals;
 use crate::keys;
 use crate::modules::file::NewTab;
 use crate::notices::{self, Notice, NoticeAction, Topic};
@@ -51,6 +52,8 @@ pub struct Tab {
     discarded: bool,
     /// Whether the text was checked for bytes lost in reading: once it is loaded.
     losses_checked: bool,
+    /// Flushes the journal to the disk a moment after the last edit.
+    journal_sync: Option<Task<()>>,
     _observe: Subscription,
     /// Shows the progress of the loading in the status bar.
     _progress: Option<Task<()>>,
@@ -100,10 +103,15 @@ enum SaveAnswer {
 impl Workspace {
     /// A window with one tab.
     pub fn new(first: ForTab, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        // The check marks of the menus are those of the document of the active window.
+        // The check marks of the menus are those of the document of the active window; the
+        // journals of a window that goes to the background reach the disk.
         let activation = cx.observe_window_activation(window, |workspace, window, cx| {
             if window.is_window_active() {
                 update_menus(Some(workspace), cx);
+            } else {
+                for tab in workspace.tabs.iter() {
+                    journals::sync(&tab.document, cx);
+                }
             }
         });
         // Colors follow the appearance of the system, unless a theme is chosen.
@@ -161,6 +169,11 @@ impl Workspace {
     /// The document of the active tab.
     pub fn document(&self) -> &Entity<Document> {
         &self.tabs.active().document
+    }
+
+    /// The documents of the tabs.
+    pub fn documents(&self) -> impl Iterator<Item = &Entity<Document>> {
+        self.tabs.iter().map(|tab| &tab.document)
     }
 
     pub fn active_tab(&self) -> usize {
@@ -438,7 +451,7 @@ impl Workspace {
 
     /// A new tab with an untitled document.
     pub fn new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let document = cx.new(|_| Document::new());
+        let document = journals::document(Document::new(), cx);
         self.add_tab(ForTab { document, loading: None, selection: None }, window, cx);
     }
 
@@ -578,7 +591,7 @@ impl Workspace {
         }
         let was_active = index == self.tabs.active_index();
         let Some(tab) = self.tabs.remove(index) else { return };
-        windows::remember_tab(tab.closed(cx), cx);
+        windows::remember_tab(tab.close(cx), cx);
         if was_active {
             let active = self.tabs.active_index();
             self.activate(active, window, cx);
@@ -688,9 +701,9 @@ impl Workspace {
         .detach();
     }
 
-    /// Keeps the window among the closed ones, with its tabs: it comes back whole.
+    /// The window closes: it is kept among the closed ones, with its tabs, and comes back whole.
     pub fn remember_tabs(&mut self, cx: &mut App) {
-        let tabs = self.tabs.iter().map(|tab| tab.closed(cx)).collect();
+        let tabs = self.tabs.iter().map(|tab| tab.close(cx)).collect();
         windows::remember_window(tabs, self.tabs.active_index(), cx);
     }
 
@@ -740,7 +753,9 @@ impl Workspace {
             return self.add_tab(tab, window, cx);
         }
         let replaced = Tab::new(tab.document, None, None, window, cx);
-        self.tabs.replace(index, replaced);
+        // The document replaced had no changes: it goes with its journal.
+        let gone = self.tabs.replace(index, replaced);
+        gone.document.update(cx, |doc, _| doc.remove_journal());
         self.settle(index, tab.selection, window, cx);
         self.activate(index, window, cx);
     }
@@ -793,9 +808,26 @@ impl Workspace {
                 tab.editor.update(cx, |editor, cx| editor.select(selection, window, cx));
             }
             self.check_losses(index, cx);
+            self.journal_changed(index, cx);
         }
         self.update_title(window, cx);
         cx.notify();
+    }
+
+    /// After a change of the document of the tab at `index`: its journal reaches the disk a moment
+    /// after the last edit, and an error that stopped it is told.
+    fn journal_changed(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get_mut(index) else { return };
+        let document = tab.document.downgrade();
+        tab.journal_sync = Some(cx.spawn(async move |_, cx| {
+            cx.background_executor().timer(journals::SYNC_DELAY).await;
+            if let Some(document) = document.upgrade() {
+                cx.update(|cx| journals::sync(&document, cx));
+            }
+        }));
+        let Some(error) = tab.document.update(cx, |doc, _| doc.take_journal_error()) else { return };
+        let notice = notices::journal_failed(&Self::tab_title(tab, cx), &error);
+        self.notify_tab(index, notice, cx);
     }
 
     /// Files dragged from another program over the window: they open once dropped. The drop itself
@@ -979,6 +1011,7 @@ impl Tab {
             notices: Vec::new(),
             discarded: false,
             losses_checked: false,
+            journal_sync: None,
             _observe: observe,
             _progress: progress,
         }
@@ -987,6 +1020,16 @@ impl Tab {
     /// Whether the document has changes to save, not dropped by the question on closing it.
     fn has_changes(&self, cx: &App) -> bool {
         !self.discarded && self.document.read(cx).is_modified()
+    }
+
+    /// Closes the tab: what is kept of it, see [`Tab::closed`]. A document not kept goes with its
+    /// journal: what it had is in its file, or was dropped.
+    fn close(&self, cx: &mut App) -> ClosedTab {
+        let closed = self.closed(cx);
+        if closed.document.is_none() {
+            self.document.update(cx, |doc, _| doc.remove_journal());
+        }
+        closed
     }
 
     /// What is kept of the tab once it is closed: the document, if it has changes to save.

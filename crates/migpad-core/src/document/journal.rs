@@ -136,6 +136,11 @@ impl Journal {
         self.file.sync_data()
     }
 
+    /// A handle of the journal file of its own, to flush it to the disk in the background.
+    pub fn handle(&self) -> io::Result<File> {
+        self.file.try_clone()
+    }
+
     /// Length of the journal file in bytes.
     pub fn size(&self) -> u64 {
         self.size

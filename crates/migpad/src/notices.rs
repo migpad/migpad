@@ -1,5 +1,5 @@
 //! Notifications over the text of a tab: what went wrong opening or saving a file, bytes that
-//! could not be read in its encoding.
+//! could not be read in its encoding, a journal that stopped.
 
 use std::io;
 use std::path::Path;
@@ -33,6 +33,8 @@ impl Notice {
 pub enum Topic {
     /// The last attempt to save the document.
     Save,
+    /// The journal of the document.
+    Journal,
 }
 
 /// What a button of a notification does.
@@ -111,7 +113,7 @@ pub fn save_failed(doc: &Document, path: &Path, encoding: &str, error: &SaveErro
         },
         SaveError::Io(error) => Notice {
             severity: Severity::Error,
-            message: fill(Key::NoticeSaveFailed, &[("file", &file), ("reason", &error.to_string())]),
+            message: fill(Key::NoticeSaveFailed, &[("file", &file), ("reason", &write_reason(error))]),
             topic: Some(Topic::Save),
             actions: vec![NoticeAction::SaveAs],
         },
@@ -128,6 +130,23 @@ impl Notice {
             self.actions.retain(|action| *action != NoticeAction::SaveInUtf8);
         }
         self
+    }
+}
+
+/// The journal of the document `file` stopped after `error`: its changes are no longer kept safe
+/// from a crash, though nothing is lost now.
+pub fn journal_failed(file: &str, error: &io::Error) -> Notice {
+    let message = fill(Key::NoticeJournalFailed, &[("file", file), ("reason", &write_reason(error))]);
+    Notice { topic: Some(Topic::Journal), ..Notice::new(Severity::Warning, message) }
+}
+
+/// Why a file could not be written, told by the kind of the error: the system's own words only
+/// for what has no words here.
+fn write_reason(error: &io::Error) -> String {
+    match error.kind() {
+        io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem => tr(Key::NoticeWriteDenied).to_owned(),
+        io::ErrorKind::StorageFull => tr(Key::NoticeDiskFull).to_owned(),
+        _ => error.to_string(),
     }
 }
 
@@ -220,6 +239,28 @@ mod tests {
         );
         assert!(!notice.actions.contains(&NoticeAction::SaveInUtf8));
         set_language(Language::English);
+    }
+
+    #[test]
+    fn a_stopped_journal_is_told_with_its_reason() {
+        let _lock = LANGUAGE_LOCK.lock();
+        let denied = io::Error::from(io::ErrorKind::PermissionDenied);
+        set_language(Language::Russian);
+        let notice = journal_failed("план.txt", &denied);
+        assert_eq!(
+            notice.message,
+            "Правки «план.txt» больше не защищены от сбоя: не удалось записать журнал (нет прав на запись)."
+        );
+        assert_eq!((notice.severity, notice.topic), (Severity::Warning, Some(Topic::Journal)));
+        set_language(Language::English);
+        let full = io::Error::from(io::ErrorKind::StorageFull);
+        assert_eq!(
+            journal_failed("plan.txt", &full).message,
+            "Changes to “plan.txt” are no longer kept safe from a crash: the journal could not be written (the disk is full)."
+        );
+        let error = SaveError::Io(io::Error::from(io::ErrorKind::StorageFull));
+        let notice = save_failed(&Document::new(), Path::new("/notes/plan.txt"), "UTF-8", &error).unwrap();
+        assert_eq!(notice.message, "Could not save “plan.txt”: the disk is full.");
     }
 
     #[test]

@@ -14,6 +14,7 @@ use migpad_core::document::{Document, OpenAs, OpenError, Opened, open};
 use migpad_core::history::Selection;
 
 use crate::commands::update_menus;
+use crate::journals;
 use crate::notices::{self, Notice};
 use crate::status::Loading;
 use crate::tabs::{ClosedTabs, lowest_free};
@@ -92,6 +93,20 @@ pub fn take_closed(cx: &mut App) -> Option<Closed> {
     cx.default_global::<ClosedList>().0.pop()
 }
 
+/// The documents of the program: those in the windows, and those of closed tabs kept for their
+/// changes.
+pub fn open_documents(cx: &App) -> Vec<Entity<Document>> {
+    let open = workspaces(cx).flat_map(|(_, workspace)| workspace.documents().cloned().collect::<Vec<_>>());
+    let closed = cx.try_global::<ClosedList>().into_iter().flat_map(|closed| closed.0.iter()).flat_map(|closed| {
+        let tabs = match closed {
+            Closed::Tab(tab) => std::slice::from_ref(tab),
+            Closed::Window { tabs, .. } => tabs.as_slice(),
+        };
+        tabs.iter().filter_map(|tab| tab.document.clone())
+    });
+    open.chain(closed).collect()
+}
+
 /// The workspaces of the open windows, except one that is being updated now.
 pub fn workspaces(cx: &App) -> impl Iterator<Item = (WindowHandle<Workspace>, &Workspace)> {
     cx.windows().into_iter().filter_map(|window| {
@@ -130,7 +145,7 @@ pub fn open_document(path: &Path, cx: &mut App) -> Opening {
     match open(&path, OpenAs::Detect { tld: None }) {
         Ok(Opened::Complete(loaded)) => {
             cx.add_recent_document(&path);
-            Opening::Document(cx.new(|_| loaded), None)
+            Opening::Document(journals::document(loaded, cx), None)
         }
         Ok(Opened::Partial { preview, loader }) => {
             cx.add_recent_document(&path);
@@ -146,9 +161,14 @@ pub fn open_document(path: &Path, cx: &mut App) -> Opening {
             cx.observe_release(&document, move |_, _| cancel.store(true, Ordering::Relaxed)).detach();
             let loading = cx.background_executor().spawn(async move { loader.load() });
             let (target, stopped, failure) = (document.downgrade(), progress.stopped.clone(), progress.failure.clone());
+            let journals = journals::dir(cx);
             cx.spawn(async move |cx| {
                 match loading.await {
-                    Ok(loaded) => {
+                    Ok(mut loaded) => {
+                        // The preview could not be edited; the whole text can, with a journal.
+                        if let Some(dir) = journals {
+                            loaded.journal_in(dir);
+                        }
                         let _ = target.update(cx, |doc, cx| {
                             *doc = loaded;
                             cx.notify();
@@ -167,7 +187,7 @@ pub fn open_document(path: &Path, cx: &mut App) -> Opening {
         Err(OpenError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound && !path.is_dir() => {
             let mut document = Document::new();
             document.path = Some(path);
-            Opening::Document(cx.new(|_| document), None)
+            Opening::Document(journals::document(document, cx), None)
         }
         Err(error) => Opening::Failed(notices::open_failed(&path, &error)),
     }
@@ -218,7 +238,7 @@ pub fn open_window_with(tabs: Vec<ForTab>, notices: Vec<Notice>, cx: &mut App) -
             let workspace = cx.new(|cx| {
                 let mut tabs = tabs.into_iter();
                 let first = tabs.next().unwrap_or_else(|| ForTab {
-                    document: cx.new(|_| Document::new()),
+                    document: journals::document(Document::new(), cx),
                     loading: None,
                     selection: None,
                 });
@@ -240,16 +260,19 @@ pub fn open_window_with(tabs: Vec<ForTab>, notices: Vec<Notice>, cx: &mut App) -
         .update(cx, |_, window, cx| {
             // The button of the window closes it as Close Window does, asking about changes to
             // save first — but the last window on Windows and Linux, which is quitting: then
-            // nothing is asked and everything comes back at the next start ([ADR 0020]).
+            // nothing is asked, the journals stay, and everything comes back at the next start
+            // ([ADR 0020]).
             window.on_window_should_close(cx, |window, cx| {
                 let Some(Some(workspace)) = window.root::<Workspace>() else { return true };
-                let quitting = !cfg!(target_os = "macos") && cx.windows().len() == 1;
-                if quitting || !workspace.read(cx).has_changes(cx) {
-                    workspace.update(cx, |workspace, cx| workspace.remember_tabs(cx));
+                if !cfg!(target_os = "macos") && cx.windows().len() == 1 {
                     return true;
                 }
-                workspace.update(cx, |workspace, cx| workspace.close_window(window, cx));
-                false
+                if workspace.read(cx).has_changes(cx) {
+                    workspace.update(cx, |workspace, cx| workspace.close_window(window, cx));
+                    return false;
+                }
+                workspace.update(cx, |workspace, cx| workspace.remember_tabs(cx));
+                true
             });
         })
         .ok();

@@ -141,6 +141,11 @@ impl<T> ClosedTabs<T> {
     pub fn pop(&mut self) -> Option<T> {
         self.items.pop_front()
     }
+
+    /// The closed tabs, the last one first.
+    pub fn iter(&self) -> impl Iterator<Item = &T> {
+        self.items.iter()
+    }
 }
 
 /// The lowest number from 1 that `used` does not have: untitled documents are "Untitled",

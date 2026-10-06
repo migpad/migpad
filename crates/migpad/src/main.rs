@@ -5,6 +5,7 @@
 
 mod commands;
 mod debug_input;
+mod journals;
 mod keys;
 mod modules;
 mod notices;
@@ -34,6 +35,7 @@ fn main() {
     });
     application.run(move |cx: &mut App| {
         strings::set_language(Language::of_system());
+        journals::init(cx);
         migpad_ui::theme::set_mode(theme_mode(), cx);
         migpad_editor::init(cx);
         commands::init(&modules::all(), cx);
@@ -51,6 +53,13 @@ fn main() {
             if !updated {
                 commands::update_menus(None, cx);
             }
+        })
+        .detach();
+        // Edits of the last moment reach the disk before the program is gone.
+        cx.on_app_quit(|cx| {
+            let documents = windows::open_documents(cx);
+            journals::sync_now(&documents, cx);
+            async {}
         })
         .detach();
         match windows::open_window(&paths, cx).or_else(|| windows::open_window(&[], cx)) {
