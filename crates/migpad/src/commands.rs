@@ -6,10 +6,11 @@ use std::rc::Rc;
 
 use gpui::{
     Action, App, Context, Div, DummyKeyboardMapper, Global, InteractiveElement, KeyBinding, Menu, MenuItem, OsAction,
-    SystemMenuType, Window,
+    SystemMenuType, Window, WindowId,
 };
 
 use crate::strings::{Key, tr};
+use crate::windows;
 use crate::workspace::Workspace;
 
 /// A feature of the application, which registers its part of the commands and the menus.
@@ -73,17 +74,19 @@ pub fn by_os(
 pub enum MenuId {
     /// The menu of the application on macOS, named after it.
     App,
+    File,
     Edit,
     View,
     Window,
 }
 
 impl MenuId {
-    const ALL: [MenuId; 4] = [MenuId::App, MenuId::Edit, MenuId::View, MenuId::Window];
+    const ALL: [MenuId; 5] = [MenuId::App, MenuId::File, MenuId::Edit, MenuId::View, MenuId::Window];
 
     fn title(self) -> &'static str {
         match self {
             MenuId::App => "MigPad",
+            MenuId::File => tr(Key::FileMenu),
             MenuId::Edit => tr(Key::EditMenu),
             MenuId::View => tr(Key::ViewMenu),
             MenuId::Window => tr(Key::WindowMenu),
@@ -96,7 +99,14 @@ enum Entry {
     Command(&'static str),
     /// The Services menu of macOS, which the system fills.
     Services,
+    /// The open windows, one item each, to bring forward.
+    Windows,
 }
+
+/// Brings the window forward: an item of the list of windows.
+#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[action(namespace = window, no_json)]
+pub struct ActivateWindow(pub WindowId);
 
 /// An item in a group of a menu: groups go in the order of their numbers, separated by lines,
 /// and items within a group in the order they were added.
@@ -134,6 +144,11 @@ impl Registry {
     /// Adds the Services menu of macOS to a group of a menu.
     pub fn add_services(&mut self, menu: MenuId, group: u8) {
         self.placements.push(Placement { menu, group, entry: Entry::Services });
+    }
+
+    /// Adds the list of open windows to a group of a menu.
+    pub fn add_window_list(&mut self, menu: MenuId, group: u8) {
+        self.placements.push(Placement { menu, group, entry: Entry::Windows });
     }
 
     /// Handles `A` in each window: the command acts on its document or on the window itself.
@@ -174,30 +189,60 @@ impl Registry {
             placements.sort_by_key(|placement| placement.group);
             let mut items = Vec::with_capacity(placements.len() + 2);
             for (i, placement) in placements.iter().enumerate() {
-                if i > 0 && placements[i - 1].group != placement.group {
+                let entries = self.menu_items(&placement.entry, workspace, cx);
+                if !entries.is_empty() && !items.is_empty() && placements[i - 1].group != placement.group {
                     items.push(MenuItem::separator());
                 }
-                items.push(self.menu_item(&placement.entry, workspace, cx));
+                items.extend(entries);
             }
             (!items.is_empty()).then(|| Menu::new(id.title()).items(items))
         };
         MenuId::ALL.into_iter().filter_map(menu).collect()
     }
 
-    fn menu_item(&self, entry: &Entry, workspace: Option<&Workspace>, cx: &App) -> MenuItem {
+    fn menu_items(&self, entry: &Entry, workspace: Option<&Workspace>, cx: &App) -> Vec<MenuItem> {
         let id = match entry {
             Entry::Command(id) => id,
-            Entry::Services => return MenuItem::os_submenu(tr(Key::AppServices), SystemMenuType::Services),
+            Entry::Services => return vec![MenuItem::os_submenu(tr(Key::AppServices), SystemMenuType::Services)],
+            Entry::Windows => return window_list(workspace, cx),
         };
         let command = self.commands.iter().find(|command| command.id == *id).expect("menu items are of commands");
-        MenuItem::Action {
+        vec![MenuItem::Action {
             name: tr(command.label).into(),
             action: command.action.boxed_clone(),
             os_action: command.os_action,
             checked: command.checked.zip(workspace).is_some_and(|(checked, workspace)| checked(workspace, cx)),
             disabled: false,
-        }
+        }]
     }
+}
+
+/// The items of the open windows, the active one checked. macOS lists the windows itself in the
+/// menu called "Window", as it is in English: then there is no list of ours.
+fn window_list(workspace: Option<&Workspace>, cx: &App) -> Vec<MenuItem> {
+    if !cfg!(target_os = "macos") || MenuId::Window.title() == "Window" {
+        return Vec::new();
+    }
+    let active = cx.active_window().map(|window| window.window_id());
+    let mut windows: Vec<(WindowId, String)> =
+        windows::workspaces(cx).map(|(window, workspace)| (window.window_id(), workspace.title().to_owned())).collect();
+    // The workspace being updated is not among those that can be read.
+    if let Some(workspace) = workspace
+        && !windows.iter().any(|(id, _)| *id == workspace.window_id())
+    {
+        windows.push((workspace.window_id(), workspace.title().to_owned()));
+    }
+    windows.sort_by_key(|(id, _)| *id);
+    windows
+        .into_iter()
+        .map(|(id, title)| MenuItem::Action {
+            name: title.into(),
+            action: Box::new(ActivateWindow(id)),
+            os_action: None,
+            checked: Some(id) == active,
+            disabled: false,
+        })
+        .collect()
 }
 
 /// Registers the commands of `modules`, binds their keys and handles them.
@@ -266,7 +311,7 @@ mod tests {
             .iter()
             .filter_map(|placement| match placement.entry {
                 Entry::Command(id) => Some(id),
-                Entry::Services => None,
+                Entry::Services | Entry::Windows => None,
             })
             .collect();
         assert!(items.iter().all(|item| ids.contains(item)));

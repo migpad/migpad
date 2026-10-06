@@ -1,5 +1,9 @@
 # Strings of the interface in English, the base language. The keys are grouped by where the
 # strings show; ru.toml has the same keys, or the build fails.
+#
+# In the strings of menus "&" marks the mnemonic, the letter that opens the menu or chooses the
+# item with Alt on Windows and Linux; "&&" is an ampersand. A placeholder such as "{count}" takes
+# a value; a string has the same placeholders in each table.
 
 [app]
 services = "Services"
@@ -7,23 +11,52 @@ hide = "Hide MigPad"
 hide_others = "Hide Others"
 show_all = "Show All"
 quit = "Quit MigPad"
+exit = "E&xit"
+
+[file]
+menu = "&File"
+new = "&New"
+new_window = "New &Window"
+reopen_closed = "Reopen Closed &Tab"
+close_tab = "&Close Tab"
+close_window = "Close Win&dow"
+untitled = "Untitled"
 
 [edit]
-menu = "Edit"
-undo = "Undo"
-redo = "Redo"
-cut = "Cut"
-copy = "Copy"
-paste = "Paste"
-select_all = "Select All"
+menu = "&Edit"
+undo = "&Undo"
+redo = "&Redo"
+cut = "Cu&t"
+copy = "&Copy"
+paste = "&Paste"
+select_all = "Select &All"
 
 [view]
-menu = "View"
-word_wrap = "Word Wrap"
-invisibles = "Invisibles"
-indent_guides = "Indent Guides"
+menu = "&View"
+word_wrap = "&Word Wrap"
+invisibles = "&Invisibles"
+indent_guides = "Indent &Guides"
+toolbar = "&Toolbar"
 
 [window]
-menu = "Window"
+menu = "&Window"
 minimize = "Minimize"
 zoom = "Zoom"
+next_tab = "&Next Tab"
+previous_tab = "&Previous Tab"
+select_tab = "Select Tab"
+
+[status]
+position = "Ln {line}, Col {column}"
+selection = "Selected: {count}"
+lines = "Lines: {count}"
+with_bom = "{encoding} with BOM"
+loading = "Loading… {percent}"
+
+[notice]
+close = "Close"
+open_failed = "Could not open “{file}”: {reason}."
+no_permission = "no permission to read it"
+is_folder = "it is a folder"
+too_large = "it is larger than 4 GiB"
+decode_losses = "Some bytes of the file are not valid {encoding}: they show as “�”. The first is on line {line}."

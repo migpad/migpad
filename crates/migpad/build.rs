@@ -1,7 +1,9 @@
 //! Turns the tables of interface strings, `locales/<language>.toml`, into code: an enum of the
-//! keys and an array of the strings of each language, so that nothing is parsed when MigPad
-//! starts. A key missing from a table, or found in one table only, fails the build.
+//! keys, and for each language an array of the strings and one of their mnemonics, so that
+//! nothing is parsed when MigPad starts. A key missing from a table, or found in one table only,
+//! a placeholder that one table has and another has not, or a stray "&" fails the build.
 
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::Path;
 use std::{env, fs};
@@ -22,6 +24,12 @@ fn main() {
         if !missing.is_empty() || !unknown.is_empty() {
             panic!("locales/{language}.toml: missing keys {missing:?}, keys that en.toml has not {unknown:?}");
         }
+        for (key, string) in table {
+            let base = &tables[0].iter().find(|(name, _)| name == key).expect("checked above").1;
+            if placeholders(string) != placeholders(base) {
+                panic!("locales/{language}.toml: {key} has other placeholders than in en.toml");
+            }
+        }
     }
 
     let mut code = String::from("// Made by build.rs from locales/*.toml.\n\n");
@@ -32,15 +40,21 @@ fn main() {
     }
     code += "}\n";
     for (language, table) in LANGUAGES.iter().zip(&tables) {
-        let strings: Vec<&str> = keys
+        let (strings, mnemonics): (Vec<String>, Vec<Option<usize>>) = keys
             .iter()
-            .map(|key| table.iter().find(|(name, _)| name == key).expect("checked above").1.as_str())
-            .collect();
+            .map(|key| {
+                let string = &table.iter().find(|(name, _)| name == key).expect("checked above").1;
+                mnemonic(string).unwrap_or_else(|| panic!("locales/{language}.toml: {key}: a stray \"&\""))
+            })
+            .unzip();
         let name = language.to_uppercase();
+        let count = keys.len();
         writeln!(
             code,
-            "\n/// The strings of `locales/{language}.toml`, by key.\nconst {name}: [&str; {}] = {strings:?};",
-            keys.len()
+            "\n/// The strings of `locales/{language}.toml`, by key, without the marks of mnemonics.\n\
+             const {name}: [&str; {count}] = {strings:?};\n\
+             /// Where the mnemonic of each string is, in bytes.\n\
+             const {name}_MNEMONICS: [Option<usize>; {count}] = {mnemonics:?};"
         )
         .unwrap();
     }
@@ -67,6 +81,34 @@ fn collect(table: &Table, prefix: &str, path: &str, strings: &mut Vec<(String, S
             _ => panic!("{path}: {key} is not a string"),
         }
     }
+}
+
+/// The string without the mark of its mnemonic, and where the mnemonic is: "Cu&t" is "Cut" with
+/// the mnemonic at 2; "&&" is "&". None for a "&" before nothing or a second mnemonic.
+fn mnemonic(string: &str) -> Option<(String, Option<usize>)> {
+    let mut plain = String::with_capacity(string.len());
+    let mut at = None;
+    let mut chars = string.chars();
+    while let Some(c) = chars.next() {
+        if c != '&' {
+            plain.push(c);
+            continue;
+        }
+        match chars.next()? {
+            '&' => plain.push('&'),
+            next if at.is_none() => {
+                at = Some(plain.len());
+                plain.push(next);
+            }
+            _ => return None,
+        }
+    }
+    Some((plain, at))
+}
+
+/// The names of the placeholders of a string: `{count}` is `count`.
+fn placeholders(string: &str) -> BTreeSet<&str> {
+    string.split('{').skip(1).filter_map(|part| part.split_once('}').map(|(name, _)| name)).collect()
 }
 
 /// The variant of the enum for a key: `edit.select_all` is `EditSelectAll`.
