@@ -99,6 +99,15 @@ pub struct Document {
     /// The state of the history the file on disk has, if it can be reached; see [`History::state`].
     saved_at: Option<u64>,
     journal: journaling::JournalState,
+    /// See [`Document::version`].
+    version: u64,
+}
+
+/// A new number for a text, see [`Document::version`].
+fn next_version() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
 impl Document {
@@ -117,7 +126,15 @@ impl Document {
             id: DocumentId::random(),
             saved_at: Some(0),
             journal: Default::default(),
+            version: next_version(),
         }
+    }
+
+    /// A number for the text as it is now: every edit, undo and redo gives a new one, and no two
+    /// documents of the program share one — a document read again from its file has a new number
+    /// too. What was found in a text holds while its number does.
+    pub fn version(&self) -> u64 {
+        self.version
     }
 
     pub fn text(&self) -> &Text {
@@ -194,6 +211,7 @@ impl Document {
         self.journal_write(|journal| journal.write_transaction(&transaction, kind, merged));
         let recorded = self.history.record(transaction, kind, now);
         debug_assert_eq!(merged, recorded);
+        self.version = next_version();
         self.journal_after_change();
         Ok(())
     }
@@ -209,6 +227,7 @@ impl Document {
             apply(&mut self.text, &mut self.lines, edit.pos..edit.pos + edit.inserted.len(), &edit.deleted);
         }
         let before = transaction.before;
+        self.version = next_version();
         self.journal_write(journal::Journal::write_undo);
         self.journal_after_change();
         Some(before)
@@ -225,6 +244,7 @@ impl Document {
             apply(&mut self.text, &mut self.lines, edit.pos..edit.pos + edit.deleted.len(), &edit.inserted);
         }
         let after = transaction.after;
+        self.version = next_version();
         self.journal_write(journal::Journal::write_redo);
         self.journal_after_change();
         Some(after)
@@ -358,6 +378,30 @@ mod tests {
         assert_eq!(doc.undo(), Some(Selection::caret(0)));
         assert_eq!(text(&doc), b"");
         assert!(!doc.can_undo());
+    }
+
+    #[test]
+    fn every_change_of_the_text_has_a_new_version() {
+        let mut doc = Document::new();
+        let other = Document::new();
+        assert_ne!(doc.version(), other.version());
+        let now = Instant::now();
+        let mut seen = vec![doc.version()];
+        doc.edit(&[(0..0, b"ab")], Selection::caret(0), Selection::caret(2), EditKind::Other, now).unwrap();
+        seen.push(doc.version());
+        doc.undo();
+        seen.push(doc.version());
+        doc.redo();
+        seen.push(doc.version());
+        let count = seen.len();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), count, "{seen:?}");
+        // Nothing changed: the same version.
+        let version = doc.version();
+        doc.seal_undo_step();
+        assert_eq!(doc.redo(), None);
+        assert_eq!(doc.version(), version);
     }
 
     #[test]

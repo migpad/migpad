@@ -20,6 +20,7 @@ use migpad_ui::notification::NotificationBar;
 use migpad_ui::{Button, MenuBar, TabBar, TabInfo, theme};
 
 use crate::commands::{Registry, own_menu_bar, update_menus};
+use crate::find::FindBar;
 use crate::journals;
 use crate::keys;
 use crate::modules::file::NewTab;
@@ -99,6 +100,9 @@ pub struct Workspace {
     place: (Rect, WindowMode, Option<String>),
     /// Compares the files of the documents with the disk, after the window comes back.
     file_check: Option<Task<()>>,
+    /// The find bar, once it was opened, and whether it shows.
+    find_bar: Option<Entity<FindBar>>,
+    find_shown: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -165,6 +169,8 @@ impl Workspace {
             asking: false,
             place: session::place(window, cx),
             file_check: None,
+            find_bar: None,
+            find_shown: false,
             _subscriptions: vec![activation, appearance, moved],
         };
         workspace.settle(0, first.selection, first.notice, window, cx);
@@ -184,6 +190,37 @@ impl Workspace {
     /// Whether the window has drawn a frame.
     pub fn has_drawn(&self) -> bool {
         self.drawn
+    }
+
+    /// Shows the find bar over the text, made the first time.
+    pub fn show_find_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<FindBar> {
+        let workspace = cx.weak_entity();
+        let bar = self.find_bar.get_or_insert_with(|| cx.new(|cx| FindBar::new(workspace, window, cx))).clone();
+        if !self.find_shown {
+            self.find_shown = true;
+            cx.notify();
+        }
+        bar
+    }
+
+    /// Hides the find bar; tells whether it showed.
+    pub fn hide_find_bar(&mut self, cx: &mut Context<Self>) -> bool {
+        let shown = std::mem::take(&mut self.find_shown);
+        if shown {
+            cx.notify();
+        }
+        shown
+    }
+
+    /// The view that typing goes to: the field of a bar with the focus, or the view of the document.
+    pub fn input_target(&self, window: &Window, cx: &App) -> Entity<EditorView> {
+        let field = self.find_bar_shown().and_then(|bar| bar.read(cx).focused_field(window, cx));
+        field.unwrap_or_else(|| self.editor().clone())
+    }
+
+    /// The find bar, if it shows.
+    pub fn find_bar_shown(&self) -> Option<&Entity<FindBar>> {
+        self.find_bar.as_ref().filter(|_| self.find_shown)
     }
 
     /// The document of the active tab.
@@ -1400,6 +1437,12 @@ impl Render for Workspace {
                 window.request_animation_frame();
             }
         }
+        // The selection of the documents shows in full color while the find bar works on them.
+        for tab in self.tabs.iter() {
+            if tab.editor.read(cx).is_emphasized() != self.find_shown {
+                tab.editor.update(cx, |editor, cx| editor.set_emphasized(self.find_shown, cx));
+            }
+        }
         let handlers = cx.global::<Registry>().window_handlers();
         let root = div()
             .key_context("Workspace")
@@ -1472,6 +1515,7 @@ impl Render for Workspace {
         .size_0();
         root.child(self.tab_bar(window, cx))
             .children(self.notification_bars(cx))
+            .children(self.find_bar_shown().cloned())
             .child(div().flex_1().min_h_0().child(self.editor().clone()))
             .child(status_bar)
             .child(drops)

@@ -6,6 +6,7 @@ pub mod menu_bar;
 pub mod notification;
 pub mod status_bar;
 pub mod tab_bar;
+pub mod text_field;
 pub mod theme;
 pub mod tooltip;
 
@@ -15,6 +16,7 @@ pub use button::Button;
 pub use menu_bar::MenuBar;
 pub use status_bar::StatusBar;
 pub use tab_bar::{TabBar, TabInfo};
+pub use text_field::TextField;
 pub use theme::{Theme, ThemeMode, theme};
 pub use tooltip::Tooltip;
 

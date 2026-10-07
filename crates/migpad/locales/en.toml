@@ -47,6 +47,34 @@ copy = "&Copy"
 paste = "&Paste"
 select_all = "Select &All"
 
+[find]
+# The submenu of the Edit menu on macOS.
+menu = "&Find"
+find = "&Find…"
+# Replace… on Windows and Linux, Find and Replace… on macOS.
+replace = "R&eplace…"
+find_and_replace = "Find and R&eplace…"
+next = "Find &Next"
+previous = "Find Pre&vious"
+# The find bar over the text.
+placeholder = "Find"
+replace_placeholder = "Replace with"
+match_case = "Match Case"
+whole_word = "Whole Word"
+regex = "Regular Expression"
+replace_one = "Replace"
+replace_all = "Replace All"
+close = "Close"
+# The match found is the {index}-th of {total}.
+found = "{index} of {total}"
+found_from_top = "{index} of {total}, from the top"
+found_from_bottom = "{index} of {total}, from the bottom"
+counting = "Counting…"
+not_found = "No results"
+invalid = "Invalid expression: {reason}"
+replacing = "Replacing… {percent}"
+replaced = "Replaced: {count}"
+
 [view]
 menu = "&View"
 word_wrap = "&Word Wrap"

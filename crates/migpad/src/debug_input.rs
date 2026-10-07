@@ -6,7 +6,8 @@
 //! Steps are separated by spaces:
 //!
 //! - a keystroke, such as `down`, `shift-end` or `cmd-a`;
-//! - `type:TEXT`: text from the system, as typed or committed by an input method;
+//! - `type:TEXT`: text from the system, as typed or committed by an input method, to the view with
+//!   the focus: the document, or a field of the find bar;
 //! - `mark:TEXT`: text an input method composes, and `unmark` to take it as it is;
 //! - `action:NAME`: an action by its name, such as `action:view::ToggleInvisibles`;
 //! - `click:X,Y`, or `click:X,Y,N` for N clicks;
@@ -58,19 +59,20 @@ pub fn play(window: WindowHandle<Workspace>, cx: &mut App) {
                 }
                 Some(Step::Type(text)) => {
                     let _ = window.update(cx, |workspace, window, cx| {
-                        workspace.editor().update(cx, |view, cx| view.replace_text_in_range(None, &text, window, cx))
+                        let target = workspace.input_target(window, cx);
+                        target.update(cx, |view, cx| view.replace_text_in_range(None, &text, window, cx))
                     });
                 }
                 Some(Step::Mark(text)) => {
                     let _ = window.update(cx, |workspace, window, cx| {
-                        workspace
-                            .editor()
-                            .update(cx, |view, cx| view.replace_and_mark_text_in_range(None, &text, None, window, cx))
+                        let target = workspace.input_target(window, cx);
+                        target.update(cx, |view, cx| view.replace_and_mark_text_in_range(None, &text, None, window, cx))
                     });
                 }
                 Some(Step::Unmark) => {
                     let _ = window.update(cx, |workspace, window, cx| {
-                        workspace.editor().update(cx, |view, cx| view.unmark_text(window, cx))
+                        let target = workspace.input_target(window, cx);
+                        target.update(cx, |view, cx| view.unmark_text(window, cx))
                     });
                 }
                 Some(Step::Action(name)) => {

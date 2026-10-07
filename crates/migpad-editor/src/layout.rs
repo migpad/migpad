@@ -223,6 +223,8 @@ pub(crate) struct Layout {
     pub guides: Vec<Bounds<Pixels>>,
     /// Labels of line breaks: the text, where it starts, and its background.
     pub labels: Vec<(ShapedLine, Point<Pixels>, Bounds<Pixels>)>,
+    /// What an empty input field shows, and where.
+    pub placeholder: Option<(ShapedLine, Point<Pixels>)>,
     /// The text area, for the I-beam mouse cursor; the element adds it.
     pub hitbox: Option<Hitbox>,
     /// The whole view, for presses and the wheel; the element adds it.

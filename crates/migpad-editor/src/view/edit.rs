@@ -74,6 +74,18 @@ impl EditorView {
         self.replace(range, text.as_bytes(), EditKind::Typing, after, window, cx);
     }
 
+    /// Replaces the whole text with `text`, selected: the owner of an input field fills it. It is an
+    /// edit like any other, which undo takes back.
+    pub fn set_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.end_composition(cx);
+        let text = self.accepted(text);
+        let len = self.document.read(cx).text().len();
+        let after = Selection { anchor: 0, head: text.len() };
+        if !self.replace(0..len, text.as_bytes(), EditKind::Other, after, window, cx) {
+            self.select_all(window, cx);
+        }
+    }
+
     /// Enter: the line break the document uses most.
     pub(crate) fn newline(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let line_ending = self.document.read(cx).format.line_ending;

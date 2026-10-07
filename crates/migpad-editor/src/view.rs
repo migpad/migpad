@@ -14,8 +14,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
-    App, Bounds, Context, Entity, FocusHandle, Focusable, Pixels, Render, ScrollWheelEvent, Subscription, Task, Window,
-    div, point, prelude::*, px, size,
+    App, Bounds, Context, Entity, FocusHandle, Focusable, Pixels, Render, ScrollWheelEvent, SharedString, Subscription,
+    Task, Window, div, point, prelude::*, px, size,
 };
 use migpad_core::document::Document;
 use migpad_core::history::Selection;
@@ -97,6 +97,11 @@ pub struct EditorView {
     /// Whether the blinking caret is shown at the moment.
     caret_on: bool,
     blink: Option<Task<()>>,
+    /// What an empty input field shows, faint: what it is for.
+    placeholder: Option<SharedString>,
+    /// Whether the selection shows as if the view had the focus, while its window is active: a
+    /// find bar works on it.
+    emphasized: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -152,6 +157,8 @@ impl EditorView {
             reveal_pending: false,
             caret_on: true,
             blink: None,
+            placeholder: None,
+            emphasized: false,
             _subscriptions: subscriptions,
         }
     }
@@ -199,6 +206,24 @@ impl EditorView {
     pub fn text(&self, cx: &App) -> String {
         let text = self.document.read(cx).text();
         String::from_utf8_lossy(&text.to_vec(0..text.len())).into_owned()
+    }
+
+    /// What the input field shows, faint, while it is empty: what it is for.
+    pub fn set_placeholder(&mut self, placeholder: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.placeholder = Some(placeholder.into());
+        cx.notify();
+    }
+
+    /// Whether the selection shows as if the view had the focus, see [`EditorView::set_emphasized`].
+    pub fn is_emphasized(&self) -> bool {
+        self.emphasized
+    }
+
+    /// Shows the selection as if the view had the focus while its window is active, or as usual: a
+    /// find bar that has the focus shows what it found so.
+    pub fn set_emphasized(&mut self, emphasized: bool, cx: &mut Context<Self>) {
+        self.emphasized = emphasized;
+        cx.notify();
     }
 
     /// The height of an input field: one line. The view of a document takes what it is given.
@@ -422,14 +447,24 @@ impl EditorView {
             lines: Vec::with_capacity(rows.len()),
             numbers: Vec::with_capacity(rows.len()),
             selection: Vec::new(),
-            selection_color: if active { colors.selection } else { colors.selection_inactive },
+            selection_color: if active || (self.emphasized && window.is_window_active()) {
+                colors.selection
+            } else {
+                colors.selection_inactive
+            },
             colors,
             caret: None,
             guides: Vec::new(),
             labels: Vec::new(),
+            placeholder: None,
             hitbox: None,
             view_hitbox: None,
         };
+        if let Some(placeholder) = self.placeholder.clone().filter(|_| self.single_line && text.is_empty()) {
+            let run = metrics.run(placeholder.len(), colors.line_number);
+            let shaped = window.text_system().shape_line(placeholder, metrics.font_size, &[run], None);
+            layout.placeholder = Some((shaped, point(text_left, top)));
+        }
         let mut widest: f64 = 0.0;
         for (i, &at) in rows.iter().enumerate() {
             let y = top + line_height * i as f32;

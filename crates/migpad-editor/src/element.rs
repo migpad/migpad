@@ -92,6 +92,9 @@ impl Element for EditorElement {
             for &guide in &layout.guides {
                 window.paint_quad(fill(guide, rgb(colors.guide)));
             }
+            if let Some((placeholder, origin)) = &layout.placeholder {
+                let _ = placeholder.paint(*origin, layout.line_height, TextAlign::Left, None, window, cx);
+            }
             for (line, origin) in &layout.lines {
                 let _ = line.paint(*origin, layout.line_height, TextAlign::Left, None, window, cx);
             }
