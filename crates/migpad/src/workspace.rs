@@ -545,7 +545,7 @@ impl Workspace {
             NoticeAction::LoadFromDisk => {
                 let encoding = self.tabs.get(index).map(|tab| tab.document.read(cx).format.encoding);
                 if let Some(encoding) = encoding {
-                    self.read_again(index, OpenAs::Encoding(encoding), window, cx);
+                    self.read_again(index, OpenAs::Encoding(encoding), false, window, cx);
                 }
             }
             NoticeAction::KeepMine => self.keep_mine(index, cx),
@@ -592,7 +592,7 @@ impl Workspace {
     /// tabs, which the tab tells.
     pub fn reopen_with_encoding(&mut self, encoding: Encoding, window: &mut Window, cx: &mut Context<Self>) {
         let index = self.tabs.active_index();
-        self.read_again(index, OpenAs::Encoding(encoding), window, cx);
+        self.read_again(index, OpenAs::Encoding(encoding), true, window, cx);
     }
 
     /// Edit ▸ Line Endings: every line break of the document of the active tab becomes `to`, as
@@ -1160,8 +1160,9 @@ impl Workspace {
 
     /// Reads the file of the tab at `index` again, as `open_as` tells, the caret where it was: Load
     /// from Disk, and Reopen with Encoding. The text of the tab, if it has changes, goes among the
-    /// closed tabs: it is not lost, and Reopen with Encoding tells so.
-    fn read_again(&mut self, index: usize, open_as: OpenAs, window: &mut Window, cx: &mut Context<Self>) {
+    /// closed tabs: it is not lost, and with `tell` the tab says so — Load from Disk was asked
+    /// whether to drop them.
+    fn read_again(&mut self, index: usize, open_as: OpenAs, tell: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.tabs.get(index) else { return };
         let Some(path) = tab.document.read(cx).path.clone() else { return };
         let selection = tab.pending_selection.unwrap_or_else(|| tab.editor.read(cx).selection());
@@ -1169,8 +1170,7 @@ impl Workspace {
         let document = changes.then(|| tab.document.clone());
         let encoding = Some(tab.document.read(cx).format.encoding);
         let mine = ClosedTab { document, journal: None, path: Some(path.clone()), encoding, selection };
-        let told = (changes && matches!(open_as, OpenAs::Encoding(other) if Some(other) != encoding))
-            .then(|| notices::changes_kept(&Self::tab_title(tab, cx)));
+        let told = (changes && tell).then(|| notices::changes_kept(&Self::tab_title(tab, cx)));
         match windows::open_file_as(&path, open_as, cx) {
             Opening::Document(document, loading) => {
                 let replaced = Tab::new(document, None, loading, window, cx);

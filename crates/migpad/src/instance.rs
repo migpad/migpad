@@ -169,14 +169,24 @@ fn pipe_name(data: &Path) -> String {
     format!(r"\\.\pipe\migpad-{:016x}", stable_hash(&path_bytes(data)))
 }
 
-/// Gives `request` to the copy that runs with the folder of data `data`: done once it has it.
+/// Gives `request` to the copy that runs with the folder of data `data`: done once it has it. A
+/// copy that does not answer in [`TIMEOUT`] did not take it — a pipe of Windows has no timeout of
+/// its own, so the exchange runs on a thread of its own, left behind if it hangs.
 pub fn send(data: &Path, request: &Request) -> io::Result<()> {
-    let mut channel = connect(data)?;
-    channel.write_all(&encode(request))?;
-    channel.flush()?;
-    let mut answer = [0u8; 1];
-    channel.read_exact(&mut answer)?;
-    if answer[0] == 1 { Ok(()) } else { Err(io::Error::other("the request was not taken")) }
+    let (data, bytes) = (data.to_path_buf(), encode(request));
+    let (done, outcome) = std::sync::mpsc::channel();
+    std::thread::Builder::new().name("migpad-send".into()).spawn(move || {
+        let exchange = || -> io::Result<()> {
+            let mut channel = connect(&data)?;
+            channel.write_all(&bytes)?;
+            channel.flush()?;
+            let mut answer = [0u8; 1];
+            channel.read_exact(&mut answer)?;
+            if answer[0] == 1 { Ok(()) } else { Err(io::Error::other("the request was not taken")) }
+        };
+        let _ = done.send(exchange());
+    })?;
+    outcome.recv_timeout(TIMEOUT).unwrap_or_else(|_| Err(io::Error::from(io::ErrorKind::TimedOut)))
 }
 
 #[cfg(unix)]
