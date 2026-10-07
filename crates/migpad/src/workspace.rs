@@ -12,6 +12,7 @@ use gpui::{
 use migpad_core::document::{Document, Fingerprint, Format, OpenAs, Opened, open};
 use migpad_core::encoding::Encoding;
 use migpad_core::history::Selection;
+use migpad_core::line_ending::LineEnding;
 use migpad_core::state::TabState;
 use migpad_core::state::session::{Rect, WindowMode, WindowState};
 use migpad_core::text::TextStore;
@@ -19,17 +20,18 @@ use migpad_editor::{ContextMenuEvent, EditorView};
 use migpad_ui::notification::NotificationBar;
 use migpad_ui::{Button, ContextMenu, ItemSpec, MenuBar, TabBar, TabInfo, theme};
 
-use crate::commands::{Registry, update_menus};
+use crate::commands::{self, Registry, update_menus};
 use crate::find::FindBar;
 use crate::go_to::GoToBar;
 use crate::journals;
 use crate::keys;
 use crate::modules::file::NewTab;
+use crate::modules::format;
 use crate::notices::{self, Notice, NoticeAction, Topic};
 use crate::recent;
 use crate::session;
 use crate::status::{self, COUNT_STEP, Loading, SelectionCount, count_chars};
-use crate::strings::{Key, fill, tr};
+use crate::strings::{Key, fill, mnemonic, tr};
 use crate::tabs::Tabs;
 use crate::view_options;
 use crate::windows::{self, Closed, ClosedTab, ForTab, Opening, Reopening};
@@ -481,16 +483,19 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let Some(index) = self.tab_of(document) else { return };
-        // A save that failed — Save As… too — is done again to the file it aimed at.
+        // A save that failed — Save As… and Save with Encoding too — is done again to the file it
+        // aimed at, in the format it aimed at.
         let target = self.tabs.get(index).and_then(|tab| {
-            tab.notices.iter().find(|(notice, _)| *notice == id).and_then(|(_, notice)| notice.path.clone())
+            tab.notices.iter().find(|(notice, _)| *notice == id).and_then(|(_, notice)| notice.target.clone())
         });
+        let format = target.as_ref().map(|target| target.format);
+        let target = target.map(|target| target.path);
         if !matches!(action, NoticeAction::ShowFirst(_)) {
             self.close_notice(document, id, cx);
         }
         match action {
             NoticeAction::SaveInUtf8 => {
-                let format = self.tabs.get(index).map(|tab| tab.document.read(cx).format);
+                let format = format.or_else(|| self.tabs.get(index).map(|tab| tab.document.read(cx).format));
                 let format = format.map(|format| Format { encoding: Encoding::UTF_8, bom: false, ..format });
                 self.save_into(index, target, format, false, window, cx).detach();
             }
@@ -508,17 +513,23 @@ impl Workspace {
                 let Some(tab) = self.tabs.get(index) else { return };
                 let (document, editor) = (tab.document.clone(), tab.editor.clone());
                 let selection = editor.read(cx).selection();
+                let format = format.unwrap_or(document.read(cx).format);
                 let replaced = document.update(cx, |doc, cx| {
-                    let result = doc.replace_losses(doc.format.encoding, selection, Instant::now());
+                    let result = doc.replace_losses(format.encoding, selection, Instant::now());
                     cx.notify();
                     result
                 });
                 let Ok(after) = replaced else { return };
                 editor.update(cx, |editor, cx| editor.select(after, window, cx));
-                self.save_into(index, target, None, true, window, cx).detach();
+                self.save_into(index, target, Some(format), true, window, cx).detach();
             }
-            NoticeAction::SaveAs => self.save_as(index, window, cx).detach(),
-            NoticeAction::LoadFromDisk => self.load_from_disk(index, window, cx),
+            NoticeAction::SaveAs => self.save_as(index, format, window, cx).detach(),
+            NoticeAction::LoadFromDisk => {
+                let encoding = self.tabs.get(index).map(|tab| tab.document.read(cx).format.encoding);
+                if let Some(encoding) = encoding {
+                    self.read_again(index, OpenAs::Encoding(encoding), window, cx);
+                }
+            }
             NoticeAction::KeepMine => self.keep_mine(index, cx),
         }
     }
@@ -542,7 +553,48 @@ impl Workspace {
 
     pub fn save_as_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let index = self.tabs.active_index();
-        self.save_as(index, window, cx).detach();
+        self.save_as(index, None, window, cx).detach();
+    }
+
+    /// File ▸ Save with Encoding: the document of the active tab goes to its file in `encoding`,
+    /// with a byte order mark or without — whether or not it has changes; an untitled one goes to a
+    /// file chosen in the dialog of the system.
+    pub fn save_with_encoding(&mut self, encoding: Encoding, bom: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let index = self.tabs.active_index();
+        let doc = self.document().read(cx);
+        if doc.is_preview() {
+            return;
+        }
+        let format = Format { encoding, bom, ..doc.format };
+        self.save(index, Some(format), false, window, cx).detach();
+    }
+
+    /// File ▸ Reopen with Encoding: the file of the active tab is read again in `encoding`, the
+    /// caret where it was. Changes of the document are not lost: its text goes among the closed
+    /// tabs, which the tab tells.
+    pub fn reopen_with_encoding(&mut self, encoding: Encoding, window: &mut Window, cx: &mut Context<Self>) {
+        let index = self.tabs.active_index();
+        self.read_again(index, OpenAs::Encoding(encoding), window, cx);
+    }
+
+    /// Edit ▸ Line Endings: every line break of the document of the active tab becomes `to`, as
+    /// one undo step, and Enter inserts it from now on. Not in a large file.
+    pub fn convert_line_endings(&mut self, to: LineEnding, window: &mut Window, cx: &mut Context<Self>) {
+        let (document, editor) = (self.document().clone(), self.editor().clone());
+        if document.read(cx).is_large() {
+            let title = Self::tab_title(self.tabs.active(), cx);
+            return self.notify(notices::too_large_to_convert(&title), cx);
+        }
+        let selection = editor.read(cx).selection();
+        let converted = document.update(cx, |doc, cx| {
+            let converted = doc.convert_line_endings(to, selection, Instant::now());
+            cx.notify();
+            converted
+        });
+        if let Ok(Some(after)) = converted {
+            editor.update(cx, |editor, cx| editor.select(after, window, cx));
+        }
+        update_menus(Some(self), cx);
     }
 
     /// Saves the document of the tab at `index` to its file in `format`, or in its own format; an
@@ -560,7 +612,7 @@ impl Workspace {
     ) -> Task<bool> {
         let Some(tab) = self.tabs.get(index) else { return Task::ready(false) };
         let doc = tab.document.read(cx);
-        let Some(path) = doc.path.clone() else { return self.save_as(index, window, cx) };
+        let Some(path) = doc.path.clone() else { return self.save_as(index, format, window, cx) };
         // Nothing to write: the file is as it was read or saved, and so is the text.
         if format.is_none() && !doc.is_modified() && doc.disk.is_some() && Fingerprint::of_path(&path).ok() == doc.disk
         {
@@ -606,6 +658,8 @@ impl Workspace {
         });
         match result {
             Ok(()) => {
+                // The check marks of the encodings follow the format saved.
+                update_menus(Some(self), cx);
                 // An untitled document has a name now: its number is free for a new one; a file that
                 // was gone is there again.
                 if let Some(tab) = self.tabs.get_mut(index) {
@@ -622,7 +676,7 @@ impl Workspace {
                 true
             }
             Err(error) => {
-                let notice = notices::save_failed(document.read(cx), &path, format.encoding.name(), &error);
+                let notice = notices::save_failed(document.read(cx), &path, format, &error);
                 if let Some(notice) = notice {
                     self.notify_tab(index, notice, cx);
                 }
@@ -632,8 +686,15 @@ impl Workspace {
     }
 
     /// Saves the document of the tab at `index` to a file chosen in the dialog of the system,
-    /// next to its own file or in the home folder, under its name; tells whether it was saved.
-    pub fn save_as(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) -> Task<bool> {
+    /// next to its own file or in the home folder, under its name, in `format` or its own; tells
+    /// whether it was saved.
+    pub fn save_as(
+        &mut self,
+        index: usize,
+        format: Option<Format>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<bool> {
         let Some(tab) = self.tabs.get(index) else { return Task::ready(false) };
         let document = tab.document.entity_id();
         let (folder, name) = match &tab.document.read(cx).path {
@@ -648,7 +709,7 @@ impl Workspace {
             let Ok(Ok(Some(path))) = chosen.await else { return false };
             workspace
                 .update(cx, |workspace, cx| {
-                    workspace.tab_of(document).is_some_and(|index| workspace.save_to(index, path, None, false, cx))
+                    workspace.tab_of(document).is_some_and(|index| workspace.save_to(index, path, format, false, cx))
                 })
                 .unwrap_or(false)
         })
@@ -1079,22 +1140,25 @@ impl Workspace {
         self.activate(index, window, cx);
     }
 
-    /// The file of the tab at `index`, changed by another program, opens as it is on disk; the
-    /// text of the tab goes among the closed tabs with its changes: it is not lost.
-    fn load_from_disk(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+    /// Reads the file of the tab at `index` again, as `open_as` tells, the caret where it was: Load
+    /// from Disk, and Reopen with Encoding. The text of the tab, if it has changes, goes among the
+    /// closed tabs: it is not lost, and Reopen with Encoding tells so.
+    fn read_again(&mut self, index: usize, open_as: OpenAs, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.tabs.get(index) else { return };
         let Some(path) = tab.document.read(cx).path.clone() else { return };
         let selection = tab.pending_selection.unwrap_or_else(|| tab.editor.read(cx).selection());
-        // Its text, if it has changes, goes among the closed tabs, not lost.
-        let document = tab.has_changes(cx).then(|| tab.document.clone());
+        let changes = tab.has_changes(cx);
+        let document = changes.then(|| tab.document.clone());
         let encoding = Some(tab.document.read(cx).format.encoding);
         let mine = ClosedTab { document, journal: None, path: Some(path.clone()), encoding, selection };
-        match windows::open_document(&path, cx) {
+        let told = (changes && matches!(open_as, OpenAs::Encoding(other) if Some(other) != encoding))
+            .then(|| notices::changes_kept(&Self::tab_title(tab, cx)));
+        match windows::open_file_as(&path, open_as, cx) {
             Opening::Document(document, loading) => {
                 let replaced = Tab::new(document, None, loading, window, cx);
                 self.tabs.replace(index, replaced);
                 windows::remember_tab(mine, cx);
-                self.settle(index, Some(selection), None, window, cx);
+                self.settle(index, Some(selection), told, window, cx);
                 self.activate(index, window, cx);
             }
             Opening::Failed(notice) => self.notify_tab(index, notice, cx),
@@ -1187,10 +1251,12 @@ impl Workspace {
         // Saved meanwhile, the document is not the one read over.
         let disk = document.read(cx).disk;
         let journals = journals::dir(cx);
+        // In the encoding it was read in: that may have been chosen, not guessed.
+        let encoding = document.read(cx).format.encoding;
         let read = cx.background_spawn({
             let path = path.clone();
             async move {
-                match open(&path, OpenAs::Detect { tld: None })? {
+                match open(&path, OpenAs::Encoding(encoding))? {
                     Opened::Complete(doc) => Ok(doc),
                     Opened::Partial { loader, .. } => loader.load(),
                 }
@@ -1435,7 +1501,37 @@ impl Workspace {
             // The column of a caret far into a long line is found a part a frame.
             window.request_animation_frame();
         }
-        status::status_bar(tab.document.read(cx), caret, selection, tab.loading.as_ref())
+        let (encoding, line_ending) = (cx.weak_entity(), cx.weak_entity());
+        let menus = status::Menus {
+            encoding: Box::new(move |position, window, cx| {
+                let _ = encoding.update(cx, |workspace, cx| workspace.open_encoding_menu(position, window, cx));
+            }),
+            line_ending: Box::new(move |position, window, cx| {
+                let _ = line_ending.update(cx, |workspace, cx| workspace.open_line_ending_menu(position, window, cx));
+            }),
+        };
+        status::status_bar(tab.document.read(cx), caret, selection, tab.loading.as_ref(), Some(menus))
+    }
+
+    /// The menu of the encoding in the status bar: Reopen with Encoding and Save with Encoding.
+    fn open_encoding_menu(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let submenu = |label: Key, items| ItemSpec::Submenu {
+            label: tr(label).into(),
+            mnemonic: mnemonic(label),
+            enabled: true,
+            items: commands::own_items(items),
+        };
+        let items = vec![
+            submenu(Key::FormatReopen, format::reopen_items(Some(self), cx)),
+            submenu(Key::FormatSave, format::save_items(Some(self), cx)),
+        ];
+        self.show_menu(items, position, false, None, window, cx);
+    }
+
+    /// The menu of the line breaks in the status bar: those of Edit ▸ Line Endings.
+    fn open_line_ending_menu(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let items = cx.global::<Registry>().command_items(&format::LINE_ENDINGS, self, cx);
+        self.show_menu(items, position, false, None, window, cx);
     }
 
     /// The bar of tabs, shown even with one tab; its button opens a new tab, as File > New does.

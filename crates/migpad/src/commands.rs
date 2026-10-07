@@ -391,6 +391,24 @@ impl Registry {
             .collect()
     }
 
+    /// The items of the commands `ids` for a menu of the window of `workspace`, as the menus
+    /// MigPad draws have them, without keys: their check marks, gray where they cannot act.
+    pub fn command_items(&self, ids: &[&str], workspace: &Workspace, cx: &App) -> Vec<ItemSpec> {
+        ids.iter()
+            .map(|id| {
+                let command = self.command(id);
+                ItemSpec::Action {
+                    label: tr(command.label).into(),
+                    mnemonic: mnemonic(command.label),
+                    keys: None,
+                    checked: command.checked.map(|checked| checked(workspace, cx)),
+                    enabled: command.enabled.is_none_or(|enabled| enabled(workspace, cx)),
+                    action: command.action.boxed_clone(),
+                }
+            })
+            .collect()
+    }
+
     /// Adds the list of open windows to a group of a menu.
     pub fn add_window_list(&mut self, menu: MenuId, group: u8) {
         self.placements.push(Placement { menu, group, entry: Entry::Windows });

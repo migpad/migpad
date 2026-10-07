@@ -263,13 +263,9 @@ fn note_opened(path: &Path, opening: &Opening, cx: &mut App) {
     }
 }
 
-/// Opens the file at `path` into a document: a large one shows its beginning at once and the
-/// whole text once the background load is done.
-pub fn open_document(path: &Path, cx: &mut App) -> Opening {
-    open_document_as(path, OpenAs::Detect { tld: None }, cx)
-}
-
-/// Opens the file at `path` into a document as `open_as` tells: in the encoding found, or in a given one.
+/// Opens the file at `path` into a document as `open_as` tells — in the encoding found, or in a
+/// given one: a large one shows its beginning at once and the whole text once the background load
+/// is done.
 pub fn open_document_as(path: &Path, open_as: OpenAs, cx: &mut App) -> Opening {
     let path = std::path::absolute(path).unwrap_or_else(|_| path.to_owned());
     match open(&path, open_as) {
