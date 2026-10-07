@@ -13,7 +13,6 @@ use std::time::Duration;
 use gpui::App;
 
 use crate::cli::FileArg;
-use crate::go_to;
 use crate::windows;
 
 /// What a next start asks of the first copy: to open these files, or just to come forward.
@@ -148,10 +147,12 @@ fn stable_hash(bytes: &[u8]) -> u64 {
 const MAX_SOCKET_PATH: usize = 100;
 
 /// Where the socket of the copy with the folder of data `data` is: in it, or — when that path is
-/// too long for a socket — in the folder of temporary files, under a hash of it.
+/// too long for a socket — under a hash of it in a folder of the user's own: the runtime folder of
+/// Linux, the temporary folder of macOS, which is the user's there.
 #[cfg(unix)]
 pub fn socket_path(data: &Path) -> PathBuf {
-    socket_path_in(data, &std::env::temp_dir())
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).filter(|dir| dir.is_dir());
+    socket_path_in(data, &runtime.unwrap_or_else(std::env::temp_dir))
 }
 
 #[cfg(unix)]
@@ -191,7 +192,14 @@ pub fn send(data: &Path, request: &Request) -> io::Result<()> {
 
 #[cfg(unix)]
 fn connect(data: &Path) -> io::Result<std::os::unix::net::UnixStream> {
-    let stream = std::os::unix::net::UnixStream::connect(socket_path(data))?;
+    use std::os::unix::fs::MetadataExt;
+    let path = socket_path(data);
+    // Only a socket of the owner of the folder: one another user left in a shared folder is not
+    // given the files.
+    if std::fs::metadata(&path)?.uid() != std::fs::metadata(data)?.uid() {
+        return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+    }
+    let stream = std::os::unix::net::UnixStream::connect(path)?;
     stream.set_read_timeout(Some(TIMEOUT))?;
     stream.set_write_timeout(Some(TIMEOUT))?;
     Ok(stream)
@@ -216,9 +224,13 @@ pub fn listen(data: &Path, inbox: Arc<Inbox>) -> io::Result<()> {
         // Only the user may give files to their MigPad, the socket in a shared folder too.
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
         std::thread::Builder::new().name("migpad-channel".into()).spawn(move || {
+            // Each start on a thread of its own: a slow one does not hold the next.
             for stream in listener.incoming().flatten() {
-                let _ = stream.set_read_timeout(Some(TIMEOUT));
-                serve_one(stream, &inbox);
+                let inbox = inbox.clone();
+                let _ = std::thread::Builder::new().name("migpad-request".into()).spawn(move || {
+                    let _ = stream.set_read_timeout(Some(TIMEOUT));
+                    serve_one(stream, &inbox);
+                });
             }
         })?;
     }
@@ -231,7 +243,11 @@ pub fn listen(data: &Path, inbox: Arc<Inbox>) -> io::Result<()> {
             let mut next = Some(first);
             while let Some(pipe) = next.take().or_else(|| windows_pipe::create(&name).ok()) {
                 if windows_pipe::wait(&pipe) {
-                    serve_one(pipe, &inbox);
+                    // Each start on a thread of its own: a slow one does not hold the next.
+                    let inbox = inbox.clone();
+                    let _ = std::thread::Builder::new()
+                        .name("migpad-request".into())
+                        .spawn(move || serve_one(pipe, &inbox));
                 }
             }
         })?;
@@ -397,10 +413,8 @@ pub fn go_to_places(files: &[FileArg], cx: &mut App) {
         let Some(line) = file.line else { continue };
         let column = file.column.map_or(0, |column| column - 1);
         if let Some((window, index)) = windows::find_open(&file.path, cx) {
-            let _ = window.update(cx, |workspace, window, cx| {
-                workspace.activate(index, window, cx);
-                go_to::go_to(workspace, line - 1, column, window, cx);
-            });
+            let _ =
+                window.update(cx, |workspace, window, cx| workspace.go_to_place(index, line - 1, column, window, cx));
         }
     }
 }

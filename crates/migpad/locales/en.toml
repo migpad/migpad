@@ -75,6 +75,7 @@ not_found = "No results"
 invalid = "Invalid expression: {reason}"
 replacing = "Replacing… {percent}"
 replaced = "Replaced: {count}"
+too_long = "The text would be longer than 4 GiB: nothing is replaced"
 
 [go_to]
 line = "&Go to Line…"
@@ -146,6 +147,7 @@ encoding_tip = "Reopen or save in another encoding"
 line_ending_tip = "Line endings"
 
 [notice]
+gone_from_disk = "“{file}” is not on disk any more: there is nothing to read again."
 too_large_to_convert = "“{file}” is a large file: its line endings are not converted."
 changes_kept = "Your changes to “{file}” are in File ▸ Recently Closed."
 close = "Close"

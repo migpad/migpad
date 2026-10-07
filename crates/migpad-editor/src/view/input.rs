@@ -42,9 +42,10 @@ impl EditorView {
     /// What input methods replace: the range they give, or the text being composed, or the
     /// selection.
     fn ime_target(&self, range_utf16: Option<&Range<usize>>, cx: &App) -> Range<usize> {
+        let len = self.document.read(cx).text().len();
         match (range_utf16, &self.marked) {
             (Some(range), _) => self.ime_range_bytes(range, cx),
-            (None, Some(marked)) => marked.clone(),
+            (None, Some(marked)) => marked.start.min(len)..marked.end.min(len),
             (None, None) => self.selected_range(),
         }
     }
@@ -83,7 +84,8 @@ impl EntityInputHandler for EditorView {
     fn marked_text_range(&self, _: &mut Window, cx: &mut Context<Self>) -> Option<Range<usize>> {
         let marked = self.marked.clone()?;
         let (start, bytes) = self.ime_text(cx);
-        Some(to_utf16(&bytes, marked.start - start)..to_utf16(&bytes, marked.end - start))
+        let at = |pos: usize| to_utf16(&bytes, pos.saturating_sub(start).min(bytes.len()));
+        Some(at(marked.start)..at(marked.end))
     }
 
     fn unmark_text(&mut self, _: &mut Window, cx: &mut Context<Self>) {

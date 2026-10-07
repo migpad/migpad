@@ -200,6 +200,11 @@ pub fn changes_kept(file: &str) -> Notice {
     Notice::new(Severity::Info, fill(Key::NoticeChangesKept, &[("file", file)]))
 }
 
+/// The file `file` is not on disk any more: there is nothing to read again.
+pub fn gone_from_disk(file: &str) -> Notice {
+    Notice::new(Severity::Warning, fill(Key::NoticeGoneFromDisk, &[("file", file)]))
+}
+
 /// The line breaks of the large file `file` are not converted: that would take a walk over all of
 /// it, and its undo step would keep two copies of it.
 pub fn too_large_to_convert(file: &str) -> Notice {

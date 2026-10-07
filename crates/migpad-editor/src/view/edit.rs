@@ -51,6 +51,7 @@ impl EditorView {
             edited
         });
         if edited {
+            self.version = self.document.read(cx).version();
             // Columns and wraps of the edited line have moved; the rest are found again as needed.
             self.text_changed();
             self.selection = after;
@@ -134,6 +135,7 @@ impl EditorView {
             selection
         });
         if let Some(selection) = selection {
+            self.version = self.document.read(cx).version();
             self.text_changed();
             let doc = self.document.read(cx);
             let snap = |pos| movement::snap(doc.text(), doc.lines(), pos);

@@ -12,7 +12,7 @@ use gpui::{
     InteractiveElement, IntoElement, Render, SharedString, StyledText, Subscription, Task, UnderlineStyle, WeakEntity,
     Window, div, prelude::*, px, rgb,
 };
-use migpad_core::document::Document;
+use migpad_core::document::{Document, EditError};
 use migpad_core::history::{EditKind, Selection};
 use migpad_core::search::{MatchWalk, Query, QueryError, Search, Template};
 use migpad_core::text::TextStore;
@@ -77,6 +77,8 @@ enum Told {
     /// Replacing every match, this share of the text done.
     Replacing(u64),
     Replaced(usize),
+    /// The text would grow past what a document holds: nothing was replaced.
+    TooLong,
 }
 
 /// What a told result is about: it holds while the document has this text, and the selection is
@@ -178,8 +180,17 @@ impl FindBar {
     }
 
     fn tell(&mut self, told: Told, about: Option<About>, cx: &mut Context<Self>) {
+        // A count going on is of what was told before; replacing all goes on whatever is told.
+        if matches!(self.job, Some(Job { kind: JobKind::Count { .. }, .. })) {
+            self.job = None;
+        }
         self.told = Some((told, about));
         cx.notify();
+    }
+
+    /// Whether the row of the replacement shows: the keys of replacing act only then.
+    fn is_replacing(&self) -> bool {
+        self.replacing
     }
 
     /// What the bar says now: what it told, if that still holds for the document of the window.
@@ -211,6 +222,10 @@ impl FindBar {
         wrapped: Option<Wrap>,
         cx: &mut Context<Self>,
     ) {
+        // Replacing all goes on: counting would stop it.
+        if matches!(self.job, Some(Job { kind: JobKind::Replace { .. }, .. })) {
+            return;
+        }
         let version = document.read(cx).version();
         let about = Some(About { document: document.entity_id(), version, selection: Some(found.clone()) });
         self.tell(Told::Found { index: None, total: None, wrapped }, about, cx);
@@ -236,10 +251,14 @@ impl FindBar {
         self.run(document, version, search, kind, cx);
     }
 
-    fn replaced(&mut self, document: &Entity<Document>, count: usize, cx: &mut Context<Self>) {
+    fn replaced(&mut self, document: &Entity<Document>, replaced: Result<usize, EditError>, cx: &mut Context<Self>) {
         let doc = document.read(cx);
         let about = Some(About { document: document.entity_id(), version: doc.version(), selection: None });
-        let told = if count == 0 { Told::NotFound } else { Told::Replaced(count) };
+        let told = match replaced {
+            Ok(0) => Told::NotFound,
+            Ok(count) => Told::Replaced(count),
+            Err(_) => Told::TooLong,
+        };
         self.tell(told, about, cx);
     }
 
@@ -325,8 +344,10 @@ impl FindBar {
         }
         match job.kind {
             JobKind::Count { wrapped, before, total, .. } => {
+                // A match found that overlaps one counted is not counted itself.
+                let index = (before + 1).min(total.max(1));
                 if let Some((told, _)) = &mut self.told {
-                    *told = Told::Found { index: Some(before + 1), total: Some(total), wrapped };
+                    *told = Told::Found { index: Some(index), total: Some(total), wrapped };
                 }
                 cx.notify();
             }
@@ -338,7 +359,7 @@ impl FindBar {
                     }
                     replaced
                 });
-                self.replaced(&document, replaced.unwrap_or(0), cx);
+                self.replaced(&document, replaced, cx);
             }
         }
         true
@@ -374,6 +395,7 @@ fn told_text(told: &Told) -> (String, bool) {
         Told::Invalid(reason) => (fill(Key::FindInvalid, &[("reason", reason)]), true),
         Told::Replacing(share) => (fill(Key::FindReplacing, &[("percent", &percent(*share))]), false),
         Told::Replaced(count) => (fill(Key::FindReplaced, &[("count", &number(*count as u64))]), false),
+        Told::TooLong => (tr(Key::FindTooLong).to_owned(), true),
     }
 }
 
@@ -484,9 +506,18 @@ pub fn find(workspace: &mut Workspace, backwards: bool, window: &mut Window, cx:
     }
 }
 
+/// Whether the row of the replacement shows: replacing acts only then, its keys too — a hidden
+/// replacement would replace unseen.
+fn replacing(workspace: &Workspace, cx: &App) -> bool {
+    workspace.find_bar_shown().is_some_and(|bar| bar.read(cx).is_replacing())
+}
+
 /// Replace: the selected match is replaced, and the next one selected; without a selected match,
 /// the next one is found.
 pub fn replace_one(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    if !replacing(workspace, cx) {
+        return;
+    }
     let Some(search) = search(workspace, window, cx) else { return };
     let (document, editor) = (workspace.document().clone(), workspace.editor().clone());
     if document.read(cx).is_preview() {
@@ -513,6 +544,9 @@ pub fn replace_one(workspace: &mut Workspace, window: &mut Window, cx: &mut Cont
 
 /// Replace All: every match, as one undo step.
 pub fn replace_all(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    if !replacing(workspace, cx) {
+        return;
+    }
     let Some(search) = search(workspace, window, cx) else { return };
     let (document, editor) = (workspace.document().clone(), workspace.editor().clone());
     if document.read(cx).is_preview() {

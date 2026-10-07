@@ -25,7 +25,7 @@ mod windows;
 mod workspace;
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui::App;
 use migpad_ui::ThemeMode;
@@ -40,11 +40,13 @@ fn main() {
     let found = journals::find();
     let root = found.as_ref().map(|dir| dir.root().to_path_buf());
     // Another copy runs with this folder of data: it takes the files, and this one is done.
-    if let Some(root) = &root
-        && instance::send(root, &request).is_ok()
-    {
+    let sent = root.as_ref().map(|root| instance::send(root, &request));
+    if let Some(Ok(())) = sent {
         return;
     }
+    // A copy that took the request and did not answer may still open the files: it is not asked
+    // again.
+    let silent = matches!(&sent, Some(Err(error)) if error.kind() == std::io::ErrorKind::TimedOut);
     // From a terminal, the program goes on in a process of its own: the terminal is free at once.
     if instance::leave_terminal() {
         return;
@@ -59,11 +61,14 @@ fn main() {
         }
         // Another copy holds the folder and may be starting: its channel opens in a moment. If it
         // does not answer, this one runs on its own, keeping nothing in the folder.
-        Some(root) if data.another_copy() => {
-            for _ in 0..20 {
+        Some(root) if data.another_copy() && !silent => {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(100));
-                if instance::send(root, &request).is_ok() {
-                    return;
+                match instance::send(root, &request) {
+                    Ok(()) => return,
+                    Err(error) if error.kind() == std::io::ErrorKind::TimedOut => break,
+                    Err(_) => {}
                 }
             }
         }

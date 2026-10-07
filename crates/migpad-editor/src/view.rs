@@ -114,6 +114,9 @@ pub struct EditorView {
     /// Whether the selection shows as if the view had the focus, while its window is active: a
     /// find bar works on it.
     emphasized: bool,
+    /// The version of the text as the view last edited or saw it: a text changed past the view
+    /// ends what an input method composes, whose range is of the old text.
+    version: u64,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -135,6 +138,7 @@ impl EditorView {
 
     fn create(document: Entity<Document>, single_line: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle().tab_stop(single_line);
+        let version = document.read(cx).version();
         let subscriptions = vec![
             cx.observe(&document, |view, _, cx| view.document_changed(cx)),
             cx.on_focus(&focus, window, Self::restart_blink),
@@ -172,6 +176,7 @@ impl EditorView {
             blink: None,
             placeholder: None,
             emphasized: false,
+            version,
             _subscriptions: subscriptions,
         }
     }
@@ -312,10 +317,16 @@ impl EditorView {
         }
     }
 
-    /// Keeps the selection where the caret can be once the text has changed under it.
+    /// Keeps the selection where the caret can be once the text has changed under it. A change that
+    /// did not come through the view — replacing all, converting line breaks, reading the file
+    /// again — ends what an input method composes.
     fn document_changed(&mut self, cx: &mut Context<Self>) {
         self.text_changed();
         let doc = self.document.read(cx);
+        if doc.version() != self.version {
+            self.version = doc.version();
+            self.marked = None;
+        }
         let snap = |pos| movement::snap(doc.text(), doc.lines(), pos);
         self.selection = Selection { anchor: snap(self.selection.anchor), head: snap(self.selection.head) };
         cx.notify();

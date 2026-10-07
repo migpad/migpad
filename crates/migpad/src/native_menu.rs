@@ -8,7 +8,7 @@ use migpad_ui::ItemSpec;
 use objc2::rc::Retained;
 use objc2::runtime::{NSObject, Sel};
 use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
-use objc2_app_kit::{NSApplication, NSControlStateValueOn, NSMenu, NSMenuItem};
+use objc2_app_kit::{NSApplication, NSControlStateValueOn, NSEvent, NSMenu, NSMenuItem, NSWindow};
 use objc2_foundation::{NSPoint, NSString};
 
 thread_local! {
@@ -40,14 +40,17 @@ impl MenuTarget {
     }
 }
 
-/// Shows the menu of `items` at `position` in the key window — the window of MigPad that asked for
-/// it — and waits until it closes. Returns the path of the item chosen, if one was.
+/// Shows the menu of `items` at `position` in the window under the pointer — the window of MigPad
+/// that was clicked, active or not — and waits until it closes. Returns the path of the item
+/// chosen, if one was.
 ///
 /// The menu runs a loop of its own until it closes: call it when nothing of GPUI is being updated,
 /// as from a task.
 pub fn pop_up(items: &[ItemSpec], position: Point<Pixels>) -> Option<Vec<usize>> {
     let mtm = MainThreadMarker::new()?;
-    let view = NSApplication::sharedApplication(mtm).keyWindow()?.contentView()?;
+    let app = NSApplication::sharedApplication(mtm);
+    let under = NSWindow::windowNumberAtPoint_belowWindowWithWindowNumber(NSEvent::mouseLocation(), 0, mtm);
+    let view = app.windowWithWindowNumber(under).or_else(|| app.keyWindow())?.contentView()?;
     let target = MenuTarget::new(mtm);
     let mut paths = Vec::new();
     let menu = build(items, &[], &target, &mut paths, mtm);

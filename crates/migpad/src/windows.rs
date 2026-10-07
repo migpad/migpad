@@ -40,7 +40,7 @@ pub struct ClosedTab {
     /// document comes again from it.
     pub journal: Option<DocumentId>,
     pub path: Option<PathBuf>,
-    /// The encoding its file was in: it opens so again, not guessed anew.
+    /// The encoding chosen by hand for its file: it opens so again, not guessed anew.
     pub encoding: Option<Encoding>,
     pub selection: Selection,
 }
@@ -222,12 +222,15 @@ pub struct ForTab {
     pub loading: Option<Loading>,
     pub selection: Option<Selection>,
     pub notice: Option<Notice>,
+    /// Whether the encoding of its file was chosen by hand rather than guessed: reading the file
+    /// again keeps it.
+    pub encoding_chosen: bool,
 }
 
 impl ForTab {
     /// A tab for `document`, which tells nothing.
     pub fn new(document: Entity<Document>, loading: Option<Loading>, selection: Option<Selection>) -> Self {
-        ForTab { document, loading, selection, notice: None }
+        ForTab { document, loading, selection, notice: None, encoding_chosen: false }
     }
 }
 
@@ -328,14 +331,15 @@ pub enum Reopening {
 /// or read from its file.
 pub fn reopening(closed: ClosedTab, cx: &mut App) -> Reopening {
     let selection = Some(closed.selection);
+    let encoding_chosen = closed.encoding.is_some();
     if let Some(document) = closed.document {
-        return Reopening::Tab(ForTab::new(document, None, selection));
+        return Reopening::Tab(ForTab { encoding_chosen, ..ForTab::new(document, None, selection) });
     }
     let mut failure = None;
     if let Some(id) = closed.journal {
         match session::recover(id, closed.path.as_deref(), cx) {
             Recovery::Document(document, notice) => {
-                return Reopening::Tab(ForTab { document, loading: None, selection, notice });
+                return Reopening::Tab(ForTab { document, loading: None, selection, notice, encoding_chosen });
             }
             Recovery::Failed(notice) => failure = Some(notice),
             Recovery::FromFile => {}
@@ -345,7 +349,7 @@ pub fn reopening(closed: ClosedTab, cx: &mut App) -> Reopening {
     let open_as = closed.encoding.map_or(OpenAs::Detect { tld: None }, OpenAs::Encoding);
     match open_file_as(&path, open_as, cx) {
         Opening::Document(document, loading) => {
-            Reopening::Tab(ForTab { document, loading, selection, notice: failure })
+            Reopening::Tab(ForTab { document, loading, selection, notice: failure, encoding_chosen })
         }
         Opening::Failed(notice) => Reopening::Failed(notice),
     }
