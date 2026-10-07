@@ -360,6 +360,13 @@ pub fn same_file(a: &Path, b: &Path) -> bool {
     a == b || resolve(a) == resolve(b)
 }
 
+/// The window used last: the active one, or the one in front, or any.
+pub fn last_active(cx: &App) -> Option<WindowHandle<Workspace>> {
+    let active = cx.active_window().and_then(|window| window.downcast::<Workspace>());
+    let in_front = || cx.window_stack().into_iter().flatten().find_map(|window| window.downcast::<Workspace>());
+    active.or_else(in_front).or_else(|| workspaces(cx).next().map(|(window, _)| window))
+}
+
 /// The window and the tab that have the file at `path` open, if one does.
 pub fn find_open(path: &Path, cx: &App) -> Option<(WindowHandle<Workspace>, usize)> {
     workspaces(cx).find_map(|(window, workspace)| Some((window, workspace.find(path, cx)?)))

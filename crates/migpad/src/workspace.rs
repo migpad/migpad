@@ -410,8 +410,26 @@ impl Workspace {
         document.read(cx).path.is_none().then(|| windows::untitled_number(own, Some(window), cx))
     }
 
-    /// Adds a tab at the end and switches to it.
+    /// Adds a tab at the end and switches to it. A file opened into a window whose only tab is an
+    /// untitled document never used — empty, without history or notifications — takes its place.
     pub fn add_tab(&mut self, tab: ForTab, window: &mut Window, cx: &mut Context<Self>) {
+        let unused = self.tabs.len() == 1 && {
+            let only = self.tabs.active();
+            let doc = only.document.read(cx);
+            doc.path.is_none() && doc.text().is_empty() && !doc.can_undo() && only.notices.is_empty()
+        };
+        if unused && tab.document.read(cx).path.is_some() {
+            let replaced = Tab::new(tab.document, None, tab.loading, window, cx);
+            let gone = self.tabs.replace(0, replaced);
+            gone.document.update(cx, |doc, _| doc.remove_journal());
+            self.settle(0, tab.selection, tab.notice, window, cx);
+            self.reveal_tab = true;
+            window.focus(&self.editor().focus_handle(cx), cx);
+            self.update_title(window, cx);
+            update_menus(Some(self), cx);
+            cx.notify();
+            return;
+        }
         let numbers: Vec<u32> = self.untitled_numbers().collect();
         let untitled = Self::untitled_for(&tab.document, numbers, self.window_id, cx);
         let index = self.tabs.push(Tab::new(tab.document, untitled, tab.loading, window, cx));

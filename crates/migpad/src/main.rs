@@ -3,10 +3,12 @@
 // Release builds on Windows are GUI applications: no console window.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod cli;
 mod commands;
 mod debug_input;
 mod find;
 mod go_to;
+mod instance;
 mod journals;
 mod keys;
 mod modules;
@@ -22,16 +24,52 @@ mod view_options;
 mod windows;
 mod workspace;
 
-use std::ffi::OsString;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use gpui::App;
 use migpad_ui::ThemeMode;
 
+use crate::instance::{Inbox, Request};
 use crate::strings::Language;
 
 fn main() {
-    let paths = file_arguments(std::env::args_os().skip(1));
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let files = cli::files(std::env::args_os().skip(1), &cwd, |path| path.exists());
+    let request = Request { files };
+    let found = journals::find();
+    let root = found.as_ref().map(|dir| dir.root().to_path_buf());
+    // Another copy runs with this folder of data: it takes the files, and this one is done.
+    if let Some(root) = &root
+        && instance::send(root, &request).is_ok()
+    {
+        return;
+    }
+    // From a terminal, the program goes on in a process of its own: the terminal is free at once.
+    if instance::leave_terminal() {
+        return;
+    }
+    let data = journals::take(found);
+    let inbox = Inbox::new();
+    match &root {
+        Some(root) if data.holds_folder() => {
+            if let Err(error) = instance::listen(root, inbox.clone()) {
+                eprintln!("MigPad could not listen for the files of its next starts: {error}");
+            }
+        }
+        // Another copy holds the folder and may be starting: its channel opens in a moment. If it
+        // does not answer, this one runs on its own, keeping nothing in the folder.
+        Some(root) if data.another_copy() => {
+            for _ in 0..20 {
+                std::thread::sleep(Duration::from_millis(100));
+                if instance::send(root, &request).is_ok() {
+                    return;
+                }
+            }
+        }
+        _ => {}
+    }
+
     let application = gpui_platform::application();
     // A click on MigPad in the Dock while it has no windows opens one, as on macOS it stays open
     // without them.
@@ -40,9 +78,12 @@ fn main() {
             windows::open_window(&[], cx);
         }
     });
+    // Files from Finder and the Dock, as MigPad starts and while it runs.
+    let urls = inbox.clone();
+    application.on_open_urls(move |list| urls.push(Request { files: instance::files_of_urls(&list) }));
     application.run(move |cx: &mut App| {
         strings::set_language(Language::of_system());
-        journals::init(cx);
+        journals::init(data, cx);
         recent::init(cx);
         view_options::init(cx);
         migpad_ui::theme::set_mode(theme_mode(), cx);
@@ -72,8 +113,12 @@ fn main() {
             async {}
         })
         .detach();
-        // The windows of the last time come back, with the files of the command line; or a window
-        // opens for these files, or an untitled document.
+        // The files of the command line, and those Finder gave as MigPad started.
+        let mut files = request.files;
+        files.extend(inbox.take_all().into_iter().flat_map(|request| request.files));
+        let paths: Vec<PathBuf> = files.iter().map(|file| file.path.clone()).collect();
+        // The windows of the last time come back, with these files; or a window opens for them, or
+        // an untitled document.
         let window = session::restore(&paths, cx)
             .or_else(|| windows::open_window(&paths, cx))
             .or_else(|| windows::open_window(&[], cx));
@@ -83,11 +128,13 @@ fn main() {
                 if journals::another_copy(cx) {
                     let _ = window.update(cx, |workspace, _, cx| workspace.notify(notices::another_copy(), cx));
                 }
+                instance::go_to_places(&files, cx);
                 debug_input::play(window, cx)
             }
             // The reason is told above; without a window there is nothing to do.
             None => cx.quit(),
         }
+        instance::serve(inbox, cx);
         cx.activate(true);
     });
 }
@@ -99,46 +146,5 @@ fn theme_mode() -> ThemeMode {
         Ok(theme) if cfg!(debug_assertions) && theme == "light" => ThemeMode::Light,
         Ok(theme) if cfg!(debug_assertions) && theme == "dark" => ThemeMode::Dark,
         _ => ThemeMode::System,
-    }
-}
-
-/// The files to open: the arguments that are not options. An option such as
-/// `-AppleLanguages '(en)'`, which sets a user default of macOS, is passed over with its value;
-/// after `--` every argument is a file, even if it starts with `-`.
-fn file_arguments(args: impl IntoIterator<Item = OsString>) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    let mut args = args.into_iter();
-    while let Some(arg) = args.next() {
-        if arg == "--" {
-            files.extend(args.map(PathBuf::from));
-            break;
-        }
-        if arg.as_encoded_bytes().starts_with(b"-") {
-            args.next();
-        } else {
-            files.push(PathBuf::from(arg));
-        }
-    }
-    files
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn files(args: &[&str]) -> Vec<PathBuf> {
-        file_arguments(args.iter().map(OsString::from))
-    }
-
-    #[test]
-    fn files_are_the_arguments_that_are_not_options() {
-        assert_eq!(files(&["notes.txt"]), [PathBuf::from("notes.txt")]);
-        assert_eq!(
-            files(&["-AppleLanguages", "(en)", "заметки.txt", "more.txt"]),
-            [PathBuf::from("заметки.txt"), PathBuf::from("more.txt")]
-        );
-        assert_eq!(files(&["a.txt", "--", "-dash.txt", "b.txt"]), ["a.txt", "-dash.txt", "b.txt"].map(PathBuf::from));
-        assert!(files(&["-AppleLanguages", "(en)"]).is_empty());
-        assert!(files(&[]).is_empty());
     }
 }
