@@ -225,9 +225,14 @@ pub fn listen(data: &Path, inbox: Arc<Inbox>) -> io::Result<()> {
     #[cfg(windows)]
     {
         let name: Vec<u16> = pipe_name(data).encode_utf16().chain([0]).collect();
+        // The first instance of the pipe is there before this returns: a next start finds it.
+        let first = windows_pipe::create(&name)?;
         std::thread::Builder::new().name("migpad-channel".into()).spawn(move || {
-            while let Some(pipe) = windows_pipe::accept(&name) {
-                serve_one(pipe, &inbox);
+            let mut next = Some(first);
+            while let Some(pipe) = next.take().or_else(|| windows_pipe::create(&name).ok()) {
+                if windows_pipe::wait(&pipe) {
+                    serve_one(pipe, &inbox);
+                }
             }
         })?;
     }
@@ -257,7 +262,8 @@ fn serve_one(mut channel: impl Read + Write, inbox: &Inbox) {
 #[cfg(windows)]
 mod windows_pipe {
     use std::fs::File;
-    use std::os::windows::io::FromRawHandle;
+    use std::io;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
 
     use windows_sys::Win32::Foundation::{ERROR_PIPE_CONNECTED, GetLastError, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
@@ -266,38 +272,35 @@ mod windows_pipe {
         PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
     };
 
-    /// Waits for the next start to connect to the pipe `name`, NUL-terminated UTF-16; `None` if
-    /// the pipe cannot be made.
-    pub fn accept(name: &[u16]) -> Option<File> {
+    /// An instance of the pipe `name`, NUL-terminated UTF-16, for the next start to connect to.
+    pub fn create(name: &[u16]) -> io::Result<File> {
         let mode = PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS;
-        loop {
-            // SAFETY: `name` is a NUL-terminated wide string; no security attributes: the default
-            // ones of the user.
-            let handle = unsafe {
-                CreateNamedPipeW(
-                    name.as_ptr(),
-                    PIPE_ACCESS_DUPLEX,
-                    mode,
-                    PIPE_UNLIMITED_INSTANCES,
-                    4096,
-                    4096,
-                    0,
-                    std::ptr::null(),
-                )
-            };
-            if handle == INVALID_HANDLE_VALUE {
-                return None;
-            }
-            // SAFETY: the handle is a pipe just made, owned by the file from now on, which closes it.
-            let pipe = unsafe { File::from_raw_handle(handle as _) };
-            // SAFETY: a blocking wait on a pipe this thread owns, without an OVERLAPPED.
-            let connected = unsafe { ConnectNamedPipe(handle, std::ptr::null_mut()) } != 0
-                || unsafe { GetLastError() } == ERROR_PIPE_CONNECTED;
-            // A client that came and went: wait for the next one.
-            if connected {
-                return Some(pipe);
-            }
+        // SAFETY: `name` is a NUL-terminated wide string; no security attributes: the default ones
+        // of the user.
+        let handle = unsafe {
+            CreateNamedPipeW(
+                name.as_ptr(),
+                PIPE_ACCESS_DUPLEX,
+                mode,
+                PIPE_UNLIMITED_INSTANCES,
+                4096,
+                4096,
+                0,
+                std::ptr::null(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
         }
+        // SAFETY: the handle is a pipe just made, owned by the file from now on, which closes it.
+        Ok(unsafe { File::from_raw_handle(handle as _) })
+    }
+
+    /// Waits until a next start connects to `pipe`; `false` if it came and went.
+    pub fn wait(pipe: &File) -> bool {
+        let handle = pipe.as_raw_handle();
+        // SAFETY: a blocking wait on a pipe this thread owns, without an OVERLAPPED.
+        unsafe { ConnectNamedPipe(handle as _, std::ptr::null_mut()) != 0 || GetLastError() == ERROR_PIPE_CONNECTED }
     }
 }
 
