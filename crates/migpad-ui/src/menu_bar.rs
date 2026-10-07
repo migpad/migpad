@@ -561,8 +561,13 @@ impl MenuBar {
             let sub_panel = submenu.filter(|_| expanded).map(|sub_items| {
                 let Level::Menu(menu) = level else { unreachable!("submenus have no submenus") };
                 let sub_bounds = self.sub_bounds.clone();
+                // Over the whole panel: without a corner, an absolute element goes after the items.
                 let panel = self.render_panel(label.clone(), sub_items, Level::Sub(menu, i), cx).child(
-                    canvas(move |area, _, _| sub_bounds.set(Some(area)), |_, _, _, _| {}).absolute().size_full(),
+                    canvas(move |area, _, _| sub_bounds.set(Some(area)), |_, _, _, _| {})
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full(),
                 );
                 // To the right of its item, over its menu.
                 let panel = deferred(anchored().snap_to_window().child(panel)).with_priority(2);
