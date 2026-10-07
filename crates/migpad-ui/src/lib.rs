@@ -2,6 +2,8 @@
 //! context menus and notification bars.
 
 pub mod button;
+pub mod context_menu;
+mod menu;
 pub mod menu_bar;
 pub mod notification;
 pub mod status_bar;
@@ -13,6 +15,8 @@ pub mod tooltip;
 use gpui::{Pixels, px};
 
 pub use button::Button;
+pub use context_menu::ContextMenu;
+pub use menu::ItemSpec;
 pub use menu_bar::MenuBar;
 pub use status_bar::StatusBar;
 pub use tab_bar::{TabBar, TabInfo};

@@ -128,7 +128,16 @@ impl Element for EditorElement {
         let view = self.view.clone();
         let pressed = hitbox.clone();
         window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
-            if phase == DispatchPhase::Bubble && event.button == MouseButton::Left && pressed.is_hovered(window) {
+            if phase != DispatchPhase::Bubble || !pressed.is_hovered(window) {
+                return;
+            }
+            // Ctrl with the left button is the right button on macOS.
+            let secondary = event.button == MouseButton::Right
+                || (cfg!(target_os = "macos") && event.button == MouseButton::Left && event.modifiers.control);
+            if secondary {
+                view.update(cx, |view, cx| view.context_click(event, window, cx));
+                cx.stop_propagation();
+            } else if event.button == MouseButton::Left {
                 view.update(cx, |view, cx| view.mouse_down(event, window, cx));
                 cx.stop_propagation();
             }

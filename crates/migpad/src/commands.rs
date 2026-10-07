@@ -13,6 +13,19 @@ use gpui::{
 
 use migpad_ui::menu_bar::{ItemSpec, MenuSpec};
 
+/// The context menu of a text: its commands, and `None` for a line between them.
+const CONTEXT_MENU: [Option<&str>; 9] = [
+    Some("edit.undo"),
+    Some("edit.redo"),
+    None,
+    Some("edit.cut"),
+    Some("edit.copy"),
+    Some("edit.paste"),
+    Some("edit.delete"),
+    None,
+    Some("edit.select_all"),
+];
+
 use crate::keys;
 use crate::recent;
 use crate::strings::{Key, mnemonic, tr};
@@ -363,6 +376,28 @@ impl Registry {
             })
             .collect();
         ItemSpec::Submenu { label: tr(submenu.label).into(), mnemonic: mnemonic(submenu.label), enabled: true, items }
+    }
+
+    /// The items of the context menu of a text, `enabled` telling which commands have something to
+    /// do there. Context menus show no keys, as those of the systems do not.
+    pub fn context_menu(&self, enabled: impl Fn(&str) -> bool) -> Vec<ItemSpec> {
+        CONTEXT_MENU
+            .iter()
+            .map(|entry| match entry {
+                Some(id) => {
+                    let command = self.command(id);
+                    ItemSpec::Action {
+                        label: tr(command.label).into(),
+                        mnemonic: mnemonic(command.label),
+                        keys: None,
+                        checked: None,
+                        enabled: enabled(id),
+                        action: command.action.boxed_clone(),
+                    }
+                }
+                None => ItemSpec::Separator,
+            })
+            .collect()
     }
 
     /// Adds the list of open windows to a group of a menu.

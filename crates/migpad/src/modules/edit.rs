@@ -1,9 +1,10 @@
-//! Editing: undo and redo, the clipboard, selecting all. The editor handles these actions and
-//! binds their keys; the module puts them into the Edit menu, as the actions of the system they
-//! are, so that the items work in the text fields of the system too.
+//! Editing: undo and redo, the clipboard, deleting, selecting all. The editor handles these
+//! actions and binds their keys; the module puts them into the Edit menu, as the actions of the
+//! system they are, so that the items work in the text fields of the system too. The context menu
+//! of the text has them too.
 
 use gpui::OsAction;
-use migpad_editor::actions::{Copy, Cut, Paste, Redo, SelectAll, Undo};
+use migpad_editor::actions::{Copy, Cut, Delete, Paste, Redo, SelectAll, Undo};
 
 use crate::commands::{Command, MenuId, Module, Registry};
 use crate::strings::Key;
@@ -28,6 +29,7 @@ impl Module for EditModule {
         registry.add(Command::new("edit.cut", Key::EditCut, Cut).os_action(OsAction::Cut), menu(1));
         registry.add(Command::new("edit.copy", Key::EditCopy, Copy).os_action(OsAction::Copy), menu(1));
         registry.add(Command::new("edit.paste", Key::EditPaste, Paste).os_action(OsAction::Paste), menu(1));
+        registry.add(Command::new("edit.delete", Key::EditDelete, Delete), menu(1));
         let select_all = Command::new("edit.select_all", Key::EditSelectAll, SelectAll).os_action(OsAction::SelectAll);
         registry.add(select_all, menu(1));
     }

@@ -203,6 +203,9 @@ pub(crate) struct Geometry {
     pub text_left: Pixels,
     pub track: Bounds<Pixels>,
     pub thumb: Option<Bounds<Pixels>>,
+    /// Where the caret is, blinking or not, if its row is in view: the keys of the context menu
+    /// open it there.
+    pub caret: Option<Bounds<Pixels>>,
 }
 
 /// The visible part of the document, laid out for painting.

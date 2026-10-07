@@ -6,15 +6,15 @@
 //! over it or the right arrow opens it, the left arrow closes it.
 
 use std::cell::Cell;
-use std::ops::Range;
 use std::rc::Rc;
 
 use gpui::{
-    Action, AnyElement, App, Bounds, BoxShadow, Context, FocusHandle, HighlightStyle, KeyDownEvent, Keystroke,
-    Modifiers, MouseButton, MouseDownEvent, Pixels, Render, Role, SharedString, StyledText, Subscription, Toggled,
-    UnderlineStyle, Window, anchored, canvas, deferred, div, point, prelude::*, px, rgb, rgba,
+    AnyElement, App, Bounds, Context, FocusHandle, KeyDownEvent, Keystroke, Modifiers, MouseButton, Pixels, Render,
+    Role, SharedString, Subscription, Window, anchored, canvas, deferred, div, point, prelude::*, px, rgb,
 };
 
+pub use crate::menu::ItemSpec;
+use crate::menu::{self, Item, Levels, MenuHost, Step, menu_key, mnemonic_char, typed_letters};
 use crate::theme::theme;
 
 /// The height of the bar.
@@ -28,119 +28,25 @@ pub struct MenuSpec {
     pub items: Vec<ItemSpec>,
 }
 
-/// An item of a menu.
-pub enum ItemSpec {
-    Action {
-        label: SharedString,
-        mnemonic: Option<usize>,
-        /// The keys of the command, shown on the right.
-        keys: Option<SharedString>,
-        /// Whether a toggle is on; `None` for an item that is not a toggle.
-        checked: Option<bool>,
-        enabled: bool,
-        action: Box<dyn Action>,
-    },
-    /// An item that opens a menu of its own.
-    Submenu {
-        label: SharedString,
-        mnemonic: Option<usize>,
-        enabled: bool,
-        items: Vec<ItemSpec>,
-    },
-    Separator,
-}
-
-impl ItemSpec {
-    fn kind(&self) -> Item {
-        match self {
-            ItemSpec::Action { label, mnemonic, enabled, .. } => {
-                Item::Choice { enabled: *enabled, mnemonic: mnemonic_char(label, *mnemonic) }
-            }
-            ItemSpec::Submenu { label, mnemonic, enabled, items } => Item::Submenu {
-                enabled: *enabled,
-                mnemonic: mnemonic_char(label, *mnemonic),
-                items: items.iter().map(ItemSpec::kind).collect(),
-            },
-            ItemSpec::Separator => Item::Separator,
-        }
-    }
-}
-
-/// The letter at `mnemonic` of `text`, in lower case.
-fn mnemonic_char(text: &str, mnemonic: Option<usize>) -> Option<char> {
-    text.get(mnemonic?..)?.chars().next().map(|c| c.to_lowercase().next().unwrap_or(c))
-}
-
-/// The bytes of the letter at `mnemonic` of `text`.
-fn mnemonic_range(text: &str, mnemonic: Option<usize>) -> Option<Range<usize>> {
-    let at = mnemonic?;
-    let c = text.get(at..)?.chars().next()?;
-    Some(at..at + c.len_utf8())
-}
-
-/// What the items of a menu are, as the keyboard moves over them.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Item {
-    Choice {
-        enabled: bool,
-        mnemonic: Option<char>,
-    },
-    /// An item with a menu of its own, of these items.
-    Submenu {
-        enabled: bool,
-        mnemonic: Option<char>,
-        items: Vec<Item>,
-    },
-    Separator,
-}
-
-impl Item {
-    fn mnemonic(&self) -> Option<char> {
-        match self {
-            Item::Choice { mnemonic, .. } | Item::Submenu { mnemonic, .. } => *mnemonic,
-            Item::Separator => None,
-        }
-    }
-
-    fn is_enabled(&self) -> bool {
-        matches!(self, Item::Choice { enabled: true, .. } | Item::Submenu { enabled: true, .. })
-    }
-
-    /// The items of its menu, for an item that opens one.
-    fn submenu(&self) -> Option<&[Item]> {
-        match self {
-            Item::Submenu { enabled: true, items, .. } => Some(items),
-            _ => None,
-        }
-    }
-}
-
 /// What the keyboard and the mouse did to the menus.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
     /// Nothing outside the menus.
     Stay,
     /// The menus are done with: the focus goes back.
     Leave,
-    /// The item `item` of the menu `menu` is chosen, or the item `sub` of its submenu.
-    Choose(usize, usize, Option<usize>),
+    /// The item at the path of the menu `menu` is chosen: the item of the menu, or of a submenu
+    /// down the path.
+    Choose(usize, Vec<usize>),
 }
 
 /// Where the keyboard is in the menus, apart from drawing them: which title is selected, whether
-/// its menu is open, which item of it is highlighted, and the submenu of that item.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// its menu is open, and where in it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Nav {
     pub menu: Option<usize>,
     pub open: bool,
-    pub item: Option<usize>,
-    /// The submenu of the highlighted item, if it is open.
-    pub sub: Option<Sub>,
-}
-
-/// An open submenu: which of its items is highlighted.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Sub {
-    pub item: Option<usize>,
+    pub levels: Levels,
 }
 
 impl Nav {
@@ -155,8 +61,7 @@ impl Nav {
 
     /// The menu `menu` open, its first item highlighted when the keyboard opened it.
     pub fn open(menu: usize, items: &[Item], keyboard: bool) -> Nav {
-        let item = if keyboard { next_choice(items, None, true) } else { None };
-        Nav { menu: Some(menu), open: true, item, sub: None }
+        Nav { menu: Some(menu), open: true, levels: Levels::open(items, keyboard) }
     }
 
     /// A key while the menus are active, `menus` being the items of each menu and `titles` the
@@ -164,117 +69,44 @@ impl Nav {
     pub fn key(&mut self, key: &str, menus: &[Vec<Item>], titles: &[Option<char>]) -> Outcome {
         let Some(menu) = self.menu else { return Outcome::Stay };
         let count = menus.len();
-        let items = &menus[menu];
-        if let Some(sub) = self.sub
-            && let Some(sub_items) = self.item.and_then(|item| items.get(item)).and_then(Item::submenu)
-        {
-            return self.sub_key(key, sub, sub_items, menus);
+        let (previous, next) = ((menu + count - 1) % count, (menu + 1) % count);
+        if self.open {
+            match self.levels.key(key, &menus[menu]) {
+                Step::Stay => {}
+                Step::Choose(path) => {
+                    *self = Nav::default();
+                    return Outcome::Choose(menu, path);
+                }
+                Step::Left => *self = Nav::open(previous, &menus[previous], true),
+                // On to the next menu, from a submenu too, as Windows goes.
+                Step::Right => *self = Nav::open(next, &menus[next], true),
+                Step::Escape => *self = Nav { menu: Some(menu), ..Nav::default() },
+            }
+            return Outcome::Stay;
         }
-        let highlighted = self.item.and_then(|item| items.get(item));
         match key {
-            // An item with a submenu opens it, with its first item highlighted.
-            "right" | "enter" | "space" if self.open && highlighted.and_then(Item::submenu).is_some() => {
-                let sub_items = highlighted.and_then(Item::submenu).unwrap_or_default();
-                self.sub = Some(Sub { item: next_choice(sub_items, None, true) });
+            "left" => self.menu = Some(previous),
+            "right" => self.menu = Some(next),
+            "down" | "enter" | "space" => *self = Nav::open(menu, &menus[menu], true),
+            "up" => {
+                let items = &menus[menu];
+                let mut levels = Levels::open(items, false);
+                levels.key("up", items);
+                *self = Nav { menu: Some(menu), open: true, levels };
             }
-            "left" | "right" => {
-                let next = if key == "right" { (menu + 1) % count } else { (menu + count - 1) % count };
-                *self = if self.open { Nav::open(next, &menus[next], true) } else { Nav { menu: Some(next), ..*self } };
-            }
-            "down" if !self.open => *self = Nav::open(menu, items, true),
-            "up" if !self.open => *self = Nav { open: true, item: next_choice(items, None, false), ..*self },
-            "down" | "up" => self.item = next_choice(items, self.item, key == "down"),
-            "enter" | "space" if !self.open => *self = Nav::open(menu, items, true),
-            "enter" | "space" => return self.choose(items),
-            "escape" if self.open => *self = Nav { open: false, item: None, sub: None, ..*self },
             "escape" => {
                 *self = Nav::default();
                 return Outcome::Leave;
             }
-            _ => {
-                let Some(letter) = key.chars().next().filter(|_| key.chars().count() == 1) else {
-                    return Outcome::Stay;
-                };
-                let letter = letter.to_lowercase().next().unwrap_or(letter);
-                if !self.open {
-                    if let Some(found) = titles.iter().position(|title| *title == Some(letter)) {
-                        *self = Nav::open(found, &menus[found], true);
-                    }
-                } else if let Some(found) =
-                    items.iter().position(|item| item.is_enabled() && item.mnemonic() == Some(letter))
-                {
-                    self.item = Some(found);
-                    if let Some(sub_items) = items[found].submenu() {
-                        self.sub = Some(Sub { item: next_choice(sub_items, None, true) });
-                        return Outcome::Stay;
-                    }
-                    return self.choose(items);
+            letter => {
+                let letter = letter.chars().next().map(|c| c.to_lowercase().next().unwrap_or(c));
+                if let Some(found) = titles.iter().position(|title| letter.is_some() && *title == letter) {
+                    *self = Nav::open(found, &menus[found], true);
                 }
             }
         }
         Outcome::Stay
     }
-
-    /// A key while the submenu `sub` of the highlighted item is open, of `items`.
-    fn sub_key(&mut self, key: &str, sub: Sub, items: &[Item], menus: &[Vec<Item>]) -> Outcome {
-        let (Some(menu), Some(item)) = (self.menu, self.item) else { return Outcome::Stay };
-        match key {
-            "down" | "up" => self.sub = Some(Sub { item: next_choice(items, sub.item, key == "down") }),
-            "left" | "escape" => self.sub = None,
-            // On to the next menu, as Windows goes from a submenu.
-            "right" => {
-                let next = (menu + 1) % menus.len();
-                *self = Nav::open(next, &menus[next], true);
-            }
-            "enter" | "space" => return self.choose_sub(menu, item, sub.item, items),
-            _ => {
-                let Some(letter) = key.chars().next().filter(|_| key.chars().count() == 1) else {
-                    return Outcome::Stay;
-                };
-                let letter = letter.to_lowercase().next().unwrap_or(letter);
-                let found = items.iter().position(|item| item.is_enabled() && item.mnemonic() == Some(letter));
-                return self.choose_sub(menu, item, found, items);
-            }
-        }
-        Outcome::Stay
-    }
-
-    fn choose_sub(&mut self, menu: usize, item: usize, sub: Option<usize>, items: &[Item]) -> Outcome {
-        match sub {
-            Some(sub) if matches!(items.get(sub), Some(Item::Choice { enabled: true, .. })) => {
-                *self = Nav::default();
-                Outcome::Choose(menu, item, Some(sub))
-            }
-            _ => Outcome::Stay,
-        }
-    }
-
-    fn choose(&mut self, items: &[Item]) -> Outcome {
-        match (self.menu, self.item) {
-            (Some(menu), Some(item)) if matches!(items.get(item), Some(Item::Choice { enabled: true, .. })) => {
-                *self = Nav::default();
-                Outcome::Choose(menu, item, None)
-            }
-            _ => Outcome::Stay,
-        }
-    }
-}
-
-/// The next item that can be highlighted after `from`, or before it, round the end; the first or
-/// the last for none.
-fn next_choice(items: &[Item], from: Option<usize>, forward: bool) -> Option<usize> {
-    let count = items.len();
-    let choices = |i: &usize| matches!(items[*i], Item::Choice { .. } | Item::Submenu { .. });
-    if count == 0 {
-        return None;
-    }
-    let order: Vec<usize> = match (from, forward) {
-        (None, true) => (0..count).collect(),
-        (None, false) => (0..count).rev().collect(),
-        (Some(from), true) => (1..=count).map(|step| (from + step) % count).collect(),
-        (Some(from), false) => (1..=count).map(|step| (from + count - step) % count).collect(),
-    };
-    order.into_iter().find(choices)
 }
 
 /// Describes the menus; it gets the focus the chosen item goes to, for which items are enabled.
@@ -296,18 +128,9 @@ pub struct MenuBar {
     /// The focus before the menus took it, to go back to.
     previous_focus: Option<FocusHandle>,
     menus: MenusSource,
-    /// Where the bar is in the window, for clicks on its titles while a menu is open.
+    /// Where the bar is in the window: the menus open under it, over the rest of the window.
     bounds: Rc<Cell<Bounds<Pixels>>>,
-    /// Where an open submenu is: a press there is not outside the menus.
-    sub_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     _activation: Subscription,
-}
-
-/// The menu a panel of items shows: a menu of the bar, or the submenu of its item.
-#[derive(Clone, Copy)]
-enum Level {
-    Menu(usize),
-    Sub(usize, usize),
 }
 
 impl MenuBar {
@@ -335,7 +158,6 @@ impl MenuBar {
             previous_focus: None,
             menus: Rc::new(menus),
             bounds: Rc::default(),
-            sub_bounds: Rc::default(),
             _activation: activation,
         }
     }
@@ -420,20 +242,11 @@ impl MenuBar {
         cx.notify();
     }
 
-    /// Chooses the item `item` of the menu `menu`, or the item `sub` of its submenu: the menus
-    /// close, the focus goes back, and the action goes to where the focus is.
-    fn choose(&mut self, menu: usize, item: usize, sub: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+    /// Chooses the item at `path` of the menu `menu`: the menus close, the focus goes back, and
+    /// the action goes to where the focus is.
+    fn choose(&mut self, menu: usize, path: &[usize], window: &mut Window, cx: &mut Context<Self>) {
         let menus = (self.menus)(self.previous_focus.as_ref(), window, cx);
-        let item = menus.get(menu).and_then(|menu| menu.items.get(item));
-        let item = match (item, sub) {
-            (Some(ItemSpec::Submenu { items, enabled: true, .. }), Some(sub)) => items.get(sub),
-            (item, None) => item,
-            _ => None,
-        };
-        let action = match item {
-            Some(ItemSpec::Action { action, enabled: true, .. }) => Some(action.boxed_clone()),
-            _ => None,
-        };
+        let action = menus.get(menu).and_then(|menu| menu::action_at(&menu.items, path));
         self.leave(window, cx);
         if let Some(action) = action {
             window.defer(cx, move |window, cx| window.dispatch_action(action, cx));
@@ -449,32 +262,24 @@ impl MenuBar {
         let menus = (self.menus)(self.previous_focus.as_ref(), window, cx);
         let items: Vec<Vec<Item>> = menus.iter().map(|menu| menu.items.iter().map(ItemSpec::kind).collect()).collect();
         let titles: Vec<Option<char>> = menus.iter().map(|menu| mnemonic_char(&menu.title, menu.mnemonic)).collect();
-        let named = ["left", "right", "up", "down", "enter", "space", "escape"].contains(&keystroke.key.as_str());
-        let key = if named {
-            keystroke.key.clone()
-        } else {
-            // A letter of the layout typed, or the key under it.
-            let typed = typed_letters(keystroke);
-            let open = self.nav.menu.filter(|_| self.nav.open).map(|menu| items[menu].as_slice());
-            let sub = open.zip(self.nav.item).and_then(|(open, item)| open.get(item)).and_then(Item::submenu);
-            let wanted: Vec<Option<char>> = match (open, sub.filter(|_| self.nav.sub.is_some())) {
-                (_, Some(sub)) => sub.iter().map(Item::mnemonic).collect(),
-                (Some(open), None) => open.iter().map(Item::mnemonic).collect(),
-                (None, None) => titles.clone(),
-            };
-            match typed.into_iter().find(|letter| wanted.contains(&Some(*letter))) {
-                Some(letter) => letter.to_string(),
-                None => {
-                    cx.stop_propagation();
-                    return;
-                }
+        // A letter is the mnemonic of an item of the menu open, or of a title.
+        let key = match self.nav.menu.filter(|_| self.nav.open) {
+            Some(menu) => menu_key(keystroke, self.nav.levels.current(&items[menu])),
+            None => {
+                let titles: Vec<Item> =
+                    titles.iter().map(|&mnemonic| Item::Choice { enabled: true, mnemonic }).collect();
+                menu_key(keystroke, &titles)
             }
+        };
+        let Some(key) = key else {
+            cx.stop_propagation();
+            return;
         };
         self.keyboard = true;
         match self.nav.key(&key, &items, &titles) {
             Outcome::Stay => cx.notify(),
             Outcome::Leave => self.leave(window, cx),
-            Outcome::Choose(menu, item, sub) => self.choose(menu, item, sub, window, cx),
+            Outcome::Choose(menu, path) => self.choose(menu, &path, window, cx),
         }
         cx.stop_propagation();
     }
@@ -491,180 +296,38 @@ impl MenuBar {
         }
     }
 
-    fn show_mnemonics(&self) -> bool {
-        self.keyboard || self.alt_held
-    }
-
-    /// A label with its mnemonic underlined while they show.
-    fn label(&self, text: &SharedString, mnemonic: Option<usize>) -> StyledText {
-        let underline = mnemonic_range(text, mnemonic).filter(|_| self.show_mnemonics());
-        let style = HighlightStyle {
-            underline: Some(UnderlineStyle { thickness: px(1.), color: None, wavy: false }),
-            ..Default::default()
-        };
-        StyledText::new(text.clone()).with_highlights(underline.map(|range| (range, style)))
-    }
-
-    fn render_menu(&self, menu: usize, spec: MenuSpec, cx: &mut Context<Self>) -> AnyElement {
-        let panel = self.render_panel(spec.title, spec.items, Level::Menu(menu), cx).on_mouse_down_out(cx.listener(
-            // A press outside the menus closes them; one on a title is for the title to handle.
-            |bar, event: &MouseDownEvent, window, cx| {
-                let on_sub = bar.sub_bounds.get().is_some_and(|sub| sub.contains(&event.position));
-                if !bar.bounds.get().contains(&event.position) && !on_sub {
-                    bar.leave(window, cx);
-                }
-            },
-        ));
+    fn render_menu(&self, spec: MenuSpec, cx: &mut Context<Self>) -> AnyElement {
+        let panel = menu::panel(self, spec.title, spec.items, 0, 1, cx);
         // Under its title, over everything else.
         let menu = deferred(anchored().snap_to_window().child(panel)).with_priority(1);
         div().absolute().top(px(HEIGHT)).left_0().child(menu).into_any_element()
     }
-
-    /// The panel of the items of a menu, or of a submenu.
-    fn render_panel(
-        &self,
-        title: SharedString,
-        items: Vec<ItemSpec>,
-        level: Level,
-        cx: &mut Context<Self>,
-    ) -> gpui::Stateful<gpui::Div> {
-        let theme = theme(cx);
-        let shadow = BoxShadow {
-            color: rgba(theme.shadow).into(),
-            offset: point(px(0.), px(3.)),
-            blur_radius: px(10.),
-            spread_radius: px(0.),
-            inset: false,
-        };
-        let highlighted = match level {
-            Level::Menu(_) => self.nav.item,
-            Level::Sub(..) => self.nav.sub.and_then(|sub| sub.item),
-        };
-        let items = items.into_iter().enumerate().map(|(i, item)| {
-            let (label, mnemonic, enabled, keys, checked, submenu) = match item {
-                ItemSpec::Separator => {
-                    return div().h(px(1.)).mx(px(8.)).my(px(4.)).bg(rgb(theme.border)).into_any_element();
-                }
-                ItemSpec::Action { label, mnemonic, keys, checked, enabled, .. } => {
-                    (label, mnemonic, enabled, keys, checked, None)
-                }
-                ItemSpec::Submenu { label, mnemonic, enabled, items } => {
-                    (label, mnemonic, enabled, None, None, Some(items))
-                }
-            };
-            let lit = highlighted == Some(i);
-            let expanded = lit && submenu.is_some() && self.nav.sub.is_some();
-            let text = if enabled { theme.text } else { theme.text_disabled };
-            let keys_color = if lit && enabled { theme.text } else { theme.text_muted };
-            let has_submenu = submenu.is_some();
-            let role = if checked.is_some() { Role::MenuItemCheckBox } else { Role::MenuItem };
-            let sub_panel = submenu.filter(|_| expanded).map(|sub_items| {
-                let Level::Menu(menu) = level else { unreachable!("submenus have no submenus") };
-                let sub_bounds = self.sub_bounds.clone();
-                // Over the whole panel: without a corner, an absolute element goes after the items.
-                let panel = self.render_panel(label.clone(), sub_items, Level::Sub(menu, i), cx).child(
-                    canvas(move |area, _, _| sub_bounds.set(Some(area)), |_, _, _, _| {})
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .size_full(),
-                );
-                // To the right of its item, over its menu.
-                let panel = deferred(anchored().snap_to_window().child(panel)).with_priority(2);
-                div().absolute().top(px(-5.)).left_full().child(panel)
-            });
-            div()
-                .id(("item", i))
-                .role(role)
-                .aria_label(label.clone())
-                .when_some(checked, |item, on| item.aria_toggled(if on { Toggled::True } else { Toggled::False }))
-                .when(has_submenu, |item| item.aria_expanded(expanded))
-                // Screen readers follow the highlighted item: the focus stays on the menus.
-                .when(lit, |item| item.aria_active_descendant())
-                .relative()
-                .flex()
-                .items_center()
-                .h(px(24.))
-                .mx(px(4.))
-                .pr(px(10.))
-                .rounded(px(4.))
-                .text_color(rgb(text))
-                .when(lit, |item| item.bg(rgb(theme.menu_selected)))
-                .on_mouse_move(cx.listener(move |bar, _, _, cx| {
-                    let nav = match level {
-                        // The pointer over an item with a submenu opens it, and keeps it open as it
-                        // moves over the item.
-                        Level::Menu(_) if has_submenu && enabled => {
-                            let sub = bar.nav.sub.filter(|_| bar.nav.item == Some(i)).unwrap_or_default();
-                            Nav { item: Some(i), sub: Some(sub), ..bar.nav }
-                        }
-                        Level::Menu(_) => Nav { item: Some(i), sub: None, ..bar.nav },
-                        Level::Sub(_, item) => Nav { item: Some(item), sub: Some(Sub { item: Some(i) }), ..bar.nav },
-                    };
-                    if bar.nav != nav {
-                        bar.nav = nav;
-                        cx.notify();
-                    }
-                }))
-                .on_click(cx.listener(move |bar, _, window, cx| match level {
-                    Level::Menu(menu) if !has_submenu && enabled => bar.choose(menu, i, None, window, cx),
-                    Level::Sub(menu, item) if enabled => bar.choose(menu, item, Some(i), window, cx),
-                    _ => {}
-                }))
-                .child(div().flex_none().w(px(24.)).flex().justify_center().child(if checked == Some(true) {
-                    "✓"
-                } else {
-                    ""
-                }))
-                .child(div().flex_1().whitespace_nowrap().child(self.label(&label, mnemonic)))
-                .children(keys.map(|keys| div().flex_none().pl(px(28.)).text_color(rgb(keys_color)).child(keys)))
-                .when(has_submenu, |item| {
-                    item.child(div().flex_none().pl(px(28.)).text_color(rgb(keys_color)).child("▸"))
-                })
-                .children(sub_panel)
-                .into_any_element()
-        });
-        let id = match level {
-            Level::Menu(_) => SharedString::from("menu"),
-            Level::Sub(..) => SharedString::from("submenu"),
-        };
-        div()
-            .id(id)
-            .role(Role::Menu)
-            .aria_label(title)
-            .min_w(px(220.))
-            .py(px(4.))
-            .bg(rgb(theme.menu))
-            .border_1()
-            .border_color(rgb(theme.border))
-            .rounded(px(6.))
-            .shadow(vec![shadow])
-            .occlude()
-            .text_size(crate::text_size())
-            .text_color(rgb(theme.text))
-            .children(items)
-    }
 }
 
-/// The letters a keystroke could mean, in lower case: the one typed in the layout, and the key
-/// under it, for a mnemonic in another script than the layout.
-fn typed_letters(keystroke: &Keystroke) -> Vec<char> {
-    let mut letters: Vec<char> = Vec::new();
-    for text in [keystroke.key_char.as_deref(), Some(keystroke.key.as_str())].into_iter().flatten() {
-        let mut chars = text.chars();
-        if let (Some(c), None) = (chars.next(), chars.next()) {
-            letters.push(c.to_lowercase().next().unwrap_or(c));
+impl MenuHost for MenuBar {
+    fn levels(&self) -> &Levels {
+        &self.nav.levels
+    }
+
+    fn levels_mut(&mut self) -> &mut Levels {
+        &mut self.nav.levels
+    }
+
+    fn shows_mnemonics(&self) -> bool {
+        self.keyboard || self.alt_held
+    }
+
+    fn choose(&mut self, path: Vec<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(menu) = self.nav.menu {
+            MenuBar::choose(self, menu, &path, window, cx);
         }
     }
-    letters
 }
 
 impl Render for MenuBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme(cx);
         let menus = (self.menus)(self.previous_focus.as_ref(), window, cx);
-        // An open submenu tells where it is as it is drawn.
-        self.sub_bounds.set(None);
         // The menus are left when the focus leaves them, as a press on a tab takes it.
         if self.nav.is_active() && !self.focus.contains_focused(window, cx) {
             self.nav = Nav::default();
@@ -676,7 +339,7 @@ impl Render for MenuBar {
         for (index, spec) in menus.into_iter().enumerate() {
             let (title, mnemonic) = (spec.title.clone(), spec.mnemonic);
             let items: Vec<Item> = spec.items.iter().map(ItemSpec::kind).collect();
-            let menu = (open == Some(index)).then(|| self.render_menu(index, spec, cx));
+            let menu = (open == Some(index)).then(|| self.render_menu(spec, cx));
             let selected = self.nav.menu == Some(index);
             let items_for_hover = items.clone();
             titles.push(
@@ -706,7 +369,7 @@ impl Render for MenuBar {
                             cx.notify();
                         }
                     }))
-                    .child(self.label(&title, mnemonic))
+                    .child(menu::label(&title, mnemonic, self.shows_mnemonics()))
                     .children(menu)
                     .into_any_element(),
             );
@@ -763,23 +426,25 @@ mod tests {
     }
 
     #[test]
-    fn arrows_move_over_titles_and_items_skipping_separators() {
+    fn arrows_move_over_titles_and_open_their_menus() {
         let (menus, titles) = menus();
         let mut nav = Nav::select_bar();
         assert_eq!(nav.key("left", &menus, &titles), Outcome::Stay);
-        assert_eq!(nav, Nav { menu: Some(2), open: false, item: None, sub: None });
+        assert_eq!((nav.menu, nav.open), (Some(2), false));
         nav.key("right", &menus, &titles);
         nav.key("down", &menus, &titles);
-        assert_eq!(nav, Nav { menu: Some(0), open: true, item: Some(0), sub: None });
+        assert_eq!((nav.menu, nav.open, nav.levels.highlighted(0)), (Some(0), true, Some(0)));
         nav.key("down", &menus, &titles);
-        assert_eq!(nav.item, Some(2), "past the separator");
-        nav.key("down", &menus, &titles);
-        assert_eq!(nav.item, Some(0), "round the end");
+        assert_eq!(nav.levels.highlighted(0), Some(2), "past the separator");
+        // With a menu open, the next one opens, and the one before.
+        nav.key("right", &menus, &titles);
+        assert_eq!((nav.menu, nav.levels.highlighted(0)), (Some(1), Some(0)));
+        nav.key("left", &menus, &titles);
+        assert_eq!(nav.menu, Some(0));
+        // Up on a title opens its menu at the last item.
+        let mut nav = Nav::select_bar();
         nav.key("up", &menus, &titles);
-        assert_eq!(nav.item, Some(2));
-        // With a menu open, the next one opens.
-        nav.key("right", &menus, &titles);
-        assert_eq!(nav, Nav { menu: Some(1), open: true, item: Some(0), sub: None });
+        assert_eq!((nav.open, nav.levels.highlighted(0)), (true, Some(2)));
     }
 
     #[test]
@@ -788,12 +453,12 @@ mod tests {
         let mut nav = Nav::open(1, &menus[1], true);
         assert_eq!(nav.key("enter", &menus, &titles), Outcome::Stay, "a disabled item");
         nav.key("down", &menus, &titles);
-        assert_eq!(nav.key("enter", &menus, &titles), Outcome::Choose(1, 1, None));
+        assert_eq!(nav.key("enter", &menus, &titles), Outcome::Choose(1, vec![1]));
         assert!(!nav.is_active());
 
         let mut nav = Nav::open(0, &menus[0], true);
         assert_eq!(nav.key("escape", &menus, &titles), Outcome::Stay);
-        assert_eq!(nav, Nav { menu: Some(0), open: false, item: None, sub: None });
+        assert_eq!((nav.menu, nav.open), (Some(0), false));
         assert_eq!(nav.key("escape", &menus, &titles), Outcome::Leave);
         assert!(!nav.is_active());
     }
@@ -803,53 +468,29 @@ mod tests {
         let (menus, titles) = menus();
         let mut nav = Nav::select_bar();
         assert_eq!(nav.key("ф", &menus, &titles), Outcome::Stay);
-        assert_eq!(nav, Nav { menu: Some(2), open: true, item: Some(0), sub: None });
+        assert_eq!((nav.menu, nav.open, nav.levels.highlighted(0)), (Some(2), true, Some(0)));
         let mut nav = Nav::select_bar();
         nav.key("E", &menus, &titles);
         assert_eq!(nav.menu, Some(1));
         assert_eq!(nav.key("o", &menus, &titles), Outcome::Stay, "a disabled item is not chosen");
-        assert_eq!(nav.key("a", &menus, &titles), Outcome::Choose(1, 1, None));
+        assert_eq!(nav.key("a", &menus, &titles), Outcome::Choose(1, vec![1]));
     }
 
     #[test]
-    fn submenus_open_to_the_right_and_close_to_the_left() {
+    fn submenus_open_to_the_right_and_the_next_menu_after_them() {
         let recent = Item::Submenu { enabled: true, mnemonic: Some('r'), items: vec![A, SEP, B] };
-        let empty = Item::Submenu { enabled: false, mnemonic: Some('e'), items: Vec::new() };
-        let menus = vec![vec![A, recent, empty], vec![B]];
+        let menus = vec![vec![A, recent], vec![B]];
         let titles = vec![Some('f'), Some('v')];
         let mut nav = Nav::open(0, &menus[0], true);
         nav.key("down", &menus, &titles);
-        assert_eq!((nav.item, nav.sub), (Some(1), None));
-        // Right opens the submenu with its first item highlighted; down skips its separator.
         nav.key("right", &menus, &titles);
-        assert_eq!(nav.sub, Some(Sub { item: Some(0) }));
+        assert!(nav.levels.is_open(0, 1));
         nav.key("down", &menus, &titles);
-        assert_eq!(nav.sub, Some(Sub { item: Some(2) }));
-        assert_eq!(nav.key("enter", &menus, &titles), Outcome::Choose(0, 1, Some(2)));
-        assert!(!nav.is_active());
-        // Left and escape close it; right goes on to the next menu.
+        assert_eq!(nav.key("enter", &menus, &titles), Outcome::Choose(0, vec![1, 2]));
+        // Right on an item of a submenu goes on to the next menu.
         let mut nav = Nav::open(0, &menus[0], true);
         nav.key("r", &menus, &titles);
-        assert_eq!((nav.item, nav.sub), (Some(1), Some(Sub { item: Some(0) })), "its mnemonic opens it");
-        nav.key("left", &menus, &titles);
-        assert_eq!((nav.menu, nav.item, nav.sub), (Some(0), Some(1), None));
-        nav.key("enter", &menus, &titles);
-        assert!(nav.sub.is_some(), "enter opens it too");
-        assert_eq!(nav.key("b", &menus, &titles), Outcome::Choose(0, 1, Some(2)), "a mnemonic in it chooses");
-        let mut nav = Nav { sub: Some(Sub::default()), item: Some(1), ..Nav::open(0, &menus[0], true) };
         nav.key("right", &menus, &titles);
-        assert_eq!((nav.menu, nav.sub), (Some(1), None));
-        // A disabled submenu does not open.
-        let mut nav = Nav { item: Some(2), ..Nav::open(0, &menus[0], true) };
-        nav.key("right", &menus, &titles);
-        assert_eq!((nav.menu, nav.sub), (Some(1), None), "on to the next menu");
-    }
-
-    #[test]
-    fn mnemonics_are_the_letters_marked() {
-        assert_eq!(mnemonic_char("Вы&резать".replace('&', "").as_str(), Some(4)), Some('р'));
-        assert_eq!(mnemonic_char("File", Some(0)), Some('f'));
-        assert_eq!(mnemonic_char("File", None), None);
-        assert_eq!(mnemonic_range("Правка", Some(0)), Some(0..2));
+        assert_eq!((nav.menu, nav.open), (Some(1), true));
     }
 }

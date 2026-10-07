@@ -16,7 +16,7 @@ use migpad_core::document::Document;
 use migpad_core::history::{EditKind, Selection};
 use migpad_core::search::{MatchWalk, Query, QueryError, Search, Template};
 use migpad_core::text::TextStore;
-use migpad_editor::EditorView;
+use migpad_editor::{ContextMenuEvent, EditorView};
 use migpad_ui::{Button, TextField, theme};
 
 use crate::keys;
@@ -139,7 +139,10 @@ impl FindBar {
                 cx.notify();
             }
         });
-        FindBar { workspace, find, replace, replacing: false, told: None, job: None, _subscriptions: vec![edited] }
+        let menus = [&find, &replace].map(|field| context_menu_of(field, &workspace, window, cx));
+        let mut subscriptions = vec![edited];
+        subscriptions.extend(menus);
+        FindBar { workspace, find, replace, replacing: false, told: None, job: None, _subscriptions: subscriptions }
     }
 
     /// Shows the bar for a search, with the row of the replacement if `replacing`: the field of the
@@ -340,6 +343,19 @@ impl FindBar {
         }
         true
     }
+}
+
+/// Opens the context menu of the field `field` of a bar, as its view asks: the window opens it.
+pub fn context_menu_of<T: 'static>(
+    field: &Entity<EditorView>,
+    workspace: &WeakEntity<Workspace>,
+    window: &mut Window,
+    cx: &mut Context<T>,
+) -> Subscription {
+    let workspace = workspace.clone();
+    cx.subscribe_in(field, window, move |_, field, event: &ContextMenuEvent, window, cx| {
+        let _ = workspace.update(cx, |workspace, cx| workspace.open_context_menu(field, event, window, cx));
+    })
 }
 
 /// What the bar says of `told`, and whether it is bad news.

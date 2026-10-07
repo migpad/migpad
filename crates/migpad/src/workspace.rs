@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use gpui::{
-    App, AppContext, Context, DragMoveEvent, Entity, EntityId, ExternalPaths, FocusHandle, Focusable, MouseDownEvent,
-    MouseUpEvent, PathPromptOptions, PromptButton, PromptLevel, Render, ScrollHandle, SharedString, Subscription, Task,
-    Window, WindowHandle, WindowId, canvas, div, prelude::*, px, rgb,
+    App, AppContext, Context, DismissEvent, DragMoveEvent, Entity, EntityId, ExternalPaths, FocusHandle, Focusable,
+    MouseDownEvent, MouseUpEvent, PathPromptOptions, PromptButton, PromptLevel, Render, ScrollHandle, SharedString,
+    Subscription, Task, Window, WindowHandle, WindowId, canvas, div, prelude::*, px, rgb,
 };
 use migpad_core::document::{Document, Fingerprint, Format, OpenAs, Opened, open};
 use migpad_core::encoding::Encoding;
@@ -15,9 +15,9 @@ use migpad_core::history::Selection;
 use migpad_core::state::TabState;
 use migpad_core::state::session::{Rect, WindowMode, WindowState};
 use migpad_core::text::TextStore;
-use migpad_editor::EditorView;
+use migpad_editor::{ContextMenuEvent, EditorView};
 use migpad_ui::notification::NotificationBar;
-use migpad_ui::{Button, MenuBar, TabBar, TabInfo, theme};
+use migpad_ui::{Button, ContextMenu, MenuBar, TabBar, TabInfo, theme};
 
 use crate::commands::{Registry, update_menus};
 use crate::find::FindBar;
@@ -66,6 +66,8 @@ pub struct Tab {
     _observe: Subscription,
     /// Shows the progress of the loading in the status bar.
     _progress: Option<Task<()>>,
+    /// Opens the context menu of the text.
+    _context_menu: Subscription,
 }
 
 /// What the window shows in its title: the name of the active document, whether it has changes
@@ -108,7 +110,37 @@ pub struct Workspace {
     /// The bar of Go to Line, once it was opened, and whether it shows.
     go_to_bar: Option<Entity<GoToBar>>,
     go_to_shown: bool,
+    /// The context menu open over the window until it closes, and the view it is of.
+    context_menu: Option<(Entity<ContextMenu>, EntityId, Subscription)>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// What a text the context menu is of can do: its commands are gray where they have nothing to do.
+#[derive(Clone, Copy, Debug, Default)]
+struct TextState {
+    selected: bool,
+    /// Not the preview of a file still loading, which takes no edits.
+    editable: bool,
+    can_undo: bool,
+    can_redo: bool,
+    empty: bool,
+    /// Whether the clipboard has text to paste.
+    clipboard: bool,
+}
+
+impl TextState {
+    /// Whether the command `id` of the context menu has something to do in the text.
+    fn can(&self, id: &str) -> bool {
+        match id {
+            "edit.undo" => self.editable && self.can_undo,
+            "edit.redo" => self.editable && self.can_redo,
+            "edit.cut" | "edit.delete" => self.editable && self.selected,
+            "edit.copy" => self.selected,
+            "edit.paste" => self.editable && self.clipboard,
+            "edit.select_all" => !self.empty,
+            _ => true,
+        }
+    }
 }
 
 /// The answer to "Save the changes?" on closing.
@@ -166,6 +198,7 @@ impl Workspace {
             find_shown: false,
             go_to_bar: None,
             go_to_shown: false,
+            context_menu: None,
             _subscriptions: vec![activation, appearance, moved],
         };
         workspace.settle(0, first.selection, first.notice, window, cx);
@@ -268,6 +301,37 @@ impl Workspace {
     /// The bar of Go to Line, if it shows.
     pub fn go_to_bar_shown(&self) -> Option<&Entity<GoToBar>> {
         self.go_to_bar.as_ref().filter(|_| self.go_to_shown)
+    }
+
+    /// Opens the context menu of the text of `target` — a document or a field — as `event` asks:
+    /// its commands act there, those with nothing to do there gray.
+    pub fn open_context_menu(
+        &mut self,
+        target: &Entity<EditorView>,
+        event: &ContextMenuEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let view = target.read(cx);
+        let doc = view.document().read(cx);
+        let selection = view.selection();
+        let text = TextState {
+            selected: selection.anchor != selection.head,
+            editable: !doc.is_preview(),
+            can_undo: doc.can_undo(),
+            can_redo: doc.can_redo(),
+            empty: doc.text().is_empty(),
+            clipboard: cx.read_from_clipboard().and_then(|item| item.text()).is_some_and(|text| !text.is_empty()),
+        };
+        let items = cx.global::<Registry>().context_menu(|id| text.can(id));
+        let (position, keyboard) = (event.position, event.keyboard);
+        let menu = cx.new(|cx| ContextMenu::new(items, position, keyboard, window, cx));
+        let closed = cx.subscribe_in(&menu, window, |workspace, _, _: &DismissEvent, _, cx| {
+            workspace.context_menu = None;
+            cx.notify();
+        });
+        self.context_menu = Some((menu, target.entity_id(), closed));
+        cx.notify();
     }
 
     /// The find bar, if it shows.
@@ -1401,6 +1465,9 @@ impl Tab {
         let observe = cx.observe_in(&document, window, |workspace, document, window, cx| {
             workspace.document_changed(document.entity_id(), window, cx)
         });
+        let context_menu = cx.subscribe_in(&editor, window, |workspace, editor, event, window, cx| {
+            workspace.open_context_menu(editor, event, window, cx)
+        });
         // The status bar shows how far the file has loaded, a few times a second; a load that
         // stopped short is told over the text.
         let progress = loading.clone().map(|loading| {
@@ -1433,6 +1500,7 @@ impl Tab {
             missing: false,
             _observe: observe,
             _progress: progress,
+            _context_menu: context_menu,
         }
     }
 
@@ -1489,10 +1557,13 @@ impl Render for Workspace {
                 window.request_animation_frame();
             }
         }
-        // The selection of the documents shows in full color while the find bar works on them.
+        // The selection of the documents shows in full color while the find bar works on them, and
+        // that of the text of a context menu while it is open, as the menu has the focus.
+        let menu_of = self.context_menu.as_ref().map(|(_, target, _)| *target);
         for tab in self.tabs.iter() {
-            if tab.editor.read(cx).is_emphasized() != self.find_shown {
-                tab.editor.update(cx, |editor, cx| editor.set_emphasized(self.find_shown, cx));
+            let emphasized = self.find_shown || menu_of == Some(tab.editor.entity_id());
+            if tab.editor.read(cx).is_emphasized() != emphasized {
+                tab.editor.update(cx, |editor, cx| editor.set_emphasized(emphasized, cx));
             }
         }
         let handlers = cx.global::<Registry>().window_handlers();
@@ -1571,8 +1642,30 @@ impl Render for Workspace {
             .children(self.notification_bars(cx))
             .children(self.find_bar_shown().cloned())
             .children(self.go_to_bar_shown().cloned())
+            .children(self.context_menu.as_ref().map(|(menu, ..)| menu.clone()))
             .child(div().flex_1().min_h_0().child(self.editor().clone()))
             .child(status_bar)
             .child(drops)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_context_menu_grays_what_has_nothing_to_do() {
+        let none = TextState { editable: true, empty: true, ..TextState::default() };
+        let all = ["edit.undo", "edit.redo", "edit.cut", "edit.copy", "edit.paste", "edit.delete", "edit.select_all"];
+        assert!(all.iter().all(|id| !none.can(id)), "an empty text without a selection, history or clipboard");
+        let selected = TextState { selected: true, ..none };
+        assert!(selected.can("edit.cut") && selected.can("edit.copy") && selected.can("edit.delete"));
+        let full = TextState { selected: true, can_undo: true, can_redo: true, clipboard: true, ..none };
+        assert!(all.iter().filter(|id| **id != "edit.select_all").all(|id| full.can(id)));
+        // The preview of a file still loading: copying only.
+        let preview = TextState { editable: false, ..full };
+        let can: Vec<&str> = all.iter().copied().filter(|id| preview.can(id)).collect();
+        assert_eq!(can, ["edit.copy"]);
+        assert!(TextState { empty: false, ..none }.can("edit.select_all"));
     }
 }

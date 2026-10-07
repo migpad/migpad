@@ -10,6 +10,7 @@ use migpad_core::history::Selection;
 use migpad_editor::EditorView;
 use migpad_ui::{Button, TextField, theme};
 
+use crate::find;
 use crate::keys;
 use crate::modules::go_to::CloseGoTo;
 use crate::strings::{Key, fill, number, tr};
@@ -36,7 +37,8 @@ impl GoToBar {
                 cx.notify();
             }
         });
-        GoToBar { workspace, field, invalid: false, _subscriptions: vec![typed] }
+        let menu = find::context_menu_of(&field, &workspace, window, cx);
+        GoToBar { workspace, field, invalid: false, _subscriptions: vec![typed, menu] }
     }
 
     /// Shows the bar for a document of `lines` lines: the field takes the focus, all its text

@@ -45,6 +45,7 @@ redo = "&Redo"
 cut = "Cu&t"
 copy = "&Copy"
 paste = "&Paste"
+delete = "&Delete"
 select_all = "Select &All"
 
 [find]

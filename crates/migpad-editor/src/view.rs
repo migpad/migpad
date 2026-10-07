@@ -14,8 +14,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
-    App, Bounds, Context, Entity, FocusHandle, Focusable, Pixels, Render, ScrollWheelEvent, SharedString, Subscription,
-    Task, Window, div, point, prelude::*, px, size,
+    App, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, Pixels, Point, Render, ScrollWheelEvent,
+    SharedString, Subscription, Task, Window, div, point, prelude::*, px, size,
 };
 use migpad_core::document::Document;
 use migpad_core::history::Selection;
@@ -43,6 +43,15 @@ const BLINK: Duration = Duration::from_millis(500);
 const MIN_WRAP_CELLS: usize = 8;
 /// Bytes of a long line walked at a time to find the column of the caret.
 pub const COLUMN_STEP: usize = 4 << 20;
+
+/// The view asks for its context menu: the right button pressed at `position` in the window, or
+/// the keys of the menu, which open it at the caret.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ContextMenuEvent {
+    pub position: Point<Pixels>,
+    /// Whether a key asked: the menu highlights its first item then.
+    pub keyboard: bool,
+}
 
 /// The view of a document in a window, or the one line of an input field.
 pub struct EditorView {
@@ -465,7 +474,7 @@ impl EditorView {
             text_area
         };
         let mut layout = Layout {
-            geometry: Geometry { bounds, gutter, text_area, text_left, track, thumb: None },
+            geometry: Geometry { bounds, gutter, text_area, text_left, track, thumb: None, caret: None },
             clip,
             line_height,
             lines: Vec::with_capacity(rows.len()),
@@ -538,9 +547,13 @@ impl EditorView {
             let on_row = (row.shown.start..=row.shown.end).contains(&head)
                 && !(head == row.shown.end && !last && !self.caret_at_row_end)
                 && !(head == row.shown.start && !first && self.caret_at_row_end);
-            if active && self.caret_on && on_row {
+            if on_row {
                 let x = screen_x(row.x_of(head)).round() - px(CARET_WIDTH / 2.);
-                layout.caret = Some(Bounds::new(point(x, y), size(px(CARET_WIDTH), line_height)));
+                let caret = Bounds::new(point(x, y), size(px(CARET_WIDTH), line_height));
+                layout.geometry.caret = Some(caret);
+                if active && self.caret_on {
+                    layout.caret = Some(caret);
+                }
             }
             layout.lines.push((row.shaped, point(screen_x(row.x), y)));
 
@@ -589,6 +602,20 @@ impl EditorView {
         (self.widest - reach).max(0.0)
     }
 }
+
+impl EditorView {
+    /// The keys of the context menu: it opens below the caret, or at the top of the text if the
+    /// caret is out of view.
+    pub(crate) fn context_menu_at_caret(&mut self, cx: &mut Context<Self>) {
+        let at = match self.geometry.caret {
+            Some(caret) => point(caret.left(), caret.bottom()),
+            None => self.geometry.text_area.origin,
+        };
+        cx.emit(ContextMenuEvent { position: at, keyboard: true });
+    }
+}
+
+impl EventEmitter<ContextMenuEvent> for EditorView {}
 
 impl Focusable for EditorView {
     fn focus_handle(&self, _: &App) -> FocusHandle {

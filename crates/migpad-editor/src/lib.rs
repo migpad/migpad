@@ -15,11 +15,11 @@ mod wrap;
 
 pub use colors::EditorColors;
 pub use keymap::key_bindings;
-pub use view::EditorView;
+pub use view::{ContextMenuEvent, EditorView};
 
 /// The editing actions that the application puts into its menus.
 pub mod actions {
-    pub use crate::keymap::{Copy, Cut, Paste, Redo, SelectAll, Undo};
+    pub use crate::keymap::{Copy, Cut, Delete, Paste, Redo, SelectAll, Undo};
 }
 
 /// Binds the keys of the editor; called once when the application starts.
