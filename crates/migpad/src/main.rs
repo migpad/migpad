@@ -15,6 +15,7 @@ mod session;
 mod status;
 mod strings;
 mod tabs;
+mod view_options;
 mod windows;
 mod workspace;
 
@@ -40,6 +41,7 @@ fn main() {
         strings::set_language(Language::of_system());
         journals::init(cx);
         recent::init(cx);
+        view_options::init(cx);
         migpad_ui::theme::set_mode(theme_mode(), cx);
         migpad_editor::init(cx);
         commands::init(&modules::all(), cx);

@@ -5,8 +5,9 @@ use gpui::actions;
 
 use crate::commands::{Command, MenuId, Module, Registry, update_menus};
 use crate::strings::Key;
+use crate::view_options;
 
-actions!(view, [ToggleWordWrap, ToggleInvisibles, ToggleIndentGuides]);
+actions!(view, [ToggleWordWrap, ToggleInvisibles, ToggleIndentGuides, ToggleMenuBarInWindow]);
 
 pub struct ViewModule;
 
@@ -30,6 +31,13 @@ impl Module for ViewModule {
         let indent_guides = Command::new("view.indent_guides", Key::ViewIndentGuides, ToggleIndentGuides)
             .checked(|workspace, cx| workspace.editor().read(cx).shows_indent_guides());
         registry.add(indent_guides, menu(1));
+        // The menu bar of Windows and Linux in each window, besides that of the system.
+        if cfg!(target_os = "macos") {
+            let menu_bar = Command::new("view.menu_bar", Key::ViewMenuBar, ToggleMenuBarInWindow)
+                .checked(|_, cx| view_options::menu_bar(cx));
+            registry.add(menu_bar, menu(3));
+            registry.on_app_action(|_: &ToggleMenuBarInWindow, cx| cx.defer(view_options::toggle_menu_bar_in_window));
+        }
 
         registry.on_window_action(|workspace, _: &ToggleWordWrap, _, cx| {
             if workspace.document().read(cx).is_large() {

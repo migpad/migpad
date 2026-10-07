@@ -3,8 +3,9 @@
 
 use gpui::actions;
 
-use crate::commands::{ActivateWindow, Command, MenuId, Module, Registry, by_os, own_menu_bar};
+use crate::commands::{ActivateWindow, Command, MenuId, Module, Registry, by_os};
 use crate::strings::Key;
+use crate::view_options;
 
 actions!(window, [Minimize, Zoom, NextTab, PreviousTab, LastTab, ToggleMenuBar]);
 
@@ -80,7 +81,7 @@ impl Module for WindowModule {
         }
         // F10 brings the keyboard to the menu bar MigPad draws, as Alt pressed and released alone
         // does — the menu bar watches for that itself.
-        let menu_keys: &[&str] = if own_menu_bar() { &["f10"] } else { &[] };
+        let menu_keys: &[&str] = if view_options::menu_keys() { &["f10"] } else { &[] };
         registry.add(Command::new("window.menu_bar", Key::WindowMenu, ToggleMenuBar).keys(menu_keys), None);
 
         registry.on_window_action(|_, _: &Minimize, window, _| window.minimize_window());

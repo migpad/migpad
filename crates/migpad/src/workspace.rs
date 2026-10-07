@@ -19,7 +19,7 @@ use migpad_editor::EditorView;
 use migpad_ui::notification::NotificationBar;
 use migpad_ui::{Button, MenuBar, TabBar, TabInfo, theme};
 
-use crate::commands::{Registry, own_menu_bar, update_menus};
+use crate::commands::{Registry, update_menus};
 use crate::find::FindBar;
 use crate::journals;
 use crate::keys;
@@ -30,6 +30,7 @@ use crate::session;
 use crate::status::{self, COUNT_STEP, Loading, SelectionCount, count_chars};
 use crate::strings::{Key, fill, tr};
 use crate::tabs::Tabs;
+use crate::view_options;
 use crate::windows::{self, Closed, ClosedTab, ForTab, Opening, Reopening};
 
 /// The dialog of the system that opens files: several at once.
@@ -141,19 +142,7 @@ impl Workspace {
         let window_id = window.window_handle().window_id();
         let untitled = Self::untitled_for(&first.document, [], window_id, cx);
         let tab = Tab::new(first.document, untitled, first.loading, window, cx);
-        let menu_bar = own_menu_bar().then(|| {
-            let workspace = cx.weak_entity();
-            cx.new(|cx| {
-                MenuBar::new(
-                    move |target, window, cx| {
-                        let Some(workspace) = workspace.upgrade() else { return Vec::new() };
-                        cx.global::<Registry>().menu_bar(workspace.read(cx), target, window, cx)
-                    },
-                    window,
-                    cx,
-                )
-            })
-        });
+        let menu_bar = view_options::menu_bar(cx).then(|| Self::make_menu_bar(window, cx));
         let mut workspace = Workspace {
             window_id,
             menu_bar,
@@ -190,6 +179,37 @@ impl Workspace {
     /// Whether the window has drawn a frame.
     pub fn has_drawn(&self) -> bool {
         self.drawn
+    }
+
+    /// The menu bar MigPad draws over the tabs, of the menus of the registry.
+    fn make_menu_bar(window: &mut Window, cx: &mut Context<Self>) -> Entity<MenuBar> {
+        let workspace = cx.weak_entity();
+        cx.new(|cx| {
+            MenuBar::new(
+                move |target, window, cx| {
+                    let Some(workspace) = workspace.upgrade() else { return Vec::new() };
+                    cx.global::<Registry>().menu_bar(workspace.read(cx), target, window, cx)
+                },
+                window,
+                cx,
+            )
+        })
+    }
+
+    /// Shows the menu bar MigPad draws over the tabs, or hides it: on macOS, View ▸ Menu Bar in
+    /// Window. A hidden bar gives the focus it had back to the text.
+    pub fn set_menu_bar(&mut self, shown: bool, window: &mut Window, cx: &mut Context<Self>) {
+        match (shown, self.menu_bar.is_some()) {
+            (true, false) => self.menu_bar = Some(Self::make_menu_bar(window, cx)),
+            (false, true) => {
+                let had_focus = self.menu_bar.take().is_some_and(|bar| bar.read(cx).is_active());
+                if had_focus {
+                    window.focus(&self.editor().focus_handle(cx), cx);
+                }
+            }
+            _ => return,
+        }
+        cx.notify();
     }
 
     /// Shows the find bar over the text, made the first time.
@@ -1458,6 +1478,8 @@ impl Render for Workspace {
             );
         let root = handlers.iter().fold(root, |root, handler| handler(root, cx));
         let root = match self.menu_bar.clone() {
+            // Mouse only on macOS, where Option types characters.
+            Some(menu_bar) if !view_options::menu_keys() => root.child(menu_bar),
             // Alt with a letter opens the menu with that mnemonic; Alt pressed and released alone
             // brings the keyboard to the menus; Alt held shows the mnemonics.
             Some(menu_bar) => {

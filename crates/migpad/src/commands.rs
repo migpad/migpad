@@ -130,12 +130,6 @@ impl MenuId {
     }
 }
 
-/// Whether windows have the menu bar MigPad draws: on Windows and Linux, where GPUI makes none.
-/// A debug build shows it on macOS too with `MIGPAD_MENU_BAR=1`, to try it there.
-pub fn own_menu_bar() -> bool {
-    !cfg!(target_os = "macos") || (cfg!(debug_assertions) && std::env::var_os("MIGPAD_MENU_BAR").is_some())
-}
-
 /// What a menu item is.
 enum Entry {
     Command(&'static str),

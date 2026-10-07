@@ -67,6 +67,7 @@ menu = "&Вид"
 word_wrap = "&Перенос строк"
 invisibles = "&Спецсимволы"
 indent_guides = "&Направляющие отступов"
+menu_bar = "&Меню в окне"
 
 [window]
 menu = "&Окно"

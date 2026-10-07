@@ -80,6 +80,8 @@ menu = "&View"
 word_wrap = "&Word Wrap"
 invisibles = "&Invisibles"
 indent_guides = "Indent &Guides"
+# On macOS: the menu bar of Windows and Linux in each window.
+menu_bar = "&Menu Bar in Window"
 
 [window]
 menu = "&Window"
