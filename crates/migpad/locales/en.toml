@@ -45,13 +45,75 @@ redo = "&Redo"
 cut = "Cu&t"
 copy = "&Copy"
 paste = "&Paste"
+delete = "&Delete"
 select_all = "Select &All"
+
+[find]
+# The submenu of the Edit menu on macOS.
+menu = "&Find"
+find = "&Find…"
+# Replace… on Windows and Linux, Find and Replace… on macOS.
+replace = "R&eplace…"
+find_and_replace = "Find and R&eplace…"
+next = "Find &Next"
+previous = "Find Pre&vious"
+# The find bar over the text.
+placeholder = "Find"
+replace_placeholder = "Replace with"
+match_case = "Match Case"
+whole_word = "Whole Word"
+regex = "Regular Expression"
+replace_one = "Replace"
+replace_all = "Replace All"
+close = "Close"
+# The match found is the {index}-th of {total}.
+found = "{index} of {total}"
+found_from_top = "{index} of {total}, from the top"
+found_from_bottom = "{index} of {total}, from the bottom"
+counting = "Counting…"
+not_found = "No results"
+invalid = "Invalid expression: {reason}"
+replacing = "Replacing… {percent}"
+replaced = "Replaced: {count}"
+too_long = "The text would be longer than 4 GiB: nothing is replaced"
+
+[go_to]
+line = "&Go to Line…"
+# The hint of the field, with the number of lines of the document.
+placeholder = "Line, or line:column (1–{count})"
+invalid = "A line, or a line and a column: 120 or 120:15"
+close = "Close"
+
+[format]
+reopen = "Reopen with &Encoding"
+save = "Sa&ve with Encoding"
+line_endings = "L&ine Endings"
+lf = "&LF — Unix, macOS"
+crlf = "C&RLF — Windows"
+cr = "&CR — Classic Mac OS"
+# The groups of the encodings, by script.
+cyrillic = "&Cyrillic"
+western = "&Western European"
+central = "C&entral European"
+baltic = "&Baltic"
+other_european = "&Other European"
+greek = "&Greek"
+turkish = "&Turkish"
+hebrew = "&Hebrew"
+arabic = "&Arabic"
+vietnamese = "&Vietnamese"
+thai = "Tha&i"
+chinese = "Chi&nese"
+japanese = "&Japanese"
+korean = "&Korean"
 
 [view]
 menu = "&View"
 word_wrap = "&Word Wrap"
 invisibles = "&Invisibles"
 indent_guides = "Indent &Guides"
+# On macOS: the menu bar of Windows and Linux in each window.
+menu_bar = "&Menu Bar in Window"
 
 [window]
 menu = "&Window"
@@ -81,8 +143,13 @@ selection = "Selected: {count}"
 lines = "Lines: {count}"
 with_bom = "{encoding} with BOM"
 loading = "Loading… {percent}"
+encoding_tip = "Reopen or save in another encoding"
+line_ending_tip = "Line endings"
 
 [notice]
+gone_from_disk = "“{file}” is not on disk any more: there is nothing to read again."
+too_large_to_convert = "“{file}” is a large file: its line endings are not converted."
+changes_kept = "Your changes to “{file}” are in File ▸ Recently Closed."
 close = "Close"
 open_failed = "Could not open “{file}”: {reason}."
 no_permission = "no permission to read it"

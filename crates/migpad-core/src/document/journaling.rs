@@ -467,6 +467,25 @@ mod tests {
     }
 
     #[test]
+    fn a_conversion_of_line_breaks_comes_back_from_the_journal() {
+        use crate::line_ending::LineEnding;
+        let dir = TempDir::new("journal-convert");
+        let file = TempFile::new("journal-convert.txt", b"a\r\nb\r\nc\n");
+        let mut doc = journaled(&file, &dir);
+        assert_eq!(doc.format.line_ending, LineEnding::CrLf);
+        doc.convert_line_endings(LineEnding::Lf, Selection::caret(0), Instant::now()).unwrap();
+        doc.undo();
+        doc.redo();
+        let (mut back, _) = restored(recovered(&doc));
+        assert_eq!(text(&back), b"a\nb\nc\n");
+        assert_eq!(back.format.line_ending, LineEnding::Lf);
+        // Undone after the recovery, Enter follows the text again.
+        back.undo();
+        assert_eq!(text(&back), b"a\r\nb\r\nc\n");
+        assert_eq!(back.format.line_ending, LineEnding::CrLf);
+    }
+
+    #[test]
     fn the_journal_appears_on_the_first_edit() {
         let (file, dir) = (TempFile::new("journaling-first", b"hello"), TempDir::new("journaling-first"));
         let mut doc = journaled(&file, &dir);

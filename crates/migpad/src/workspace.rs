@@ -6,29 +6,34 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     App, AppContext, Context, DragMoveEvent, Entity, EntityId, ExternalPaths, FocusHandle, Focusable, MouseDownEvent,
-    MouseUpEvent, PathPromptOptions, PromptButton, PromptLevel, Render, ScrollHandle, SharedString, Subscription, Task,
-    Window, WindowHandle, WindowId, canvas, div, prelude::*, px, rgb,
+    MouseUpEvent, PathPromptOptions, Pixels, Point, PromptButton, PromptLevel, Render, ScrollHandle, SharedString,
+    Subscription, Task, Window, WindowHandle, WindowId, canvas, div, prelude::*, px, rgb,
 };
 use migpad_core::document::{Document, Fingerprint, Format, OpenAs, Opened, open};
 use migpad_core::encoding::Encoding;
 use migpad_core::history::Selection;
+use migpad_core::line_ending::LineEnding;
 use migpad_core::state::TabState;
 use migpad_core::state::session::{Rect, WindowMode, WindowState};
 use migpad_core::text::TextStore;
-use migpad_editor::EditorView;
+use migpad_editor::{ContextMenuEvent, EditorView};
 use migpad_ui::notification::NotificationBar;
-use migpad_ui::{Button, MenuBar, TabBar, TabInfo, theme};
+use migpad_ui::{Button, ContextMenu, ItemSpec, MenuBar, TabBar, TabInfo, theme};
 
-use crate::commands::{Registry, own_menu_bar, update_menus};
+use crate::commands::{self, Registry, update_menus};
+use crate::find::FindBar;
+use crate::go_to::{self, GoToBar};
 use crate::journals;
 use crate::keys;
 use crate::modules::file::NewTab;
+use crate::modules::format;
 use crate::notices::{self, Notice, NoticeAction, Topic};
 use crate::recent;
 use crate::session;
 use crate::status::{self, COUNT_STEP, Loading, SelectionCount, count_chars};
-use crate::strings::{Key, fill, tr};
+use crate::strings::{Key, fill, mnemonic, tr};
 use crate::tabs::Tabs;
+use crate::view_options;
 use crate::windows::{self, Closed, ClosedTab, ForTab, Opening, Reopening};
 
 /// The dialog of the system that opens files: several at once.
@@ -50,6 +55,9 @@ pub struct Tab {
     /// Where the view puts the selection once the file has loaded: that of a reopened tab, which
     /// the beginning shown while loading may not reach.
     pending_selection: Option<Selection>,
+    /// Where the caret goes once the file has loaded: a line and a column, from zero, that the
+    /// command line gave.
+    pending_place: Option<(usize, usize)>,
     /// Notifications over the text, each with its number in the window.
     notices: Vec<(u64, Notice)>,
     /// Whether its changes are to be dropped: the question on closing it was answered so.
@@ -60,9 +68,14 @@ pub struct Tab {
     journal_sync: Option<Task<()>>,
     /// Whether its file is not there any more: another program removed it.
     missing: bool,
+    /// Whether the encoding of its file was chosen by hand rather than guessed: reading the file
+    /// again keeps it, and the session remembers it.
+    encoding_chosen: bool,
     _observe: Subscription,
     /// Shows the progress of the loading in the status bar.
     _progress: Option<Task<()>>,
+    /// Opens the context menu of the text.
+    _context_menu: Subscription,
 }
 
 /// What the window shows in its title: the name of the active document, whether it has changes
@@ -99,7 +112,45 @@ pub struct Workspace {
     place: (Rect, WindowMode, Option<String>),
     /// Compares the files of the documents with the disk, after the window comes back.
     file_check: Option<Task<()>>,
+    /// The find bar, once it was opened, and whether it shows.
+    find_bar: Option<Entity<FindBar>>,
+    find_shown: bool,
+    /// The bar of Go to Line, once it was opened, and whether it shows.
+    go_to_bar: Option<Entity<GoToBar>>,
+    go_to_shown: bool,
+    /// The format of the document in view as the menus last showed it: they follow its changes.
+    menu_format: Option<(EntityId, Format)>,
+    /// The context menu open over the window until it closes, and the view it is of.
+    context_menu: Option<(Entity<ContextMenu>, EntityId, Subscription)>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// What a text the context menu is of can do: its commands are gray where they have nothing to do.
+#[derive(Clone, Copy, Debug, Default)]
+struct TextState {
+    selected: bool,
+    /// Not the preview of a file still loading, which takes no edits.
+    editable: bool,
+    can_undo: bool,
+    can_redo: bool,
+    empty: bool,
+    /// Whether the clipboard has text to paste.
+    clipboard: bool,
+}
+
+impl TextState {
+    /// Whether the command `id` of the context menu has something to do in the text.
+    fn can(&self, id: &str) -> bool {
+        match id {
+            "edit.undo" => self.editable && self.can_undo,
+            "edit.redo" => self.editable && self.can_redo,
+            "edit.cut" | "edit.delete" => self.editable && self.selected,
+            "edit.copy" => self.selected,
+            "edit.paste" => self.editable && self.clipboard,
+            "edit.select_all" => !self.empty,
+            _ => true,
+        }
+    }
 }
 
 /// The answer to "Save the changes?" on closing.
@@ -136,20 +187,8 @@ impl Workspace {
         });
         let window_id = window.window_handle().window_id();
         let untitled = Self::untitled_for(&first.document, [], window_id, cx);
-        let tab = Tab::new(first.document, untitled, first.loading, window, cx);
-        let menu_bar = own_menu_bar().then(|| {
-            let workspace = cx.weak_entity();
-            cx.new(|cx| {
-                MenuBar::new(
-                    move |target, window, cx| {
-                        let Some(workspace) = workspace.upgrade() else { return Vec::new() };
-                        cx.global::<Registry>().menu_bar(workspace.read(cx), target, window, cx)
-                    },
-                    window,
-                    cx,
-                )
-            })
-        });
+        let tab = Tab::new(first.document, untitled, first.loading, first.encoding_chosen, window, cx);
+        let menu_bar = view_options::menu_bar(cx).then(|| Self::make_menu_bar(window, cx));
         let mut workspace = Workspace {
             window_id,
             menu_bar,
@@ -165,6 +204,12 @@ impl Workspace {
             asking: false,
             place: session::place(window, cx),
             file_check: None,
+            find_bar: None,
+            find_shown: false,
+            go_to_bar: None,
+            go_to_shown: false,
+            menu_format: None,
+            context_menu: None,
             _subscriptions: vec![activation, appearance, moved],
         };
         workspace.settle(0, first.selection, first.notice, window, cx);
@@ -184,6 +229,174 @@ impl Workspace {
     /// Whether the window has drawn a frame.
     pub fn has_drawn(&self) -> bool {
         self.drawn
+    }
+
+    /// The menu bar MigPad draws over the tabs, of the menus of the registry.
+    fn make_menu_bar(window: &mut Window, cx: &mut Context<Self>) -> Entity<MenuBar> {
+        let workspace = cx.weak_entity();
+        cx.new(|cx| {
+            MenuBar::new(
+                move |target, window, cx| {
+                    let Some(workspace) = workspace.upgrade() else { return Vec::new() };
+                    cx.global::<Registry>().menu_bar(workspace.read(cx), target, window, cx)
+                },
+                window,
+                cx,
+            )
+        })
+    }
+
+    /// Shows the menu bar MigPad draws over the tabs, or hides it: on macOS, View ▸ Menu Bar in
+    /// Window. A hidden bar gives the focus it had back to the text.
+    pub fn set_menu_bar(&mut self, shown: bool, window: &mut Window, cx: &mut Context<Self>) {
+        match (shown, self.menu_bar.is_some()) {
+            (true, false) => self.menu_bar = Some(Self::make_menu_bar(window, cx)),
+            (false, true) => {
+                let had_focus = self.menu_bar.take().is_some_and(|bar| bar.read(cx).is_active());
+                if had_focus {
+                    window.focus(&self.editor().focus_handle(cx), cx);
+                }
+            }
+            _ => return,
+        }
+        cx.notify();
+    }
+
+    /// Shows the find bar over the text, made the first time.
+    pub fn show_find_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<FindBar> {
+        let workspace = cx.weak_entity();
+        let bar = self.find_bar.get_or_insert_with(|| cx.new(|cx| FindBar::new(workspace, window, cx))).clone();
+        if !self.find_shown {
+            self.find_shown = true;
+            cx.notify();
+        }
+        bar
+    }
+
+    /// Hides the find bar; tells whether it showed.
+    pub fn hide_find_bar(&mut self, cx: &mut Context<Self>) -> bool {
+        let shown = std::mem::take(&mut self.find_shown);
+        if shown {
+            cx.notify();
+        }
+        shown
+    }
+
+    /// The view that typing goes to: the field of a bar with the focus, or the view of the document.
+    pub fn input_target(&self, window: &Window, cx: &App) -> Entity<EditorView> {
+        let find = self.find_bar_shown().and_then(|bar| bar.read(cx).focused_field(window, cx));
+        let go_to = || self.go_to_bar_shown().and_then(|bar| bar.read(cx).focused_field(window, cx));
+        find.or_else(go_to).unwrap_or_else(|| self.editor().clone())
+    }
+
+    /// Shows the bar of Go to Line over the text, made the first time.
+    pub fn show_go_to_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<GoToBar> {
+        let workspace = cx.weak_entity();
+        let bar = self.go_to_bar.get_or_insert_with(|| cx.new(|cx| GoToBar::new(workspace, window, cx))).clone();
+        if !self.go_to_shown {
+            self.go_to_shown = true;
+            cx.notify();
+        }
+        bar
+    }
+
+    /// Hides the bar of Go to Line; tells whether it showed.
+    pub fn hide_go_to_bar(&mut self, cx: &mut Context<Self>) -> bool {
+        let shown = std::mem::take(&mut self.go_to_shown);
+        if shown {
+            cx.notify();
+        }
+        shown
+    }
+
+    /// The bar of Go to Line, if it shows.
+    pub fn go_to_bar_shown(&self) -> Option<&Entity<GoToBar>> {
+        self.go_to_bar.as_ref().filter(|_| self.go_to_shown)
+    }
+
+    /// Opens the context menu of the text of `target` — a document or a field — as `event` asks:
+    /// its commands act there, those with nothing to do there gray.
+    pub fn open_context_menu(
+        &mut self,
+        target: &Entity<EditorView>,
+        event: &ContextMenuEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let view = target.read(cx);
+        let doc = view.document().read(cx);
+        let selection = view.selection();
+        let text = TextState {
+            selected: selection.anchor != selection.head,
+            editable: !doc.is_preview(),
+            can_undo: doc.can_undo(),
+            can_redo: doc.can_redo(),
+            empty: doc.text().is_empty(),
+            clipboard: cx.read_from_clipboard().and_then(|item| item.text()).is_some_and(|text| !text.is_empty()),
+        };
+        let items = cx.global::<Registry>().context_menu(|id| text.can(id));
+        self.show_menu(items, event.position, event.keyboard, Some(target.entity_id()), window, cx);
+    }
+
+    /// Shows a menu of `items` at `position` in the window, over the text of the view `of` if it
+    /// is of one: the menu of the system on macOS, one MigPad draws on Windows and Linux. The
+    /// action chosen goes to where the focus is. `keyboard` if a key opened it.
+    pub fn show_menu(
+        &mut self,
+        items: Vec<ItemSpec>,
+        position: Point<Pixels>,
+        keyboard: bool,
+        of: Option<EntityId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        #[cfg(target_os = "macos")]
+        {
+            let _ = (keyboard, of);
+            // Once the event that asked for it is handled: the menu runs a loop of its own.
+            cx.spawn_in(window, async move |_, cx| {
+                let chosen = crate::native_menu::pop_up(&items, position);
+                if let Some(action) = chosen.and_then(|path| migpad_ui::action_at(&items, &path)) {
+                    let _ = cx.update(|window, cx| window.dispatch_action(action, cx));
+                }
+            })
+            .detach();
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let menu = cx.new(|cx| ContextMenu::new(items, position, keyboard, window, cx));
+            let closed = cx.subscribe_in(&menu, window, |workspace, _, _: &gpui::DismissEvent, _, cx| {
+                workspace.context_menu = None;
+                cx.notify();
+            });
+            self.context_menu = Some((menu, of.unwrap_or(cx.entity_id()), closed));
+            cx.notify();
+        }
+    }
+
+    /// Puts the caret of the tab at `index` at `column` of `line`, both from zero, the tab shown: at
+    /// once, or once its file has loaded — the beginning shown meanwhile may not reach that line.
+    pub fn go_to_place(
+        &mut self,
+        index: usize,
+        line: usize,
+        column: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate(index, window, cx);
+        let Some(tab) = self.tabs.get_mut(index) else { return };
+        if tab.document.read(cx).is_preview() {
+            tab.pending_place = Some((line, column));
+            tab.pending_selection = None;
+            return;
+        }
+        go_to::go_to(self, line, column, window, cx);
+    }
+
+    /// The find bar, if it shows.
+    pub fn find_bar_shown(&self) -> Option<&Entity<FindBar>> {
+        self.find_bar.as_ref().filter(|_| self.find_shown)
     }
 
     /// The document of the active tab.
@@ -226,11 +439,29 @@ impl Workspace {
         document.read(cx).path.is_none().then(|| windows::untitled_number(own, Some(window), cx))
     }
 
-    /// Adds a tab at the end and switches to it.
+    /// Adds a tab at the end and switches to it. A file opened into a window whose only tab is an
+    /// untitled document never used — empty, without history or notifications — takes its place.
     pub fn add_tab(&mut self, tab: ForTab, window: &mut Window, cx: &mut Context<Self>) {
+        let unused = self.tabs.len() == 1 && {
+            let only = self.tabs.active();
+            let doc = only.document.read(cx);
+            doc.path.is_none() && doc.text().is_empty() && !doc.can_undo() && only.notices.is_empty()
+        };
+        if unused && tab.document.read(cx).path.is_some() {
+            let replaced = Tab::new(tab.document, None, tab.loading, tab.encoding_chosen, window, cx);
+            let gone = self.tabs.replace(0, replaced);
+            gone.document.update(cx, |doc, _| doc.remove_journal());
+            self.settle(0, tab.selection, tab.notice, window, cx);
+            self.reveal_tab = true;
+            window.focus(&self.editor().focus_handle(cx), cx);
+            self.update_title(window, cx);
+            update_menus(Some(self), cx);
+            cx.notify();
+            return;
+        }
         let numbers: Vec<u32> = self.untitled_numbers().collect();
         let untitled = Self::untitled_for(&tab.document, numbers, self.window_id, cx);
-        let index = self.tabs.push(Tab::new(tab.document, untitled, tab.loading, window, cx));
+        let index = self.tabs.push(Tab::new(tab.document, untitled, tab.loading, tab.encoding_chosen, window, cx));
         self.settle(index, tab.selection, tab.notice, window, cx);
         self.activate(index, window, cx);
     }
@@ -299,16 +530,19 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let Some(index) = self.tab_of(document) else { return };
-        // A save that failed — Save As… too — is done again to the file it aimed at.
+        // A save that failed — Save As… and Save with Encoding too — is done again to the file it
+        // aimed at, in the format it aimed at.
         let target = self.tabs.get(index).and_then(|tab| {
-            tab.notices.iter().find(|(notice, _)| *notice == id).and_then(|(_, notice)| notice.path.clone())
+            tab.notices.iter().find(|(notice, _)| *notice == id).and_then(|(_, notice)| notice.target.clone())
         });
+        let format = target.as_ref().map(|target| target.format);
+        let target = target.map(|target| target.path);
         if !matches!(action, NoticeAction::ShowFirst(_)) {
             self.close_notice(document, id, cx);
         }
         match action {
             NoticeAction::SaveInUtf8 => {
-                let format = self.tabs.get(index).map(|tab| tab.document.read(cx).format);
+                let format = format.or_else(|| self.tabs.get(index).map(|tab| tab.document.read(cx).format));
                 let format = format.map(|format| Format { encoding: Encoding::UTF_8, bom: false, ..format });
                 self.save_into(index, target, format, false, window, cx).detach();
             }
@@ -326,17 +560,18 @@ impl Workspace {
                 let Some(tab) = self.tabs.get(index) else { return };
                 let (document, editor) = (tab.document.clone(), tab.editor.clone());
                 let selection = editor.read(cx).selection();
+                let format = format.unwrap_or(document.read(cx).format);
                 let replaced = document.update(cx, |doc, cx| {
-                    let result = doc.replace_losses(doc.format.encoding, selection, Instant::now());
+                    let result = doc.replace_losses(format.encoding, selection, Instant::now());
                     cx.notify();
                     result
                 });
                 let Ok(after) = replaced else { return };
                 editor.update(cx, |editor, cx| editor.select(after, window, cx));
-                self.save_into(index, target, None, true, window, cx).detach();
+                self.save_into(index, target, Some(format), true, window, cx).detach();
             }
-            NoticeAction::SaveAs => self.save_as(index, window, cx).detach(),
-            NoticeAction::LoadFromDisk => self.load_from_disk(index, window, cx),
+            NoticeAction::SaveAs => self.save_as(index, format, window, cx).detach(),
+            NoticeAction::LoadFromDisk => self.read_again(index, None, window, cx),
             NoticeAction::KeepMine => self.keep_mine(index, cx),
         }
     }
@@ -360,7 +595,48 @@ impl Workspace {
 
     pub fn save_as_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let index = self.tabs.active_index();
-        self.save_as(index, window, cx).detach();
+        self.save_as(index, None, window, cx).detach();
+    }
+
+    /// File ▸ Save with Encoding: the document of the active tab goes to its file in `encoding`,
+    /// with a byte order mark or without — whether or not it has changes; an untitled one goes to a
+    /// file chosen in the dialog of the system.
+    pub fn save_with_encoding(&mut self, encoding: Encoding, bom: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let index = self.tabs.active_index();
+        let doc = self.document().read(cx);
+        if doc.is_preview() {
+            return;
+        }
+        let format = Format { encoding, bom, ..doc.format };
+        self.save(index, Some(format), false, window, cx).detach();
+    }
+
+    /// File ▸ Reopen with Encoding: the file of the active tab is read again in `encoding`, the
+    /// caret where it was. Changes of the document are not lost: its text goes among the closed
+    /// tabs, which the tab tells.
+    pub fn reopen_with_encoding(&mut self, encoding: Encoding, window: &mut Window, cx: &mut Context<Self>) {
+        let index = self.tabs.active_index();
+        self.read_again(index, Some(encoding), window, cx);
+    }
+
+    /// Edit ▸ Line Endings: every line break of the document of the active tab becomes `to`, as
+    /// one undo step, and Enter inserts it from now on. Not in a large file.
+    pub fn convert_line_endings(&mut self, to: LineEnding, window: &mut Window, cx: &mut Context<Self>) {
+        let (document, editor) = (self.document().clone(), self.editor().clone());
+        if document.read(cx).is_large() {
+            let title = Self::tab_title(self.tabs.active(), cx);
+            return self.notify(notices::too_large_to_convert(&title), cx);
+        }
+        let selection = editor.read(cx).selection();
+        let converted = document.update(cx, |doc, cx| {
+            let converted = doc.convert_line_endings(to, selection, Instant::now());
+            cx.notify();
+            converted
+        });
+        if let Ok(Some(after)) = converted {
+            editor.update(cx, |editor, cx| editor.select(after, window, cx));
+        }
+        update_menus(Some(self), cx);
     }
 
     /// Saves the document of the tab at `index` to its file in `format`, or in its own format; an
@@ -378,7 +654,7 @@ impl Workspace {
     ) -> Task<bool> {
         let Some(tab) = self.tabs.get(index) else { return Task::ready(false) };
         let doc = tab.document.read(cx);
-        let Some(path) = doc.path.clone() else { return self.save_as(index, window, cx) };
+        let Some(path) = doc.path.clone() else { return self.save_as(index, format, window, cx) };
         // Nothing to write: the file is as it was read or saved, and so is the text.
         if format.is_none() && !doc.is_modified() && doc.disk.is_some() && Fingerprint::of_path(&path).ok() == doc.disk
         {
@@ -414,6 +690,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> bool {
         let Some(document) = self.tabs.get(index).map(|tab| tab.document.clone()) else { return false };
+        let previous = document.read(cx).format.encoding;
         let format = format.unwrap_or(document.read(cx).format);
         let result = document.update(cx, |doc, cx| {
             let result = doc.save(&path, format, accept_losses);
@@ -424,11 +701,15 @@ impl Workspace {
         });
         match result {
             Ok(()) => {
+                // The check marks of the encodings follow the format saved.
+                update_menus(Some(self), cx);
                 // An untitled document has a name now: its number is free for a new one; a file that
                 // was gone is there again.
                 if let Some(tab) = self.tabs.get_mut(index) {
                     tab.untitled = None;
                     tab.missing = false;
+                    // Saved in another encoding: a choice, which reading the file again keeps.
+                    tab.encoding_chosen |= format.encoding != previous;
                 }
                 self.clear_notices(index, Topic::Save, cx);
                 self.clear_notices(index, Topic::Disk, cx);
@@ -440,7 +721,7 @@ impl Workspace {
                 true
             }
             Err(error) => {
-                let notice = notices::save_failed(document.read(cx), &path, format.encoding.name(), &error);
+                let notice = notices::save_failed(document.read(cx), &path, format, &error);
                 if let Some(notice) = notice {
                     self.notify_tab(index, notice, cx);
                 }
@@ -450,8 +731,15 @@ impl Workspace {
     }
 
     /// Saves the document of the tab at `index` to a file chosen in the dialog of the system,
-    /// next to its own file or in the home folder, under its name; tells whether it was saved.
-    pub fn save_as(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) -> Task<bool> {
+    /// next to its own file or in the home folder, under its name, in `format` or its own; tells
+    /// whether it was saved.
+    pub fn save_as(
+        &mut self,
+        index: usize,
+        format: Option<Format>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<bool> {
         let Some(tab) = self.tabs.get(index) else { return Task::ready(false) };
         let document = tab.document.entity_id();
         let (folder, name) = match &tab.document.read(cx).path {
@@ -466,7 +754,7 @@ impl Workspace {
             let Ok(Ok(Some(path))) = chosen.await else { return false };
             workspace
                 .update(cx, |workspace, cx| {
-                    workspace.tab_of(document).is_some_and(|index| workspace.save_to(index, path, None, false, cx))
+                    workspace.tab_of(document).is_some_and(|index| workspace.save_to(index, path, format, false, cx))
                 })
                 .unwrap_or(false)
         })
@@ -889,7 +1177,7 @@ impl Workspace {
         if open_has_changes {
             return self.add_tab(tab, window, cx);
         }
-        let replaced = Tab::new(tab.document, None, tab.loading, window, cx);
+        let replaced = Tab::new(tab.document, None, tab.loading, tab.encoding_chosen, window, cx);
         // The document replaced had no changes: it goes with its journal.
         let gone = self.tabs.replace(index, replaced);
         gone.document.update(cx, |doc, _| doc.remove_journal());
@@ -897,21 +1185,36 @@ impl Workspace {
         self.activate(index, window, cx);
     }
 
-    /// The file of the tab at `index`, changed by another program, opens as it is on disk; the
-    /// text of the tab goes among the closed tabs with its changes: it is not lost.
-    fn load_from_disk(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+    /// Reads the file of the tab at `index` again, the caret where it was: in `encoding` — Reopen
+    /// with Encoding, which is a choice — or as it was read — Load from Disk: in the encoding chosen
+    /// for it, or guessed anew. The text of the tab, if it has changes, goes among the closed tabs:
+    /// it is not lost, and Reopen with Encoding says so; Load from Disk was asked to drop them. A
+    /// file that is not there any more leaves the tab as it is.
+    fn read_again(&mut self, index: usize, encoding: Option<Encoding>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.tabs.get(index) else { return };
-        let Some(path) = tab.document.read(cx).path.clone() else { return };
+        let doc = tab.document.read(cx);
+        let Some(path) = doc.path.clone() else { return };
+        if !path.exists() {
+            let notice = notices::gone_from_disk(&Self::tab_title(tab, cx));
+            return self.notify_tab(index, notice, cx);
+        }
+        let chosen = encoding.is_some() || tab.encoding_chosen;
+        let open_as = match encoding.or(tab.encoding_chosen.then_some(doc.format.encoding)) {
+            Some(encoding) => OpenAs::Encoding(encoding),
+            None => OpenAs::Detect { tld: None },
+        };
         let selection = tab.pending_selection.unwrap_or_else(|| tab.editor.read(cx).selection());
-        // Its text, if it has changes, goes among the closed tabs, not lost.
-        let document = tab.has_changes(cx).then(|| tab.document.clone());
-        let mine = ClosedTab { document, journal: None, path: Some(path.clone()), selection };
-        match windows::open_document(&path, cx) {
+        let changes = tab.has_changes(cx);
+        let document = changes.then(|| tab.document.clone());
+        let kept = tab.encoding_chosen.then_some(doc.format.encoding);
+        let mine = ClosedTab { document, journal: None, path: Some(path.clone()), encoding: kept, selection };
+        let told = (changes && encoding.is_some()).then(|| notices::changes_kept(&Self::tab_title(tab, cx)));
+        match windows::open_file_as(&path, open_as, cx) {
             Opening::Document(document, loading) => {
-                let replaced = Tab::new(document, None, loading, window, cx);
+                let replaced = Tab::new(document, None, loading, chosen, window, cx);
                 self.tabs.replace(index, replaced);
                 windows::remember_tab(mine, cx);
-                self.settle(index, Some(selection), None, window, cx);
+                self.settle(index, Some(selection), told, window, cx);
                 self.activate(index, window, cx);
             }
             Opening::Failed(notice) => self.notify_tab(index, notice, cx),
@@ -1004,10 +1307,14 @@ impl Workspace {
         // Saved meanwhile, the document is not the one read over.
         let disk = document.read(cx).disk;
         let journals = journals::dir(cx);
+        // In the encoding chosen for it, or guessed anew: another program may have written it in
+        // another one.
+        let chosen = tab.encoding_chosen.then_some(document.read(cx).format.encoding);
         let read = cx.background_spawn({
             let path = path.clone();
             async move {
-                match open(&path, OpenAs::Detect { tld: None })? {
+                let open_as = chosen.map_or(OpenAs::Detect { tld: None }, OpenAs::Encoding);
+                match open(&path, open_as)? {
                     Opened::Complete(doc) => Ok(doc),
                     Opened::Partial { loader, .. } => loader.load(),
                 }
@@ -1072,7 +1379,8 @@ impl Workspace {
             .map(|tab| {
                 let doc = tab.document.read(cx);
                 let selection = tab.pending_selection.unwrap_or_else(|| tab.editor.read(cx).selection());
-                TabState { document: Some(doc.id()), path: doc.path.clone(), selection }
+                let encoding = tab.encoding_chosen.then_some(doc.format.encoding).filter(|_| doc.path.is_some());
+                TabState { document: Some(doc.id()), path: doc.path.clone(), encoding, selection }
             })
             .collect();
         let (bounds, mode, display) = self.place.clone();
@@ -1131,10 +1439,25 @@ impl Workspace {
             {
                 tab.editor.update(cx, |editor, cx| editor.select(selection, window, cx));
             }
+            if !tab.document.read(cx).is_preview()
+                && let Some((line, column)) = tab.pending_place.take()
+            {
+                let editor = tab.editor.clone();
+                let pos = editor.read(cx).position_at(line, column, cx);
+                editor.update(cx, |editor, cx| editor.select_centered(Selection::caret(pos), window, cx));
+            }
             self.check_losses(index, cx);
             self.journal_changed(index, cx);
         }
         self.update_title(window, cx);
+        // The check marks of the encodings and the line breaks follow the document in view, its
+        // format changed by undo, reading again or loading too.
+        let active = self.document();
+        let format = (active.entity_id(), active.read(cx).format);
+        if active.entity_id() == document && self.menu_format != Some(format) && window.is_window_active() {
+            self.menu_format = Some(format);
+            update_menus(Some(self), cx);
+        }
         cx.notify();
     }
 
@@ -1251,7 +1574,37 @@ impl Workspace {
             // The column of a caret far into a long line is found a part a frame.
             window.request_animation_frame();
         }
-        status::status_bar(tab.document.read(cx), caret, selection, tab.loading.as_ref())
+        let (encoding, line_ending) = (cx.weak_entity(), cx.weak_entity());
+        let menus = status::Menus {
+            encoding: Box::new(move |position, window, cx| {
+                let _ = encoding.update(cx, |workspace, cx| workspace.open_encoding_menu(position, window, cx));
+            }),
+            line_ending: Box::new(move |position, window, cx| {
+                let _ = line_ending.update(cx, |workspace, cx| workspace.open_line_ending_menu(position, window, cx));
+            }),
+        };
+        status::status_bar(tab.document.read(cx), caret, selection, tab.loading.as_ref(), Some(menus))
+    }
+
+    /// The menu of the encoding in the status bar: Reopen with Encoding and Save with Encoding.
+    fn open_encoding_menu(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let submenu = |label: Key, items| ItemSpec::Submenu {
+            label: tr(label).into(),
+            mnemonic: mnemonic(label),
+            enabled: true,
+            items: commands::own_items(items),
+        };
+        let items = vec![
+            submenu(Key::FormatReopen, format::reopen_items(Some(self), cx)),
+            submenu(Key::FormatSave, format::save_items(Some(self), cx)),
+        ];
+        self.show_menu(items, position, false, None, window, cx);
+    }
+
+    /// The menu of the line breaks in the status bar: those of Edit ▸ Line Endings.
+    fn open_line_ending_menu(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let items = cx.global::<Registry>().command_items(&format::LINE_ENDINGS, self, cx);
+        self.show_menu(items, position, false, None, window, cx);
     }
 
     /// The bar of tabs, shown even with one tab; its button opens a new tab, as File > New does.
@@ -1299,6 +1652,7 @@ impl Tab {
         document: Entity<Document>,
         untitled: Option<u32>,
         loading: Option<Loading>,
+        encoding_chosen: bool,
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) -> Tab {
@@ -1311,6 +1665,9 @@ impl Tab {
         });
         let observe = cx.observe_in(&document, window, |workspace, document, window, cx| {
             workspace.document_changed(document.entity_id(), window, cx)
+        });
+        let context_menu = cx.subscribe_in(&editor, window, |workspace, editor, event, window, cx| {
+            workspace.open_context_menu(editor, event, window, cx)
         });
         // The status bar shows how far the file has loaded, a few times a second; a load that
         // stopped short is told over the text.
@@ -1337,13 +1694,16 @@ impl Tab {
             untitled,
             loading,
             pending_selection: None,
+            pending_place: None,
             notices: Vec::new(),
             discarded: false,
             losses_checked: false,
             journal_sync: None,
             missing: false,
+            encoding_chosen,
             _observe: observe,
             _progress: progress,
+            _context_menu: context_menu,
         }
     }
 
@@ -1375,6 +1735,7 @@ impl Tab {
             document: self.has_changes(cx).then(|| self.document.clone()),
             journal: None,
             path: doc.path.clone(),
+            encoding: self.encoding_chosen.then_some(doc.format.encoding).filter(|_| doc.path.is_some()),
             selection: self.pending_selection.unwrap_or_else(|| self.editor.read(cx).selection()),
         }
     }
@@ -1400,6 +1761,15 @@ impl Render for Workspace {
                 window.request_animation_frame();
             }
         }
+        // The selection of the documents shows in full color while the find bar works on them, and
+        // that of the text of a context menu while it is open, as the menu has the focus.
+        let menu_of = self.context_menu.as_ref().map(|(_, target, _)| *target);
+        for tab in self.tabs.iter() {
+            let emphasized = self.find_shown || menu_of == Some(tab.editor.entity_id());
+            if tab.editor.read(cx).is_emphasized() != emphasized {
+                tab.editor.update(cx, |editor, cx| editor.set_emphasized(emphasized, cx));
+            }
+        }
         let handlers = cx.global::<Registry>().window_handlers();
         let root = div()
             .key_context("Workspace")
@@ -1415,6 +1785,8 @@ impl Render for Workspace {
             );
         let root = handlers.iter().fold(root, |root, handler| handler(root, cx));
         let root = match self.menu_bar.clone() {
+            // Mouse only on macOS, where Option types characters.
+            Some(menu_bar) if !view_options::menu_keys() => root.child(menu_bar),
             // Alt with a letter opens the menu with that mnemonic; Alt pressed and released alone
             // brings the keyboard to the menus; Alt held shows the mnemonics.
             Some(menu_bar) => {
@@ -1472,8 +1844,32 @@ impl Render for Workspace {
         .size_0();
         root.child(self.tab_bar(window, cx))
             .children(self.notification_bars(cx))
+            .children(self.find_bar_shown().cloned())
+            .children(self.go_to_bar_shown().cloned())
+            .children(self.context_menu.as_ref().map(|(menu, ..)| menu.clone()))
             .child(div().flex_1().min_h_0().child(self.editor().clone()))
             .child(status_bar)
             .child(drops)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_context_menu_grays_what_has_nothing_to_do() {
+        let none = TextState { editable: true, empty: true, ..TextState::default() };
+        let all = ["edit.undo", "edit.redo", "edit.cut", "edit.copy", "edit.paste", "edit.delete", "edit.select_all"];
+        assert!(all.iter().all(|id| !none.can(id)), "an empty text without a selection, history or clipboard");
+        let selected = TextState { selected: true, ..none };
+        assert!(selected.can("edit.cut") && selected.can("edit.copy") && selected.can("edit.delete"));
+        let full = TextState { selected: true, can_undo: true, can_redo: true, clipboard: true, ..none };
+        assert!(all.iter().filter(|id| **id != "edit.select_all").all(|id| full.can(id)));
+        // The preview of a file still loading: copying only.
+        let preview = TextState { editable: false, ..full };
+        let can: Vec<&str> = all.iter().copied().filter(|id| preview.can(id)).collect();
+        assert_eq!(can, ["edit.copy"]);
+        assert!(TextState { empty: false, ..none }.can("edit.select_all"));
     }
 }

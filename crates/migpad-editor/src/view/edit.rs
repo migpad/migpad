@@ -51,6 +51,7 @@ impl EditorView {
             edited
         });
         if edited {
+            self.version = self.document.read(cx).version();
             // Columns and wraps of the edited line have moved; the rest are found again as needed.
             self.text_changed();
             self.selection = after;
@@ -72,6 +73,18 @@ impl EditorView {
         let range = self.selected_range();
         let after = Selection::caret(range.start + text.len());
         self.replace(range, text.as_bytes(), EditKind::Typing, after, window, cx);
+    }
+
+    /// Replaces the whole text with `text`, selected: the owner of an input field fills it. It is an
+    /// edit like any other, which undo takes back.
+    pub fn set_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.end_composition(cx);
+        let text = self.accepted(text);
+        let len = self.document.read(cx).text().len();
+        let after = Selection { anchor: 0, head: text.len() };
+        if !self.replace(0..len, text.as_bytes(), EditKind::Other, after, window, cx) {
+            self.select_all(window, cx);
+        }
     }
 
     /// Enter: the line break the document uses most.
@@ -122,6 +135,7 @@ impl EditorView {
             selection
         });
         if let Some(selection) = selection {
+            self.version = self.document.read(cx).version();
             self.text_changed();
             let doc = self.document.read(cx);
             let snap = |pos| movement::snap(doc.text(), doc.lines(), pos);

@@ -7,8 +7,8 @@ use std::time::Duration;
 use gpui::{App, Context, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Window, px};
 use migpad_core::history::Selection;
 
-use super::EditorView;
 use super::rows::RowAt;
+use super::{ContextMenuEvent, EditorView};
 use crate::movement;
 
 /// How often the text scrolls while a selection is dragged past the edges of the view.
@@ -75,6 +75,31 @@ impl EditorView {
         self.goal_x = None;
         self.restart_blink(window, cx);
         window.invalidate_character_coordinates();
+    }
+
+    /// The right button, or Ctrl with the left one on macOS: a press outside the selection puts the
+    /// caret there, one inside keeps it; then the view asks for its context menu.
+    pub(crate) fn context_click(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus, cx);
+        self.mouse_up();
+        self.marked = None;
+        self.seal_undo_step(cx);
+        if !self.geometry.track.contains(&event.position) {
+            let (at, x) = self.hit(event.position, cx);
+            let doc = self.document.read(cx);
+            let (text, lines) = (doc.text(), doc.lines());
+            let row = self.screen_row(text, lines, at, window);
+            let pos = row.boundary_at(x);
+            let range = self.selected_range();
+            if range.is_empty() || (!range.contains(&pos) && pos != range.end) {
+                self.caret_at_row_end = pos == row.shown.end && !self.last_row_of_line(text, lines, at);
+                self.selection = Selection::caret(pos);
+                self.goal_x = None;
+            }
+            self.restart_blink(window, cx);
+            window.invalidate_character_coordinates();
+        }
+        cx.emit(ContextMenuEvent { position: event.position, keyboard: false });
     }
 
     pub(crate) fn mouse_move(&mut self, event: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {

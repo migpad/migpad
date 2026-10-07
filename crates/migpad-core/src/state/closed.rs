@@ -73,10 +73,18 @@ mod tests {
 
     #[test]
     fn closed_tabs_and_windows_read_back_as_they_were_written() {
-        let tab =
-            |path: &str| TabState { document: None, path: Some(PathBuf::from(path)), selection: Selection::caret(4) };
-        let kept =
-            TabState { document: Some(DocumentId::random()), path: None, selection: Selection { anchor: 1, head: 0 } };
+        let tab = |path: &str| TabState {
+            document: None,
+            path: Some(PathBuf::from(path)),
+            encoding: Some(crate::encoding::Encoding::UTF_16LE),
+            selection: Selection::caret(4),
+        };
+        let kept = TabState {
+            document: Some(DocumentId::random()),
+            path: None,
+            encoding: None,
+            selection: Selection { anchor: 1, head: 0 },
+        };
         let closed = vec![
             ClosedState::Tab(kept),
             ClosedState::Window { tabs: vec![tab("/a.txt"), tab("/b.txt")], active: 1 },

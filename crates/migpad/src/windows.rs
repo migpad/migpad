@@ -40,6 +40,8 @@ pub struct ClosedTab {
     /// document comes again from it.
     pub journal: Option<DocumentId>,
     pub path: Option<PathBuf>,
+    /// The encoding chosen by hand for its file: it opens so again, not guessed anew.
+    pub encoding: Option<Encoding>,
     pub selection: Selection,
 }
 
@@ -56,11 +58,12 @@ impl ClosedTab {
 
     fn to_state(&self, cx: &App) -> TabState {
         let document = self.document.as_ref().map(|document| document.read(cx).id()).or(self.journal);
-        TabState { document, path: self.path.clone(), selection: self.selection }
+        TabState { document, path: self.path.clone(), encoding: self.encoding, selection: self.selection }
     }
 
     fn from_state(tab: TabState) -> ClosedTab {
-        ClosedTab { document: None, journal: tab.document, path: tab.path, selection: tab.selection }
+        let (journal, path, encoding, selection) = (tab.document, tab.path, tab.encoding, tab.selection);
+        ClosedTab { document: None, journal, path, encoding, selection }
     }
 }
 
@@ -219,19 +222,27 @@ pub struct ForTab {
     pub loading: Option<Loading>,
     pub selection: Option<Selection>,
     pub notice: Option<Notice>,
+    /// Whether the encoding of its file was chosen by hand rather than guessed: reading the file
+    /// again keeps it.
+    pub encoding_chosen: bool,
 }
 
 impl ForTab {
     /// A tab for `document`, which tells nothing.
     pub fn new(document: Entity<Document>, loading: Option<Loading>, selection: Option<Selection>) -> Self {
-        ForTab { document, loading, selection, notice: None }
+        ForTab { document, loading, selection, notice: None, encoding_chosen: false }
     }
 }
 
 /// Opens the file at `path` that the user chose: in a document, as [`open_document`] does, and
 /// among the recent files, of the system and of MigPad.
 pub fn open_file(path: &Path, cx: &mut App) -> Opening {
-    let opening = open_document(path, cx);
+    open_file_as(path, OpenAs::Detect { tld: None }, cx)
+}
+
+/// Opens the file at `path` as [`open_file`] does, as `open_as` tells.
+pub fn open_file_as(path: &Path, open_as: OpenAs, cx: &mut App) -> Opening {
+    let opening = open_document_as(path, open_as, cx);
     note_opened(path, &opening, cx);
     opening
 }
@@ -255,13 +266,9 @@ fn note_opened(path: &Path, opening: &Opening, cx: &mut App) {
     }
 }
 
-/// Opens the file at `path` into a document: a large one shows its beginning at once and the
-/// whole text once the background load is done.
-pub fn open_document(path: &Path, cx: &mut App) -> Opening {
-    open_document_as(path, OpenAs::Detect { tld: None }, cx)
-}
-
-/// Opens the file at `path` into a document as `open_as` tells: in the encoding found, or in a given one.
+/// Opens the file at `path` into a document as `open_as` tells — in the encoding found, or in a
+/// given one: a large one shows its beginning at once and the whole text once the background load
+/// is done.
 pub fn open_document_as(path: &Path, open_as: OpenAs, cx: &mut App) -> Opening {
     let path = std::path::absolute(path).unwrap_or_else(|_| path.to_owned());
     match open(&path, open_as) {
@@ -324,23 +331,25 @@ pub enum Reopening {
 /// or read from its file.
 pub fn reopening(closed: ClosedTab, cx: &mut App) -> Reopening {
     let selection = Some(closed.selection);
+    let encoding_chosen = closed.encoding.is_some();
     if let Some(document) = closed.document {
-        return Reopening::Tab(ForTab::new(document, None, selection));
+        return Reopening::Tab(ForTab { encoding_chosen, ..ForTab::new(document, None, selection) });
     }
     let mut failure = None;
     if let Some(id) = closed.journal {
         match session::recover(id, closed.path.as_deref(), cx) {
             Recovery::Document(document, notice) => {
-                return Reopening::Tab(ForTab { document, loading: None, selection, notice });
+                return Reopening::Tab(ForTab { document, loading: None, selection, notice, encoding_chosen });
             }
             Recovery::Failed(notice) => failure = Some(notice),
             Recovery::FromFile => {}
         }
     }
     let Some(path) = closed.path else { return failure.map_or(Reopening::Nothing, Reopening::Failed) };
-    match open_file(&path, cx) {
+    let open_as = closed.encoding.map_or(OpenAs::Detect { tld: None }, OpenAs::Encoding);
+    match open_file_as(&path, open_as, cx) {
         Opening::Document(document, loading) => {
-            Reopening::Tab(ForTab { document, loading, selection, notice: failure })
+            Reopening::Tab(ForTab { document, loading, selection, notice: failure, encoding_chosen })
         }
         Opening::Failed(notice) => Reopening::Failed(notice),
     }
@@ -353,6 +362,13 @@ pub fn same_file(a: &Path, b: &Path) -> bool {
         std::fs::canonicalize(path).or_else(|_| std::path::absolute(path)).unwrap_or_else(|_| path.to_owned())
     };
     a == b || resolve(a) == resolve(b)
+}
+
+/// The window used last: the active one, or the one in front, or any.
+pub fn last_active(cx: &App) -> Option<WindowHandle<Workspace>> {
+    let active = cx.active_window().and_then(|window| window.downcast::<Workspace>());
+    let in_front = || cx.window_stack().into_iter().flatten().find_map(|window| window.downcast::<Workspace>());
+    active.or_else(in_front).or_else(|| workspaces(cx).next().map(|(window, _)| window))
 }
 
 /// The window and the tab that have the file at `path` open, if one does.

@@ -3,10 +3,14 @@
 
 use gpui::actions;
 
-use crate::commands::{ActivateWindow, Command, MenuId, Module, Registry, by_os, own_menu_bar};
+use crate::commands::{ActivateWindow, Command, MenuId, Module, Registry, by_os};
 use crate::strings::Key;
+use crate::view_options;
 
-actions!(window, [Minimize, Zoom, NextTab, PreviousTab, LastTab, ToggleMenuBar]);
+actions!(window, [Minimize, Zoom, NextTab, PreviousTab, LastTab, ToggleMenuBar, CloseBars]);
+
+/// Where Esc closes the bars over the text from the text: the view of a document.
+const TEXT: &str = "Editor && mode == full";
 
 /// Switches to a tab by its place from the left, from zero.
 #[derive(Clone, Debug, PartialEq, gpui::Action)]
@@ -80,8 +84,11 @@ impl Module for WindowModule {
         }
         // F10 brings the keyboard to the menu bar MigPad draws, as Alt pressed and released alone
         // does — the menu bar watches for that itself.
-        let menu_keys: &[&str] = if own_menu_bar() { &["f10"] } else { &[] };
+        let menu_keys: &[&str] = if view_options::menu_keys() { &["f10"] } else { &[] };
         registry.add(Command::new("window.menu_bar", Key::WindowMenu, ToggleMenuBar).keys(menu_keys), None);
+        // Esc in the text closes the find bar and the bar of Go to Line; without them, it goes on.
+        registry
+            .add(Command::new("window.close_bars", Key::FindClose, CloseBars).keys(&["escape"]).context(TEXT), None);
 
         registry.on_window_action(|_, _: &Minimize, window, _| window.minimize_window());
         registry.on_window_action(|_, _: &Zoom, window, _| window.zoom_window());
@@ -91,6 +98,12 @@ impl Module for WindowModule {
             .on_window_action(|workspace, select: &SelectTab, window, cx| workspace.select(Some(select.0), window, cx));
         registry.on_window_action(|workspace, _: &LastTab, window, cx| workspace.select(None, window, cx));
         registry.on_window_action(|workspace, _: &ToggleMenuBar, window, cx| workspace.toggle_menu_bar(window, cx));
+        registry.on_window_action(|workspace, _: &CloseBars, _, cx| {
+            let closed = workspace.hide_go_to_bar(cx) | workspace.hide_find_bar(cx);
+            if !closed {
+                cx.propagate();
+            }
+        });
         registry.on_app_action(|action: &ActivateWindow, cx| {
             if let Some(window) = cx.windows().into_iter().find(|window| window.window_id() == action.0) {
                 let _ = window.update(cx, |_, window, _| window.activate_window());

@@ -22,6 +22,7 @@ use crate::journals;
 use crate::notices::{self, Notice};
 use crate::recent;
 use crate::strings::{Key, tr};
+use crate::view_options;
 use crate::windows::{self, ForTab, Opening};
 use crate::workspace::Workspace;
 
@@ -36,9 +37,9 @@ struct Writer {
     active: Option<WindowId>,
     /// Writes the files a moment after the last change.
     pending: Option<Task<()>>,
-    /// What the files had when they were last written: the session, the closed tabs and the
-    /// recent files.
-    written: Option<[String; 3]>,
+    /// What the files had when they were last written: the session, the closed tabs, the recent
+    /// files and how the windows show.
+    written: Option<[String; 4]>,
     /// The program is quitting and the session is written for the last time: the windows that
     /// close now stay in it.
     done: bool,
@@ -101,6 +102,7 @@ fn write(cx: &mut App) {
     let Some(state) = journals::data(cx).map(|data| data.state()) else { return };
     let closed = closed::to_toml(&windows::closed_state(cx));
     let recent = recent::to_toml(cx);
+    let view = view_options::to_toml(cx);
     let writer = cx.default_global::<Writer>();
     if writer.done {
         return;
@@ -108,11 +110,11 @@ fn write(cx: &mut App) {
     let active = writer.active.and_then(|active| writer.windows.iter().position(|(id, _)| *id == active));
     let windows = writer.windows.iter().map(|(_, window)| window.clone()).collect();
     let session = Session { windows, active: active.unwrap_or(0) }.to_toml();
-    let files = [session, closed, recent];
+    let files = [session, closed, recent, view];
     if writer.written.as_ref() == Some(&files) {
         return;
     }
-    let result = ["session.toml", "closed.toml", "recent.toml"]
+    let result = ["session.toml", "closed.toml", "recent.toml", "view.toml"]
         .iter()
         .zip(&files)
         .try_for_each(|(name, text)| write_atomically(&state.join(name), text));
@@ -330,7 +332,8 @@ fn restore_tab(tab: &TabState, cx: &mut App) -> Restored {
     if let Some(id) = tab.document {
         match recover(id, tab.path.as_deref(), cx) {
             Recovery::Document(document, notice) => {
-                return Restored::Tab(ForTab { document, loading: None, selection, notice });
+                let encoding_chosen = tab.encoding.is_some();
+                return Restored::Tab(ForTab { document, loading: None, selection, notice, encoding_chosen });
             }
             Recovery::Failed(notice) => failure = Some(notice),
             Recovery::FromFile => {}
@@ -340,8 +343,13 @@ fn restore_tab(tab: &TabState, cx: &mut App) -> Restored {
     let Some(path) = tab.path.as_deref().filter(|path| path.exists()) else {
         return failure.map_or(Restored::Nothing, Restored::Notice);
     };
-    match windows::open_document(path, cx) {
-        Opening::Document(document, loading) => Restored::Tab(ForTab { document, loading, selection, notice: failure }),
+    // In the encoding chosen for it, not guessed anew.
+    let open_as = tab.encoding.map_or(OpenAs::Detect { tld: None }, OpenAs::Encoding);
+    match windows::open_document_as(path, open_as, cx) {
+        Opening::Document(document, loading) => {
+            let encoding_chosen = tab.encoding.is_some();
+            Restored::Tab(ForTab { document, loading, selection, notice: failure, encoding_chosen })
+        }
         Opening::Failed(notice) => Restored::Notice(notice),
     }
 }
@@ -366,7 +374,7 @@ fn orphans(dir: &Path, known: &HashSet<DocumentId>, cx: &mut App) -> Vec<ForTab>
         match recover(id, None, cx) {
             Recovery::Document(document, notice) => {
                 if document.read(cx).is_modified() {
-                    tabs.push(ForTab { document, loading: None, selection: None, notice });
+                    tabs.push(ForTab { document, loading: None, selection: None, notice, encoding_chosen: false });
                 } else {
                     document.update(cx, |doc, _| doc.remove_journal());
                 }

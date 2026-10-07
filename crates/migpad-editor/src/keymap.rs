@@ -70,7 +70,8 @@ actions!(
         Redo,
         Copy,
         Cut,
-        Paste
+        Paste,
+        ShowContextMenu
     ]
 );
 
@@ -87,6 +88,7 @@ pub(crate) fn on_edits(div: Div, cx: &mut Context<EditorView>) -> Div {
         .on_action(cx.listener(|view, _: &Copy, _, cx| view.copy(cx)))
         .on_action(cx.listener(|view, _: &Cut, window, cx| view.cut(window, cx)))
         .on_action(cx.listener(|view, _: &Paste, window, cx| view.paste(window, cx)))
+        .on_action(cx.listener(|view, _: &ShowContextMenu, _, cx| view.context_menu_at_caret(cx)))
 }
 
 /// Handles in `div` the actions that only the view of a document takes: line breaks and tabs. In
@@ -172,6 +174,9 @@ pub fn key_bindings() -> Vec<KeyBinding> {
             KeyBinding::new("ctrl-insert", Copy, context),
             KeyBinding::new("shift-delete", Cut, context),
             KeyBinding::new("shift-insert", Paste, context),
+            // The context menu at the caret, as Windows has it.
+            KeyBinding::new("shift-f10", ShowContextMenu, context),
+            KeyBinding::new("menu", ShowContextMenu, context),
         ]);
     }
     bindings

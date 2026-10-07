@@ -2,7 +2,8 @@
 //!
 //! The search runs over the bytes of the text, so invalid UTF-8 does not get in the way; the
 //! caller gives a contiguous slice (see [`Document::contiguous_text`]), from the main thread or
-//! a background one.
+//! a background one. Counting the matches of a large text or collecting their replacements can
+//! go a part at a time, see [`MatchWalk`].
 
 use std::fmt;
 use std::ops::Range;
@@ -107,44 +108,88 @@ impl Search {
 
     /// The number of matches.
     pub fn count(&self, text: &[u8]) -> usize {
-        self.regex.find_iter(text).count()
+        let mut walk = MatchWalk::new(0);
+        std::iter::from_fn(|| walk.next(self, text)).count()
     }
 
-    /// What `range` is replaced with, if it is exactly a match: `replacement` as it is for a
-    /// phrase; for a regular expression with groups (`$1`, `${name}`, `$$` for `$`) and escapes
-    /// (`\n` for `newline`, `\t`, `\\`) expanded.
-    pub fn replacement(&self, text: &[u8], range: Range<usize>, replacement: &str, newline: &[u8]) -> Option<Vec<u8>> {
+    /// What matches are replaced with: `replacement` as it is for a phrase; for a regular
+    /// expression its escapes (`\n` for `newline`, `\t`, `\\`) are turned into bytes once here,
+    /// and its groups (`$1`, `${name}`, `$$` for `$`) are expanded for each match.
+    pub fn template(&self, replacement: &str, newline: &[u8]) -> Template {
+        Template(if self.expand { unescape(replacement, newline) } else { replacement.as_bytes().to_vec() })
+    }
+
+    /// What `range` is replaced with by `template`, if it is exactly a match.
+    pub fn replacement(&self, text: &[u8], range: Range<usize>, template: &Template) -> Option<Vec<u8>> {
+        if !self.expand {
+            let found = self.regex.find_at(text, range.start)?;
+            return (found.range() == range).then(|| template.0.clone());
+        }
         let captures = self.regex.captures_at(text, range.start)?;
         if captures.get(0)?.range() != range {
             return None;
         }
-        Some(self.expand(&captures, &self.template(replacement, newline)))
+        let mut out = Vec::with_capacity(template.0.len());
+        captures.expand(&template.0, &mut out);
+        Some(out)
     }
 
-    /// The replacements of all matches, last first, so that each range still holds when the ones
-    /// before it in the list have been replaced.
-    pub fn replace_all(&self, text: &[u8], replacement: &str, newline: &[u8]) -> Vec<(Range<usize>, Vec<u8>)> {
-        let template = self.template(replacement, newline);
-        let mut replacements: Vec<_> = self
-            .regex
-            .captures_iter(text)
-            .map(|captures| (captures.get(0).expect("the whole match").range(), self.expand(&captures, &template)))
-            .collect();
-        replacements.reverse();
-        replacements
+    /// The replacements of all matches, in the order of the text.
+    pub fn replace_all(&self, text: &[u8], template: &Template) -> Vec<(Range<usize>, Vec<u8>)> {
+        let mut walk = MatchWalk::new(0);
+        std::iter::from_fn(|| walk.next(self, text))
+            .map(|found| {
+                let replacement = self.replacement(text, found.clone(), template).expect("a match just found");
+                (found, replacement)
+            })
+            .collect()
+    }
+}
+
+/// What the matches of a search are replaced with, see [`Search::template`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Template(Vec<u8>);
+
+/// A walk over the matches of a search, which can stop and go on later over the same text: a
+/// large text is counted, or its replacements collected, a part a frame. Matches do not overlap;
+/// an empty match right where the previous one ended is passed over.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MatchWalk {
+    /// Where the next search starts.
+    pos: usize,
+    /// Where the last match ended.
+    last_end: Option<usize>,
+}
+
+impl MatchWalk {
+    /// A walk from `from` on.
+    pub fn new(from: usize) -> Self {
+        MatchWalk { pos: from, last_end: None }
     }
 
-    fn template(&self, replacement: &str, newline: &[u8]) -> Vec<u8> {
-        if self.expand { unescape(replacement, newline) } else { replacement.as_bytes().to_vec() }
+    /// Where the next search starts: how far the walk has come.
+    pub fn position(&self) -> usize {
+        self.pos
     }
 
-    fn expand(&self, captures: &regex::bytes::Captures, template: &[u8]) -> Vec<u8> {
-        if !self.expand {
-            return template.to_vec();
+    /// The next match of `search` in `text`, or `None` past the last one.
+    pub fn next(&mut self, search: &Search, text: &[u8]) -> Option<Range<usize>> {
+        loop {
+            if self.pos > text.len() {
+                return None;
+            }
+            let Some(found) = search.regex.find_at(text, self.pos).map(|m| m.range()) else {
+                self.pos = text.len() + 1;
+                return None;
+            };
+            if found.is_empty() && Some(found.end) == self.last_end {
+                self.pos = next_char(text, found.end);
+                continue;
+            }
+            self.pos = if found.is_empty() { next_char(text, found.end) } else { found.end };
+            self.last_end = Some(found.end);
+            return Some(found);
         }
-        let mut out = Vec::with_capacity(template.len());
-        captures.expand(template, &mut out);
-        out
     }
 }
 
@@ -158,13 +203,26 @@ impl Document {
         selection: Selection,
         now: Instant,
     ) -> Result<usize, EditError> {
-        let newline = self.format.line_ending.as_bytes();
-        let replacements = search.replace_all(self.contiguous_text(), replacement, newline);
+        let template = search.template(replacement, self.format.line_ending.as_bytes());
+        let replacements = search.replace_all(self.contiguous_text(), &template);
+        self.apply_replacements(&replacements, selection, now)
+    }
+
+    /// Applies `replacements` — ranges of the text as it is, in its order, apart from each other —
+    /// as one undo step that starts from `selection`, which stays where it is as far as the text
+    /// allows. Returns the number of replacements.
+    pub fn apply_replacements(
+        &mut self,
+        replacements: &[(Range<usize>, Vec<u8>)],
+        selection: Selection,
+        now: Instant,
+    ) -> Result<usize, EditError> {
         if replacements.is_empty() {
             return Ok(0);
         }
+        // The last first: each range still holds when the ones after it are replaced.
         let edits: Vec<(Range<usize>, &[u8])> =
-            replacements.iter().map(|(range, text)| (range.clone(), text.as_slice())).collect();
+            replacements.iter().rev().map(|(range, text)| (range.clone(), text.as_slice())).collect();
         let len_after =
             replacements.iter().fold(self.text().len(), |len, (range, text)| len - range.len() + text.len());
         let clamp = |pos: usize| pos.min(len_after);
@@ -333,9 +391,60 @@ mod tests {
     fn only_an_exact_match_is_replaced() {
         let search = Search::new(&regex(r"\d+")).unwrap();
         let text = b"a 12 b";
-        assert_eq!(search.replacement(text, 2..4, "<$0>", b"\n"), Some(b"<12>".to_vec()));
-        assert_eq!(search.replacement(text, 2..3, "<$0>", b"\n"), None);
-        assert_eq!(search.replacement(text, 0..1, "<$0>", b"\n"), None);
+        let template = search.template("<$0>", b"\n");
+        assert_eq!(search.replacement(text, 2..4, &template), Some(b"<12>".to_vec()));
+        assert_eq!(search.replacement(text, 2..3, &template), None);
+        assert_eq!(search.replacement(text, 0..1, &template), None);
+        let search = Search::new(&phrase("12")).unwrap();
+        let template = search.template("$1", b"\n");
+        assert_eq!(search.replacement(text, 2..4, &template), Some(b"$1".to_vec()));
+        assert_eq!(search.replacement(text, 1..3, &template), None);
+    }
+
+    #[test]
+    fn a_walk_goes_on_where_it_stopped() {
+        let search = Search::new(&phrase("ab")).unwrap();
+        let text = b"ab xab abab";
+        let mut walk = MatchWalk::new(0);
+        assert_eq!(walk.next(&search, text), Some(0..2));
+        assert_eq!(walk.position(), 2);
+        // The text may be borrowed anew for each part.
+        let again = text.to_vec();
+        assert_eq!(walk.next(&search, &again), Some(4..6));
+        assert_eq!(walk.next(&search, text), Some(7..9));
+        assert_eq!(walk.next(&search, text), Some(9..11));
+        assert_eq!(walk.next(&search, text), None);
+        assert_eq!(walk.next(&search, text), None);
+        // From the middle.
+        assert_eq!(MatchWalk::new(5).next(&search, text), Some(7..9));
+    }
+
+    #[test]
+    fn a_walk_passes_empty_matches_as_find_iter_does() {
+        let walk = |pattern: &str, text: &str| {
+            let search = Search::new(&regex(pattern)).unwrap();
+            let mut walk = MatchWalk::new(0);
+            std::iter::from_fn(|| walk.next(&search, text.as_bytes())).collect::<Vec<_>>()
+        };
+        assert_eq!(walk("^", "a\nb\n"), [0..0, 2..2, 4..4]);
+        assert_eq!(walk("a*", "baab"), [0..0, 1..3, 4..4]);
+        // Empty matches stay on character boundaries.
+        assert_eq!(walk("x*", "жx"), [0..0, 2..3]);
+        assert_eq!(Search::new(&regex("a*")).unwrap().count(b"baab"), 3);
+    }
+
+    #[test]
+    fn collected_replacements_apply_as_one_step() {
+        let mut doc = document("one two one");
+        let search = Search::new(&phrase("one")).unwrap();
+        let template = search.template("1", b"\n");
+        let replacements = search.replace_all(doc.contiguous_text(), &template);
+        assert_eq!(replacements, [(0..3, b"1".to_vec()), (8..11, b"1".to_vec())]);
+        assert_eq!(doc.apply_replacements(&replacements, Selection::caret(11), Instant::now()), Ok(2));
+        assert_eq!(text(&doc), "1 two 1");
+        assert_eq!(doc.apply_replacements(&[], Selection::caret(0), Instant::now()), Ok(0));
+        assert_eq!(doc.undo(), Some(Selection::caret(11)));
+        assert_eq!(text(&doc), "one two one");
     }
 
     #[test]

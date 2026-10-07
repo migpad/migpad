@@ -53,7 +53,7 @@ Debug builds play input from the `MIGPAD_DEBUG_INPUT` environment variable throu
 MIGPAD_DEBUG_INPUT="down shift-end click:300,120,2" cargo run -- notes.txt
 ```
 
-Steps are keystrokes (`shift-end`, `cmd-a`), text as typed or committed by an input method (`type:TEXT`), text an input method composes (`mark:TEXT`, then `unmark` or `type:TEXT`), `click:X,Y` with an optional number of clicks, `press:X,Y`, `move:X,Y`, `release:X,Y` and `wait:MS`; see `crates/migpad/src/debug_input.rs`. The input bypasses the system (keyboard layouts, input methods, menus), so real keyboards and mice still need a check by hand.
+Steps are keystrokes (`shift-end`, `cmd-a`), text as typed or committed by an input method (`type:TEXT`), text an input method composes (`mark:TEXT`, then `unmark` or `type:TEXT`) — both go to the view with the focus, the document or a field of the find bar — actions by name (`action:editor::ShowContextMenu`), `click:X,Y` with an optional number of clicks, `press:X,Y`, `move:X,Y`, `release:X,Y` and `wait:MS`; see `crates/migpad/src/debug_input.rs`. The input bypasses the system (keyboard layouts, input methods, menus), so real keyboards and mice still need a check by hand.
 
 The interface is in the language of the system: Russian on a Russian system, English otherwise. The strings are in `crates/migpad/locales/`; `en.toml` and `ru.toml` have the same keys and placeholders, or the build fails; in the strings of menus `&` marks the mnemonic, the letter that chooses the item with Alt on Windows and Linux. On macOS the other language can be tried without changing the system:
 
@@ -61,7 +61,7 @@ The interface is in the language of the system: Russian on a Russian system, Eng
 cargo run -- -AppleLanguages '(en)' notes.txt
 ```
 
-The theme follows the appearance of the system; a debug build can be held light or dark, and on macOS it can show the menu bar that MigPad draws on Windows and Linux:
+The theme follows the appearance of the system; a debug build can be held light or dark. On macOS, View ▸ Menu Bar in Window shows the menu bar that MigPad draws on Windows and Linux, for the mouse; in a debug build `MIGPAD_MENU_BAR=1` shows it with its keys too — Alt, its mnemonics, F10:
 
 ```sh
 MIGPAD_THEME=dark MIGPAD_MENU_BAR=1 cargo run -- notes.txt
@@ -72,6 +72,8 @@ MigPad keeps its data — the journals of the documents, the session, the recent
 ```sh
 MIGPAD_DATA_DIR=/tmp/migpad-check cargo run -- notes.txt
 ```
+
+One MigPad runs for a folder of data: the copy that took it listens on a local channel — `migpad.sock` in the folder, a named pipe on Windows — and a next start with the same folder gives it its files (`notes.txt:120:15` with a place) and quits at once. A check that needs a copy of its own takes a folder of its own. A release build started from a terminal goes on in a process of its own and gives the terminal back; `MIGPAD_DETACHED=1` keeps it in the terminal.
 
 Input fields — the single-line mode of the editor view — can be tried in an example window with two fields, as in a find bar:
 

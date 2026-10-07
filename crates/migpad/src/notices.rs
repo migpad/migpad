@@ -4,7 +4,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use migpad_core::document::{Document, OpenError, SaveError};
+use migpad_core::document::{Document, Format, OpenError, SaveError};
 use migpad_core::encoding::Losses;
 use migpad_core::text::TextStore;
 use migpad_ui::notification::Severity;
@@ -20,13 +20,21 @@ pub struct Notice {
     pub topic: Option<Topic>,
     /// The buttons for what can be done about it.
     pub actions: Vec<NoticeAction>,
-    /// The file a failed save aimed at: its buttons save there, not to the file of the document.
-    pub path: Option<PathBuf>,
+    /// What a failed save aimed at: its buttons save there and so, not to the file of the document
+    /// in its format.
+    pub target: Option<SaveTarget>,
+}
+
+/// The file and the format a save aimed at.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SaveTarget {
+    pub path: PathBuf,
+    pub format: Format,
 }
 
 impl Notice {
     fn new(severity: Severity, message: String) -> Self {
-        Notice { severity, message, topic: None, actions: Vec::new(), path: None }
+        Notice { severity, message, topic: None, actions: Vec::new(), target: None }
     }
 }
 
@@ -83,10 +91,11 @@ pub fn load_failed(path: &Path, error: &OpenError) -> Notice {
     Notice::new(Severity::Error, message)
 }
 
-/// `doc` was not saved to `path` in the encoding `encoding`: what was in the way, and what can be
-/// done. Nothing to tell for a preview, which cannot be saved at all.
-pub fn save_failed(doc: &Document, path: &Path, encoding: &str, error: &SaveError) -> Option<Notice> {
+/// `doc` was not saved to `path` in `format`: what was in the way, and what can be done. Nothing
+/// to tell for a preview, which cannot be saved at all.
+pub fn save_failed(doc: &Document, path: &Path, format: Format, error: &SaveError) -> Option<Notice> {
     let file = file_name(path);
+    let encoding = format.encoding.name();
     let line_of = |losses: &Losses| {
         let first = losses.first.unwrap_or(0).min(doc.text().len());
         (first, number(doc.lines().line_of(first) as u64 + 1))
@@ -101,7 +110,7 @@ pub fn save_failed(doc: &Document, path: &Path, encoding: &str, error: &SaveErro
                 message: fill(Key::NoticeEncodeLosses, &values),
                 topic: Some(Topic::Save),
                 actions: vec![NoticeAction::SaveInUtf8, NoticeAction::ShowFirst(first), NoticeAction::SaveReplacing],
-                path: None,
+                target: None,
             }
             .with_decoding(decoding)
         }
@@ -114,7 +123,7 @@ pub fn save_failed(doc: &Document, path: &Path, encoding: &str, error: &SaveErro
                 message: fill(Key::NoticeDecodedLosses, &values),
                 topic: Some(Topic::Save),
                 actions: vec![NoticeAction::ShowFirst(first), NoticeAction::SaveReplacing, NoticeAction::SaveAs],
-                path: None,
+                target: None,
             }
         }
         SaveError::PermissionDenied(_) => Notice {
@@ -122,18 +131,18 @@ pub fn save_failed(doc: &Document, path: &Path, encoding: &str, error: &SaveErro
             message: fill(Key::NoticeNoWritePermission, &[("file", &file)]),
             topic: Some(Topic::Save),
             actions: vec![NoticeAction::SaveAs],
-            path: None,
+            target: None,
         },
         SaveError::Io(error) => Notice {
             severity: Severity::Error,
             message: fill(Key::NoticeSaveFailed, &[("file", &file), ("reason", &write_reason(error))]),
             topic: Some(Topic::Save),
             actions: vec![NoticeAction::SaveAs],
-            path: None,
+            target: None,
         },
         SaveError::Preview => return None,
     };
-    Some(Notice { path: Some(path.to_owned()), ..notice })
+    Some(Notice { target: Some(SaveTarget { path: path.to_owned(), format }), ..notice })
 }
 
 impl Notice {
@@ -162,7 +171,7 @@ pub fn changed_while_closed(file: &str) -> Notice {
         message: fill(Key::NoticeChangedWhileClosed, &[("file", file)]),
         topic: Some(Topic::Disk),
         actions: vec![NoticeAction::LoadFromDisk, NoticeAction::KeepMine],
-        path: None,
+        target: None,
     }
 }
 
@@ -174,7 +183,7 @@ pub fn changed_on_disk(file: &str) -> Notice {
         message: fill(Key::NoticeChangedOnDisk, &[("file", file)]),
         topic: Some(Topic::Disk),
         actions: vec![NoticeAction::LoadFromDisk, NoticeAction::KeepMine],
-        path: None,
+        target: None,
     }
 }
 
@@ -183,6 +192,23 @@ pub fn changed_on_disk(file: &str) -> Notice {
 pub fn changes_set_aside(file: &str) -> Notice {
     let message = fill(Key::NoticeChangesSetAside, &[("file", file)]);
     Notice { topic: Some(Topic::Disk), ..Notice::new(Severity::Warning, message) }
+}
+
+/// The file `file` was read again in another encoding, and the changes of its text went among the
+/// closed tabs.
+pub fn changes_kept(file: &str) -> Notice {
+    Notice::new(Severity::Info, fill(Key::NoticeChangesKept, &[("file", file)]))
+}
+
+/// The file `file` is not on disk any more: there is nothing to read again.
+pub fn gone_from_disk(file: &str) -> Notice {
+    Notice::new(Severity::Warning, fill(Key::NoticeGoneFromDisk, &[("file", file)]))
+}
+
+/// The line breaks of the large file `file` are not converted: that would take a walk over all of
+/// it, and its undo step would keep two copies of it.
+pub fn too_large_to_convert(file: &str) -> Notice {
+    Notice::new(Severity::Info, fill(Key::NoticeTooLargeToConvert, &[("file", file)]))
 }
 
 /// Another running copy of MigPad holds the folder of data: this one keeps nothing there.
@@ -246,6 +272,10 @@ mod tests {
     use super::*;
     use crate::strings::{LANGUAGE_LOCK, Language, set_language};
 
+    fn format(encoding: &str) -> Format {
+        Format { encoding: migpad_core::encoding::Encoding::for_name(encoding).unwrap(), ..Format::default() }
+    }
+
     #[test]
     fn errors_of_opening_are_told_by_their_kind() {
         let _lock = LANGUAGE_LOCK.lock();
@@ -279,19 +309,19 @@ mod tests {
         let path = Path::new("/notes/plan.txt");
         let lost = Losses { count: 1, first: Some(6) };
         let error = SaveError::Losses { encoding: lost, decoding: Losses::default() };
-        let notice = save_failed(&doc, path, "windows-1251", &error).unwrap();
+        let notice = save_failed(&doc, path, format("windows-1251"), &error).unwrap();
         assert_eq!(
             notice.message,
             "Characters windows-1251 cannot hold: 1, the first on line 3. “plan.txt” is not saved."
         );
         assert_eq!(notice.actions, [NoticeAction::SaveInUtf8, NoticeAction::ShowFirst(6), NoticeAction::SaveReplacing]);
         let denied = SaveError::PermissionDenied(io::Error::from(io::ErrorKind::PermissionDenied));
-        let notice = save_failed(&doc, path, "UTF-8", &denied).unwrap();
+        let notice = save_failed(&doc, path, format("UTF-8"), &denied).unwrap();
         assert_eq!((notice.severity, notice.actions), (Severity::Error, vec![NoticeAction::SaveAs]));
-        assert_eq!(save_failed(&doc, path, "UTF-8", &SaveError::Preview), None);
+        assert_eq!(save_failed(&doc, path, format("UTF-8"), &SaveError::Preview), None);
         set_language(Language::Russian);
         let error = SaveError::Losses { encoding: Losses::default(), decoding: lost };
-        let notice = save_failed(&doc, path, "UTF-16LE", &error).unwrap();
+        let notice = save_failed(&doc, path, format("UTF-16LE"), &error).unwrap();
         assert!(
             notice.message.starts_with("Мест «plan.txt», нечитаемых в кодировке UTF-16LE при открытии: 1"),
             "{}",
@@ -319,7 +349,7 @@ mod tests {
             "Changes to “plan.txt” are no longer kept safe from a crash: the journal could not be written (the disk is full)."
         );
         let error = SaveError::Io(io::Error::from(io::ErrorKind::StorageFull));
-        let notice = save_failed(&Document::new(), Path::new("/notes/plan.txt"), "UTF-8", &error).unwrap();
+        let notice = save_failed(&Document::new(), Path::new("/notes/plan.txt"), format("UTF-8"), &error).unwrap();
         assert_eq!(notice.message, "Could not save “plan.txt”: the disk is full.");
     }
 

@@ -14,8 +14,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
-    App, Bounds, Context, Entity, FocusHandle, Focusable, Pixels, Render, ScrollWheelEvent, Subscription, Task, Window,
-    div, point, prelude::*, px, size,
+    App, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, Pixels, Point, Render, ScrollWheelEvent,
+    SharedString, Subscription, Task, Window, div, point, prelude::*, px, size,
 };
 use migpad_core::document::Document;
 use migpad_core::history::Selection;
@@ -43,6 +43,15 @@ const BLINK: Duration = Duration::from_millis(500);
 const MIN_WRAP_CELLS: usize = 8;
 /// Bytes of a long line walked at a time to find the column of the caret.
 pub const COLUMN_STEP: usize = 4 << 20;
+
+/// The view asks for its context menu: the right button pressed at `position` in the window, or
+/// the keys of the menu, which open it at the caret.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ContextMenuEvent {
+    pub position: Point<Pixels>,
+    /// Whether a key asked: the menu highlights its first item then.
+    pub keyboard: bool,
+}
 
 /// The view of a document in a window, or the one line of an input field.
 pub struct EditorView {
@@ -94,9 +103,20 @@ pub struct EditorView {
     /// Whether the next layout scrolls to show the caret: the view of a selection set before it
     /// knew its size.
     reveal_pending: bool,
+    /// Whether that scroll puts the row of the caret in the middle of the view, if it is out of
+    /// view: a jump to a line.
+    center_pending: bool,
     /// Whether the blinking caret is shown at the moment.
     caret_on: bool,
     blink: Option<Task<()>>,
+    /// What an empty input field shows, faint: what it is for.
+    placeholder: Option<SharedString>,
+    /// Whether the selection shows as if the view had the focus, while its window is active: a
+    /// find bar works on it.
+    emphasized: bool,
+    /// The version of the text as the view last edited or saw it: a text changed past the view
+    /// ends what an input method composes, whose range is of the old text.
+    version: u64,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -118,6 +138,7 @@ impl EditorView {
 
     fn create(document: Entity<Document>, single_line: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle().tab_stop(single_line);
+        let version = document.read(cx).version();
         let subscriptions = vec![
             cx.observe(&document, |view, _, cx| view.document_changed(cx)),
             cx.on_focus(&focus, window, Self::restart_blink),
@@ -150,8 +171,12 @@ impl EditorView {
             drag: None,
             autoscroll: None,
             reveal_pending: false,
+            center_pending: false,
             caret_on: true,
             blink: None,
+            placeholder: None,
+            emphasized: false,
+            version,
             _subscriptions: subscriptions,
         }
     }
@@ -182,6 +207,23 @@ impl EditorView {
         window.invalidate_character_coordinates();
     }
 
+    /// Selects as [`EditorView::select`] does, and puts the row of the caret in the middle of the
+    /// view if it is out of view: Go to Line jumps so.
+    pub fn select_centered(&mut self, selection: Selection, window: &mut Window, cx: &mut Context<Self>) {
+        self.select(selection, window, cx);
+        self.center_pending = true;
+    }
+
+    /// The place at `column` of `line`, both from zero, as the status bar counts columns: a tab
+    /// reaches to its stop, any other character takes one column. A column inside a tab is the
+    /// place before it; past the end of the line, its end. A line past the last is the last.
+    pub fn position_at(&self, line: usize, column: usize, cx: &App) -> usize {
+        let doc = self.document.read(cx);
+        let (text, lines) = (doc.text(), doc.lines());
+        let (range, _) = lines.line_range(text, line.min(lines.count() - 1));
+        self.columns.char_at(text, &range, column).0
+    }
+
     /// The line of the caret and its column on screen, both from zero: a tab reaches to its stop,
     /// any other character takes one column. The column of a caret far into a long line takes
     /// walking the line up to it: each call walks it [`COLUMN_STEP`] further, and the column is
@@ -199,6 +241,24 @@ impl EditorView {
     pub fn text(&self, cx: &App) -> String {
         let text = self.document.read(cx).text();
         String::from_utf8_lossy(&text.to_vec(0..text.len())).into_owned()
+    }
+
+    /// What the input field shows, faint, while it is empty: what it is for.
+    pub fn set_placeholder(&mut self, placeholder: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.placeholder = Some(placeholder.into());
+        cx.notify();
+    }
+
+    /// Whether the selection shows as if the view had the focus, see [`EditorView::set_emphasized`].
+    pub fn is_emphasized(&self) -> bool {
+        self.emphasized
+    }
+
+    /// Shows the selection as if the view had the focus while its window is active, or as usual: a
+    /// find bar that has the focus shows what it found so.
+    pub fn set_emphasized(&mut self, emphasized: bool, cx: &mut Context<Self>) {
+        self.emphasized = emphasized;
+        cx.notify();
     }
 
     /// The height of an input field: one line. The view of a document takes what it is given.
@@ -257,10 +317,16 @@ impl EditorView {
         }
     }
 
-    /// Keeps the selection where the caret can be once the text has changed under it.
+    /// Keeps the selection where the caret can be once the text has changed under it. A change that
+    /// did not come through the view — replacing all, converting line breaks, reading the file
+    /// again — ends what an input method composes.
     fn document_changed(&mut self, cx: &mut Context<Self>) {
         self.text_changed();
         let doc = self.document.read(cx);
+        if doc.version() != self.version {
+            self.version = doc.version();
+            self.marked = None;
+        }
         let snap = |pos| movement::snap(doc.text(), doc.lines(), pos);
         self.selection = Selection { anchor: snap(self.selection.anchor), head: snap(self.selection.head) };
         cx.notify();
@@ -366,6 +432,9 @@ impl EditorView {
             self.scroll_x = 0.0;
         }
         if std::mem::take(&mut self.reveal_pending) {
+            if std::mem::take(&mut self.center_pending) {
+                self.center_caret(cx);
+            }
             self.reveal_caret(window, cx);
         }
         let doc = self.document.read(cx);
@@ -416,20 +485,30 @@ impl EditorView {
             text_area
         };
         let mut layout = Layout {
-            geometry: Geometry { bounds, gutter, text_area, text_left, track, thumb: None },
+            geometry: Geometry { bounds, gutter, text_area, text_left, track, thumb: None, caret: None },
             clip,
             line_height,
             lines: Vec::with_capacity(rows.len()),
             numbers: Vec::with_capacity(rows.len()),
             selection: Vec::new(),
-            selection_color: if active { colors.selection } else { colors.selection_inactive },
+            selection_color: if active || (self.emphasized && window.is_window_active()) {
+                colors.selection
+            } else {
+                colors.selection_inactive
+            },
             colors,
             caret: None,
             guides: Vec::new(),
             labels: Vec::new(),
+            placeholder: None,
             hitbox: None,
             view_hitbox: None,
         };
+        if let Some(placeholder) = self.placeholder.clone().filter(|_| self.single_line && text.is_empty()) {
+            let run = metrics.run(placeholder.len(), colors.line_number);
+            let shaped = window.text_system().shape_line(placeholder, metrics.font_size, &[run], None);
+            layout.placeholder = Some((shaped, point(text_left, top)));
+        }
         let mut widest: f64 = 0.0;
         for (i, &at) in rows.iter().enumerate() {
             let y = top + line_height * i as f32;
@@ -479,9 +558,13 @@ impl EditorView {
             let on_row = (row.shown.start..=row.shown.end).contains(&head)
                 && !(head == row.shown.end && !last && !self.caret_at_row_end)
                 && !(head == row.shown.start && !first && self.caret_at_row_end);
-            if active && self.caret_on && on_row {
+            if on_row {
                 let x = screen_x(row.x_of(head)).round() - px(CARET_WIDTH / 2.);
-                layout.caret = Some(Bounds::new(point(x, y), size(px(CARET_WIDTH), line_height)));
+                let caret = Bounds::new(point(x, y), size(px(CARET_WIDTH), line_height));
+                layout.geometry.caret = Some(caret);
+                if active && self.caret_on {
+                    layout.caret = Some(caret);
+                }
             }
             layout.lines.push((row.shaped, point(screen_x(row.x), y)));
 
@@ -530,6 +613,20 @@ impl EditorView {
         (self.widest - reach).max(0.0)
     }
 }
+
+impl EditorView {
+    /// The keys of the context menu: it opens below the caret, or at the top of the text if the
+    /// caret is out of view.
+    pub(crate) fn context_menu_at_caret(&mut self, cx: &mut Context<Self>) {
+        let at = match self.geometry.caret {
+            Some(caret) => point(caret.left(), caret.bottom()),
+            None => self.geometry.text_area.origin,
+        };
+        cx.emit(ContextMenuEvent { position: at, keyboard: true });
+    }
+}
+
+impl EventEmitter<ContextMenuEvent> for EditorView {}
 
 impl Focusable for EditorView {
     fn focus_handle(&self, _: &App) -> FocusHandle {

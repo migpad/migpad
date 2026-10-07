@@ -108,6 +108,22 @@ impl EditorView {
         cx.notify();
     }
 
+    /// Puts the row of the caret in the middle of the view, if it is out of view.
+    pub(super) fn center_caret(&mut self, cx: &App) {
+        let doc = self.document.read(cx);
+        let (text, lines) = (doc.text(), doc.lines());
+        let caret = self.caret_row(text, lines);
+        let (top, past) = self.top_row(text, lines);
+        let below = self.rows_between(text, lines, top, caret, self.page_lines + 1);
+        let in_view = below.is_some_and(|rows| rows as f64 >= past && rows as f64 + 1.0 <= past + self.view_lines);
+        if in_view {
+            return;
+        }
+        let above = ((self.view_lines - 1.0) / 2.0).max(0.0) as usize;
+        let first = self.row_above(text, lines, caret, above);
+        self.scroll_top = self.scroll_top_at(text, lines, first, 0.0).clamp(0.0, self.max_top(text, lines));
+    }
+
     /// Scrolls as little as possible to show the caret: its whole row, and a margin to the left
     /// and to the right of it.
     pub(super) fn reveal_caret(&mut self, window: &Window, cx: &App) {

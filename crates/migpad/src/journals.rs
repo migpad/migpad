@@ -14,40 +14,59 @@ use migpad_core::document::Document;
 pub const SYNC_DELAY: Duration = Duration::from_millis(1500);
 
 /// The folder of the data, if this copy of the program has one.
-struct Data {
+pub struct Data {
     dir: Option<DataDir>,
     /// Holds the folder for this copy of the program while it runs.
-    _lock: Option<File>,
+    lock: Option<File>,
     /// Another running copy holds the folder: this one keeps nothing there.
     another_copy: bool,
 }
 
 impl Global for Data {}
 
-/// Finds the folder of the data — next to the program in portable mode, at home otherwise — and
-/// takes it for this copy of the program. A second copy, which another one runs before it, keeps
-/// nothing there: their journals and sessions would mix. A debug build takes another folder from
-/// `MIGPAD_DATA_DIR`, for checks, until the settings can tell.
-pub fn init(cx: &mut App) {
-    let found = match std::env::var_os("MIGPAD_DATA_DIR") {
+impl Data {
+    /// Whether this copy holds the folder: it is the first one.
+    pub fn holds_folder(&self) -> bool {
+        self.lock.is_some()
+    }
+
+    /// Whether another running copy holds the folder.
+    pub fn another_copy(&self) -> bool {
+        self.another_copy
+    }
+}
+
+/// The folder of the data — next to the program in portable mode, at home otherwise. A debug
+/// build takes another folder from `MIGPAD_DATA_DIR`, for checks, until the settings can tell.
+pub fn find() -> Option<DataDir> {
+    match std::env::var_os("MIGPAD_DATA_DIR") {
         Some(dir) if cfg!(debug_assertions) => Some(DataDir::at(PathBuf::from(dir))),
         _ => DataDir::find(),
-    };
-    let data = match found {
+    }
+}
+
+/// Takes the folder of the data found for this copy of the program. A second copy, which another
+/// one runs before it, keeps nothing there: their journals and sessions would mix.
+pub fn take(found: Option<DataDir>) -> Data {
+    match found {
         Some(dir) => match dir.lock() {
-            Ok(Some(lock)) => Data { dir: Some(dir), _lock: Some(lock), another_copy: false },
-            Ok(None) => Data { dir: None, _lock: None, another_copy: true },
+            Ok(Some(lock)) => Data { dir: Some(dir), lock: Some(lock), another_copy: false },
+            Ok(None) => Data { dir: None, lock: None, another_copy: true },
             // The journals will tell what is wrong with the folder.
             Err(error) => {
                 eprintln!("MigPad could not take its folder of data {}: {error}", dir.root().display());
-                Data { dir: Some(dir), _lock: None, another_copy: false }
+                Data { dir: Some(dir), lock: None, another_copy: false }
             }
         },
         None => {
             eprintln!("MigPad has no home folder for its data: changes are not kept safe from a crash.");
-            Data { dir: None, _lock: None, another_copy: false }
+            Data { dir: None, lock: None, another_copy: false }
         }
-    };
+    }
+}
+
+/// Keeps the folder of the data this copy took for the program.
+pub fn init(data: Data, cx: &mut App) {
     cx.set_global(data);
 }
 

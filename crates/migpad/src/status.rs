@@ -7,14 +7,14 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use gpui::{EntityId, Task};
+use gpui::{App, EntityId, Pixels, Point, Task, Window};
 use migpad_core::document::{Document, Format, Text};
 use migpad_core::line_ending::LineEnding;
 use migpad_core::text::TextStore;
 use migpad_ui::StatusBar;
 
 use crate::notices::Notice;
-use crate::strings::{Key, fill, number, percent};
+use crate::strings::{Key, fill, number, percent, tr};
 
 /// A selection of up to this many bytes is counted at once; a longer one in parts of this size, a
 /// part a frame, so that counting gigabytes does not stop the window.
@@ -68,14 +68,25 @@ pub fn count_chars(text: &Text, range: Range<usize>) -> usize {
     bytes.utf8_chunks().map(|chunk| chunk.valid().chars().count() + usize::from(!chunk.invalid().is_empty())).sum()
 }
 
+/// Opens a menu where a field was clicked.
+pub type OpenMenu = Box<dyn Fn(Point<Pixels>, &mut Window, &mut App)>;
+
+/// What opens the menus of the fields of the encoding and of the line breaks.
+pub struct Menus {
+    pub encoding: OpenMenu,
+    pub line_ending: OpenMenu,
+}
+
 /// The fields of the status bar for a document: the caret at `(line, column)`, both from zero —
 /// the column `None` while it is found — the characters of the selection, `None` while they are
-/// counted, and how far the file has loaded, if it is loading.
+/// counted, and how far the file has loaded, if it is loading. With `menus`, the encoding and the
+/// line breaks open them.
 pub fn status_bar(
     doc: &Document,
     caret: (usize, Option<usize>),
     selection: Option<Option<usize>>,
     loading: Option<&Loading>,
+    menus: Option<Menus>,
 ) -> StatusBar {
     let (line, column) = caret;
     let column = column.map_or_else(|| "…".to_owned(), |column| number(column as u64 + 1));
@@ -93,7 +104,14 @@ pub fn status_bar(
         }
         _ => fill(Key::StatusLines, &[("count", &number(doc.lines().count() as u64))]),
     };
-    bar.right(lines).right(encoding(doc.format)).right(line_ending(doc.format.line_ending))
+    let bar = bar.right(lines);
+    let (encoding, line_ending) = (encoding(doc.format), line_ending(doc.format.line_ending));
+    match menus {
+        Some(Menus { encoding: open_encoding, line_ending: open_line_ending }) => bar
+            .right_menu(encoding, tr(Key::StatusEncodingTip), open_encoding)
+            .right_menu(line_ending, tr(Key::StatusLineEndingTip), open_line_ending),
+        None => bar.right(encoding).right(line_ending),
+    }
 }
 
 /// The encoding as the status bar names it: `windows-1251`, `UTF-8 with BOM`.
@@ -155,9 +173,9 @@ mod tests {
         doc.format = Format { encoding: Encoding::UTF_8, bom: true, line_ending: LineEnding::CrLf };
         let fields = |bar: StatusBar| bar.fields().map(str::to_owned).collect::<Vec<_>>();
         set_language(Language::English);
-        let english = fields(status_bar(&doc, (1233, Some(4)), Some(Some(15000)), None));
+        let english = fields(status_bar(&doc, (1233, Some(4)), Some(Some(15000)), None, None));
         set_language(Language::Russian);
-        let russian = fields(status_bar(&doc, (1233, None), Some(None), None));
+        let russian = fields(status_bar(&doc, (1233, None), Some(None), None, None));
         set_language(Language::English);
         assert_eq!(english, ["Ln 1,234, Col 5", "Selected: 15,000", "Lines: 1", "UTF-8 with BOM", "CRLF"]);
         assert_eq!(russian, ["Стр 1\u{202f}234, стлб …", "Выделено: …", "Строк: 1", "UTF-8 с BOM", "CRLF"]);
