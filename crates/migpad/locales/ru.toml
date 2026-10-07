@@ -62,6 +62,12 @@ invalid = "Ошибка в выражении: {reason}"
 replacing = "Замена… {percent}"
 replaced = "Заменено: {count}"
 
+[go_to]
+line = "Перейти к &строке…"
+placeholder = "Строка или строка:столбец (1–{count})"
+invalid = "Строка или строка и столбец: 120 или 120:15"
+close = "Закрыть"
+
 [view]
 menu = "&Вид"
 word_wrap = "&Перенос строк"

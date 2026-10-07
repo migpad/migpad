@@ -21,6 +21,7 @@ use migpad_ui::{Button, MenuBar, TabBar, TabInfo, theme};
 
 use crate::commands::{Registry, update_menus};
 use crate::find::FindBar;
+use crate::go_to::GoToBar;
 use crate::journals;
 use crate::keys;
 use crate::modules::file::NewTab;
@@ -104,6 +105,9 @@ pub struct Workspace {
     /// The find bar, once it was opened, and whether it shows.
     find_bar: Option<Entity<FindBar>>,
     find_shown: bool,
+    /// The bar of Go to Line, once it was opened, and whether it shows.
+    go_to_bar: Option<Entity<GoToBar>>,
+    go_to_shown: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -160,6 +164,8 @@ impl Workspace {
             file_check: None,
             find_bar: None,
             find_shown: false,
+            go_to_bar: None,
+            go_to_shown: false,
             _subscriptions: vec![activation, appearance, moved],
         };
         workspace.settle(0, first.selection, first.notice, window, cx);
@@ -234,8 +240,34 @@ impl Workspace {
 
     /// The view that typing goes to: the field of a bar with the focus, or the view of the document.
     pub fn input_target(&self, window: &Window, cx: &App) -> Entity<EditorView> {
-        let field = self.find_bar_shown().and_then(|bar| bar.read(cx).focused_field(window, cx));
-        field.unwrap_or_else(|| self.editor().clone())
+        let find = self.find_bar_shown().and_then(|bar| bar.read(cx).focused_field(window, cx));
+        let go_to = || self.go_to_bar_shown().and_then(|bar| bar.read(cx).focused_field(window, cx));
+        find.or_else(go_to).unwrap_or_else(|| self.editor().clone())
+    }
+
+    /// Shows the bar of Go to Line over the text, made the first time.
+    pub fn show_go_to_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<GoToBar> {
+        let workspace = cx.weak_entity();
+        let bar = self.go_to_bar.get_or_insert_with(|| cx.new(|cx| GoToBar::new(workspace, window, cx))).clone();
+        if !self.go_to_shown {
+            self.go_to_shown = true;
+            cx.notify();
+        }
+        bar
+    }
+
+    /// Hides the bar of Go to Line; tells whether it showed.
+    pub fn hide_go_to_bar(&mut self, cx: &mut Context<Self>) -> bool {
+        let shown = std::mem::take(&mut self.go_to_shown);
+        if shown {
+            cx.notify();
+        }
+        shown
+    }
+
+    /// The bar of Go to Line, if it shows.
+    pub fn go_to_bar_shown(&self) -> Option<&Entity<GoToBar>> {
+        self.go_to_bar.as_ref().filter(|_| self.go_to_shown)
     }
 
     /// The find bar, if it shows.
@@ -1538,6 +1570,7 @@ impl Render for Workspace {
         root.child(self.tab_bar(window, cx))
             .children(self.notification_bars(cx))
             .children(self.find_bar_shown().cloned())
+            .children(self.go_to_bar_shown().cloned())
             .child(div().flex_1().min_h_0().child(self.editor().clone()))
             .child(status_bar)
             .child(drops)

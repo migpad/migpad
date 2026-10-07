@@ -380,13 +380,9 @@ pub fn open(workspace: &mut Workspace, replacing: bool, window: &mut Window, cx:
     bar.update(cx, |bar, cx| bar.open(replacing, seed, window, cx));
 }
 
-/// Closes the bar of the window: the focus goes back to the text. Esc in the text closes it too;
-/// without a bar, Esc goes on.
+/// Closes the bar of the window: the focus goes back to the text.
 pub fn close(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
-    if !workspace.hide_find_bar(cx) {
-        cx.propagate();
-        return;
-    }
+    workspace.hide_find_bar(cx);
     let editor = workspace.editor().focus_handle(cx);
     window.focus(&editor, cx);
 }

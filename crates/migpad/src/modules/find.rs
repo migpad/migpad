@@ -25,9 +25,6 @@ actions!(
     ]
 );
 
-/// Where Esc closes the find bar from the text: the view of a document.
-const TEXT: &str = "Editor && mode == full";
-
 pub struct FindModule;
 
 impl Module for FindModule {
@@ -56,7 +53,7 @@ impl Module for FindModule {
         }
 
         // The keys of the bar: Enter finds, Shift+Enter finds back, Enter in the field of the
-        // replacement replaces, Esc closes the bar — in the text too.
+        // replacement replaces, Esc closes the bar.
         let bar = [
             Command::new("find.next_in_bar", Key::FindNext, FindNext).keys(&["enter"]),
             Command::new("find.previous_in_bar", Key::FindPrevious, FindPrevious).keys(&["shift-enter"]),
@@ -85,8 +82,6 @@ impl Module for FindModule {
         }
         let replace_one = Command::new("find.replace_one", Key::FindReplaceOne, ReplaceOne).keys(&["enter"]);
         registry.add(replace_one.context(REPLACE_CONTEXT), None);
-        let close = Command::new("find.close_from_text", Key::FindClose, CloseFind).keys(&["escape"]);
-        registry.add(close.context(TEXT), None);
 
         registry.on_window_action(|workspace, _: &Find, window, cx| find::open(workspace, false, window, cx));
         registry.on_window_action(|workspace, _: &Replace, window, cx| find::open(workspace, true, window, cx));

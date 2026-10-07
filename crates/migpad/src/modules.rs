@@ -4,12 +4,21 @@ mod app;
 mod edit;
 pub mod file;
 pub mod find;
+pub mod go_to;
 mod view;
 mod window;
 
 use crate::commands::Module;
 
 /// Every module; within a group of a menu, items go in this order.
-pub fn all() -> [&'static dyn Module; 6] {
-    [&app::AppModule, &file::FileModule, &edit::EditModule, &find::FindModule, &view::ViewModule, &window::WindowModule]
+pub fn all() -> [&'static dyn Module; 7] {
+    [
+        &app::AppModule,
+        &file::FileModule,
+        &edit::EditModule,
+        &find::FindModule,
+        &go_to::GoToModule,
+        &view::ViewModule,
+        &window::WindowModule,
+    ]
 }

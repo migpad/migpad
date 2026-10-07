@@ -6,6 +6,7 @@
 mod commands;
 mod debug_input;
 mod find;
+mod go_to;
 mod journals;
 mod keys;
 mod modules;

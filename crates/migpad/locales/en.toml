@@ -75,6 +75,13 @@ invalid = "Invalid expression: {reason}"
 replacing = "Replacing… {percent}"
 replaced = "Replaced: {count}"
 
+[go_to]
+line = "&Go to Line…"
+# The hint of the field, with the number of lines of the document.
+placeholder = "Line, or line:column (1–{count})"
+invalid = "A line, or a line and a column: 120 or 120:15"
+close = "Close"
+
 [view]
 menu = "&View"
 word_wrap = "&Word Wrap"

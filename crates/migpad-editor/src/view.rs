@@ -94,6 +94,9 @@ pub struct EditorView {
     /// Whether the next layout scrolls to show the caret: the view of a selection set before it
     /// knew its size.
     reveal_pending: bool,
+    /// Whether that scroll puts the row of the caret in the middle of the view, if it is out of
+    /// view: a jump to a line.
+    center_pending: bool,
     /// Whether the blinking caret is shown at the moment.
     caret_on: bool,
     blink: Option<Task<()>>,
@@ -155,6 +158,7 @@ impl EditorView {
             drag: None,
             autoscroll: None,
             reveal_pending: false,
+            center_pending: false,
             caret_on: true,
             blink: None,
             placeholder: None,
@@ -187,6 +191,23 @@ impl EditorView {
         self.reveal_pending = true;
         self.restart_blink(window, cx);
         window.invalidate_character_coordinates();
+    }
+
+    /// Selects as [`EditorView::select`] does, and puts the row of the caret in the middle of the
+    /// view if it is out of view: Go to Line jumps so.
+    pub fn select_centered(&mut self, selection: Selection, window: &mut Window, cx: &mut Context<Self>) {
+        self.select(selection, window, cx);
+        self.center_pending = true;
+    }
+
+    /// The place at `column` of `line`, both from zero, as the status bar counts columns: a tab
+    /// reaches to its stop, any other character takes one column. A column inside a tab is the
+    /// place before it; past the end of the line, its end. A line past the last is the last.
+    pub fn position_at(&self, line: usize, column: usize, cx: &App) -> usize {
+        let doc = self.document.read(cx);
+        let (text, lines) = (doc.text(), doc.lines());
+        let (range, _) = lines.line_range(text, line.min(lines.count() - 1));
+        self.columns.char_at(text, &range, column).0
     }
 
     /// The line of the caret and its column on screen, both from zero: a tab reaches to its stop,
@@ -391,6 +412,9 @@ impl EditorView {
             self.scroll_x = 0.0;
         }
         if std::mem::take(&mut self.reveal_pending) {
+            if std::mem::take(&mut self.center_pending) {
+                self.center_caret(cx);
+            }
             self.reveal_caret(window, cx);
         }
         let doc = self.document.read(cx);
