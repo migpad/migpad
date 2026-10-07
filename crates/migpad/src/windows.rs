@@ -40,6 +40,8 @@ pub struct ClosedTab {
     /// document comes again from it.
     pub journal: Option<DocumentId>,
     pub path: Option<PathBuf>,
+    /// The encoding its file was in: it opens so again, not guessed anew.
+    pub encoding: Option<Encoding>,
     pub selection: Selection,
 }
 
@@ -56,11 +58,12 @@ impl ClosedTab {
 
     fn to_state(&self, cx: &App) -> TabState {
         let document = self.document.as_ref().map(|document| document.read(cx).id()).or(self.journal);
-        TabState { document, path: self.path.clone(), selection: self.selection }
+        TabState { document, path: self.path.clone(), encoding: self.encoding, selection: self.selection }
     }
 
     fn from_state(tab: TabState) -> ClosedTab {
-        ClosedTab { document: None, journal: tab.document, path: tab.path, selection: tab.selection }
+        let (journal, path, encoding, selection) = (tab.document, tab.path, tab.encoding, tab.selection);
+        ClosedTab { document: None, journal, path, encoding, selection }
     }
 }
 
@@ -231,7 +234,12 @@ impl ForTab {
 /// Opens the file at `path` that the user chose: in a document, as [`open_document`] does, and
 /// among the recent files, of the system and of MigPad.
 pub fn open_file(path: &Path, cx: &mut App) -> Opening {
-    let opening = open_document(path, cx);
+    open_file_as(path, OpenAs::Detect { tld: None }, cx)
+}
+
+/// Opens the file at `path` as [`open_file`] does, as `open_as` tells.
+pub fn open_file_as(path: &Path, open_as: OpenAs, cx: &mut App) -> Opening {
+    let opening = open_document_as(path, open_as, cx);
     note_opened(path, &opening, cx);
     opening
 }
@@ -338,7 +346,8 @@ pub fn reopening(closed: ClosedTab, cx: &mut App) -> Reopening {
         }
     }
     let Some(path) = closed.path else { return failure.map_or(Reopening::Nothing, Reopening::Failed) };
-    match open_file(&path, cx) {
+    let open_as = closed.encoding.map_or(OpenAs::Detect { tld: None }, OpenAs::Encoding);
+    match open_file_as(&path, open_as, cx) {
         Opening::Document(document, loading) => {
             Reopening::Tab(ForTab { document, loading, selection, notice: failure })
         }

@@ -342,7 +342,9 @@ fn restore_tab(tab: &TabState, cx: &mut App) -> Restored {
     let Some(path) = tab.path.as_deref().filter(|path| path.exists()) else {
         return failure.map_or(Restored::Nothing, Restored::Notice);
     };
-    match windows::open_document(path, cx) {
+    // In the encoding it was in, not guessed anew.
+    let open_as = tab.encoding.map_or(OpenAs::Detect { tld: None }, OpenAs::Encoding);
+    match windows::open_document_as(path, open_as, cx) {
         Opening::Document(document, loading) => Restored::Tab(ForTab { document, loading, selection, notice: failure }),
         Opening::Failed(notice) => Restored::Notice(notice),
     }

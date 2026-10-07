@@ -10,6 +10,8 @@ mod go_to;
 mod journals;
 mod keys;
 mod modules;
+#[cfg(target_os = "macos")]
+mod native_menu;
 mod notices;
 mod recent;
 mod session;

@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use gpui::{
-    App, AppContext, Context, DismissEvent, DragMoveEvent, Entity, EntityId, ExternalPaths, FocusHandle, Focusable,
-    MouseDownEvent, MouseUpEvent, PathPromptOptions, PromptButton, PromptLevel, Render, ScrollHandle, SharedString,
+    App, AppContext, Context, DragMoveEvent, Entity, EntityId, ExternalPaths, FocusHandle, Focusable, MouseDownEvent,
+    MouseUpEvent, PathPromptOptions, Pixels, Point, PromptButton, PromptLevel, Render, ScrollHandle, SharedString,
     Subscription, Task, Window, WindowHandle, WindowId, canvas, div, prelude::*, px, rgb,
 };
 use migpad_core::document::{Document, Fingerprint, Format, OpenAs, Opened, open};
@@ -17,7 +17,7 @@ use migpad_core::state::session::{Rect, WindowMode, WindowState};
 use migpad_core::text::TextStore;
 use migpad_editor::{ContextMenuEvent, EditorView};
 use migpad_ui::notification::NotificationBar;
-use migpad_ui::{Button, ContextMenu, MenuBar, TabBar, TabInfo, theme};
+use migpad_ui::{Button, ContextMenu, ItemSpec, MenuBar, TabBar, TabInfo, theme};
 
 use crate::commands::{Registry, update_menus};
 use crate::find::FindBar;
@@ -324,14 +324,43 @@ impl Workspace {
             clipboard: cx.read_from_clipboard().and_then(|item| item.text()).is_some_and(|text| !text.is_empty()),
         };
         let items = cx.global::<Registry>().context_menu(|id| text.can(id));
-        let (position, keyboard) = (event.position, event.keyboard);
-        let menu = cx.new(|cx| ContextMenu::new(items, position, keyboard, window, cx));
-        let closed = cx.subscribe_in(&menu, window, |workspace, _, _: &DismissEvent, _, cx| {
-            workspace.context_menu = None;
+        self.show_menu(items, event.position, event.keyboard, Some(target.entity_id()), window, cx);
+    }
+
+    /// Shows a menu of `items` at `position` in the window, over the text of the view `of` if it
+    /// is of one: the menu of the system on macOS, one MigPad draws on Windows and Linux. The
+    /// action chosen goes to where the focus is. `keyboard` if a key opened it.
+    pub fn show_menu(
+        &mut self,
+        items: Vec<ItemSpec>,
+        position: Point<Pixels>,
+        keyboard: bool,
+        of: Option<EntityId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        #[cfg(target_os = "macos")]
+        {
+            let _ = (keyboard, of);
+            // Once the event that asked for it is handled: the menu runs a loop of its own.
+            cx.spawn_in(window, async move |_, cx| {
+                let chosen = crate::native_menu::pop_up(&items, position);
+                if let Some(action) = chosen.and_then(|path| migpad_ui::action_at(&items, &path)) {
+                    let _ = cx.update(|window, cx| window.dispatch_action(action, cx));
+                }
+            })
+            .detach();
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let menu = cx.new(|cx| ContextMenu::new(items, position, keyboard, window, cx));
+            let closed = cx.subscribe_in(&menu, window, |workspace, _, _: &gpui::DismissEvent, _, cx| {
+                workspace.context_menu = None;
+                cx.notify();
+            });
+            self.context_menu = Some((menu, of.unwrap_or(cx.entity_id()), closed));
             cx.notify();
-        });
-        self.context_menu = Some((menu, target.entity_id(), closed));
-        cx.notify();
+        }
     }
 
     /// The find bar, if it shows.
@@ -1058,7 +1087,8 @@ impl Workspace {
         let selection = tab.pending_selection.unwrap_or_else(|| tab.editor.read(cx).selection());
         // Its text, if it has changes, goes among the closed tabs, not lost.
         let document = tab.has_changes(cx).then(|| tab.document.clone());
-        let mine = ClosedTab { document, journal: None, path: Some(path.clone()), selection };
+        let encoding = Some(tab.document.read(cx).format.encoding);
+        let mine = ClosedTab { document, journal: None, path: Some(path.clone()), encoding, selection };
         match windows::open_document(&path, cx) {
             Opening::Document(document, loading) => {
                 let replaced = Tab::new(document, None, loading, window, cx);
@@ -1225,7 +1255,8 @@ impl Workspace {
             .map(|tab| {
                 let doc = tab.document.read(cx);
                 let selection = tab.pending_selection.unwrap_or_else(|| tab.editor.read(cx).selection());
-                TabState { document: Some(doc.id()), path: doc.path.clone(), selection }
+                let encoding = doc.path.as_ref().map(|_| doc.format.encoding);
+                TabState { document: Some(doc.id()), path: doc.path.clone(), encoding, selection }
             })
             .collect();
         let (bounds, mode, display) = self.place.clone();
@@ -1532,6 +1563,7 @@ impl Tab {
             document: self.has_changes(cx).then(|| self.document.clone()),
             journal: None,
             path: doc.path.clone(),
+            encoding: doc.path.as_ref().map(|_| doc.format.encoding),
             selection: self.pending_selection.unwrap_or_else(|| self.editor.read(cx).selection()),
         }
     }

@@ -9,7 +9,7 @@ use crate::commands::{Command, MenuId, Module, Registry, SubItem, by_os};
 use crate::recent;
 use crate::strings::Key;
 use crate::windows;
-use crate::workspace::open_options;
+use crate::workspace::{Workspace, open_options};
 
 actions!(file, [NewTab, NewWindow, Open, Save, SaveAs, ReopenClosed, CloseTab, CloseWindow, ClearRecent]);
 
@@ -129,7 +129,7 @@ fn open_window(cx: &mut App) {
 }
 
 /// File ▸ Recent Files: the files, the last first, and Clear List.
-fn recent_items(cx: &App) -> Vec<SubItem> {
+fn recent_items(_: Option<&Workspace>, cx: &App) -> Vec<SubItem> {
     let files = recent::files(cx);
     if files.is_empty() {
         return vec![SubItem::Empty(Key::FileNoRecent)];
@@ -149,7 +149,7 @@ fn recent_items(cx: &App) -> Vec<SubItem> {
 }
 
 /// File ▸ Recently Closed: the tabs and windows closed lately, the last first.
-fn closed_items(cx: &App) -> Vec<SubItem> {
+fn closed_items(_: Option<&Workspace>, cx: &App) -> Vec<SubItem> {
     let labels = windows::closed_labels(cx);
     if labels.is_empty() {
         return vec![SubItem::Empty(Key::FileNoClosed)];

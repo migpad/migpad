@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use toml_edit::{Item, Table, value};
 
 use crate::document::DocumentId;
+use crate::encoding::Encoding;
 use crate::history::Selection;
 
 /// The version of the files of the state; a file of another version is not read.
@@ -53,6 +54,8 @@ pub struct TabState {
     pub document: Option<DocumentId>,
     /// The file of the document; an untitled one has none.
     pub path: Option<PathBuf>,
+    /// The encoding the file was read or saved in: it is read so again, not guessed anew.
+    pub encoding: Option<Encoding>,
     pub selection: Selection,
 }
 
@@ -124,6 +127,9 @@ fn tab_to_table(tab: &TabState) -> Table {
     if let Some(path) = &tab.path {
         table["path"] = value(path.to_string_lossy().into_owned());
     }
+    if let Some(encoding) = tab.encoding {
+        table["encoding"] = value(encoding.name());
+    }
     table["anchor"] = value(tab.selection.anchor as i64);
     table["head"] = value(tab.selection.head as i64);
     table
@@ -140,8 +146,10 @@ fn tab_from_table(table: &Table) -> Result<TabState, StateError> {
         Some(Some(path)) => Some(PathBuf::from(path)),
         Some(None) => return Err(invalid("the path is not a string")),
     };
+    // An encoding not known any more is guessed, as for a new file.
+    let encoding = table.get("encoding").and_then(Item::as_str).and_then(Encoding::for_name);
     let selection = Selection { anchor: number(table, "anchor")?, head: number(table, "head")? };
-    Ok(TabState { document, path, selection })
+    Ok(TabState { document, path, encoding, selection })
 }
 
 /// The tables of the array `key` of `table`; none if it has no such key.

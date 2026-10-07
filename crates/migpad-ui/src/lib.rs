@@ -16,7 +16,7 @@ use gpui::{Pixels, px};
 
 pub use button::Button;
 pub use context_menu::ContextMenu;
-pub use menu::ItemSpec;
+pub use menu::{ItemSpec, action_at};
 pub use menu_bar::MenuBar;
 pub use status_bar::StatusBar;
 pub use tab_bar::{TabBar, TabInfo};

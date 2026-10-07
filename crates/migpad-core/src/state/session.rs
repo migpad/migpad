@@ -125,6 +125,7 @@ mod tests {
         let tab = |path: Option<&str>, anchor, head| TabState {
             document: Some(DocumentId::random()),
             path: path.map(PathBuf::from),
+            encoding: path.map(|_| crate::encoding::Encoding::for_name("windows-1251").unwrap()),
             selection: Selection { anchor, head },
         };
         Session {

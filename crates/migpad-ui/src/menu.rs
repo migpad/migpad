@@ -80,7 +80,7 @@ pub(crate) fn item_at<'a>(items: &'a [ItemSpec], path: &[usize]) -> Option<&'a I
 }
 
 /// The action of the enabled item at `path` of `items`, if it is one that acts.
-pub(crate) fn action_at(items: &[ItemSpec], path: &[usize]) -> Option<Box<dyn Action>> {
+pub fn action_at(items: &[ItemSpec], path: &[usize]) -> Option<Box<dyn Action>> {
     match item_at(items, path)? {
         ItemSpec::Action { action, enabled: true, .. } => Some(action.boxed_clone()),
         _ => None,

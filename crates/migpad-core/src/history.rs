@@ -22,7 +22,8 @@ pub struct Edit {
 }
 
 impl Edit {
-    fn breaks_line(&self) -> bool {
+    /// Whether it deletes or inserts a line break.
+    pub fn breaks_line(&self) -> bool {
         let breaks = |bytes: &[u8]| bytes.iter().any(|&b| b == b'\n' || b == b'\r');
         breaks(&self.deleted) || breaks(&self.inserted)
     }

@@ -162,11 +162,11 @@ struct Group {
     commands: Vec<&'static str>,
 }
 
-/// A submenu whose items a module makes each time the menus are built: the recent files, the
-/// tabs closed lately.
+/// A submenu whose items a module makes each time the menus are built — the recent files, the
+/// tabs closed lately — for the active window, if there is one.
 struct Submenu {
     label: Key,
-    items: fn(&App) -> Vec<SubItem>,
+    items: fn(Option<&Workspace>, &App) -> Vec<SubItem>,
 }
 
 /// An item of a submenu that a module makes.
@@ -182,6 +182,19 @@ pub enum SubItem {
         label: String,
         number: usize,
         action: Box<dyn Action>,
+    },
+    /// An item named by itself — an encoding — checked if it is what the document has, gray if
+    /// it cannot act.
+    Choice {
+        label: String,
+        checked: bool,
+        enabled: bool,
+        action: Box<dyn Action>,
+    },
+    /// A submenu of its own: a group of encodings.
+    Group {
+        label: Key,
+        items: Vec<SubItem>,
     },
     /// A disabled item that tells the list is empty.
     Empty(Key),
@@ -239,7 +252,13 @@ impl Registry {
 
     /// Adds a submenu labelled `label` to a group of a menu: `items` makes its items each time the
     /// menus are built.
-    pub fn add_submenu(&mut self, label: Key, items: fn(&App) -> Vec<SubItem>, menu: MenuId, group: u8) {
+    pub fn add_submenu(
+        &mut self,
+        label: Key,
+        items: fn(Option<&Workspace>, &App) -> Vec<SubItem>,
+        menu: MenuId,
+        group: u8,
+    ) {
         self.placements.push(Placement { menu, group, entry: Entry::Submenu(self.submenus.len()) });
         self.submenus.push(Submenu { label, items });
     }
@@ -312,7 +331,7 @@ impl Registry {
                             items: group.commands.iter().map(|&id| own_item(id)).collect(),
                         }
                     }
-                    Entry::Submenu(index) => self.own_submenu(&self.submenus[index], cx),
+                    Entry::Submenu(index) => self.own_submenu(&self.submenus[index], workspace, cx),
                     Entry::Services | Entry::Windows => unreachable!("passed over above"),
                 });
             }
@@ -345,36 +364,8 @@ impl Registry {
 
     /// A submenu as the menus MigPad draws show it: listed items numbered, the numbers their
     /// mnemonics up to 10.
-    fn own_submenu(&self, submenu: &Submenu, cx: &App) -> ItemSpec {
-        let items: Vec<ItemSpec> = (submenu.items)(cx)
-            .into_iter()
-            .map(|item| match item {
-                SubItem::Command { label, action } => ItemSpec::Action {
-                    label: tr(label).into(),
-                    mnemonic: mnemonic(label),
-                    keys: None,
-                    checked: None,
-                    enabled: true,
-                    action,
-                },
-                SubItem::Listed { label, number, action } => {
-                    let (label, mnemonic) = match number {
-                        1..=10 => (format!("{} {label}", number % 10), Some(0)),
-                        _ => (label, None),
-                    };
-                    ItemSpec::Action { label: label.into(), mnemonic, keys: None, checked: None, enabled: true, action }
-                }
-                SubItem::Empty(label) => ItemSpec::Action {
-                    label: tr(label).into(),
-                    mnemonic: None,
-                    keys: None,
-                    checked: None,
-                    enabled: false,
-                    action: Box::new(NoAction),
-                },
-                SubItem::Separator => ItemSpec::Separator,
-            })
-            .collect();
+    fn own_submenu(&self, submenu: &Submenu, workspace: &Workspace, cx: &App) -> ItemSpec {
+        let items = own_items((submenu.items)(Some(workspace), cx));
         ItemSpec::Submenu { label: tr(submenu.label).into(), mnemonic: mnemonic(submenu.label), enabled: true, items }
     }
 
@@ -468,7 +459,7 @@ impl Registry {
                 let items = group.commands.iter().map(|&id| self.system_item(self.command(id), workspace, cx));
                 vec![MenuItem::submenu(Menu::new(tr(group.label)).items(items))]
             }
-            Entry::Submenu(index) => vec![self.system_submenu(&self.submenus[*index], cx)],
+            Entry::Submenu(index) => vec![self.system_submenu(&self.submenus[*index], workspace, cx)],
             Entry::Services => vec![MenuItem::os_submenu(tr(Key::AppServices), SystemMenuType::Services)],
             Entry::Windows => window_list(workspace, cx),
         }
@@ -488,25 +479,82 @@ impl Registry {
 
 impl Registry {
     /// A submenu as the menus of the system show it.
-    fn system_submenu(&self, submenu: &Submenu, cx: &App) -> MenuItem {
-        let action = |name: SharedString, action: Box<dyn Action>, disabled: bool| MenuItem::Action {
-            name,
-            action,
-            os_action: None,
-            checked: false,
-            disabled,
-        };
-        let items: Vec<MenuItem> = (submenu.items)(cx)
-            .into_iter()
-            .map(|item| match item {
-                SubItem::Command { label, action: command } => action(tr(label).into(), command, false),
-                SubItem::Listed { label, action: listed, .. } => action(label.into(), listed, false),
-                SubItem::Empty(label) => action(tr(label).into(), Box::new(NoAction), true),
-                SubItem::Separator => MenuItem::separator(),
-            })
-            .collect();
+    fn system_submenu(&self, submenu: &Submenu, workspace: Option<&Workspace>, cx: &App) -> MenuItem {
+        let items = system_items((submenu.items)(workspace, cx));
         MenuItem::submenu(Menu::new(tr(submenu.label)).items(items))
     }
+}
+
+/// The items a module made for a submenu, as the menus MigPad draws show them: listed items
+/// numbered, the numbers their mnemonics up to 10.
+pub fn own_items(items: Vec<SubItem>) -> Vec<ItemSpec> {
+    items
+        .into_iter()
+        .map(|item| match item {
+            SubItem::Command { label, action } => ItemSpec::Action {
+                label: tr(label).into(),
+                mnemonic: mnemonic(label),
+                keys: None,
+                checked: None,
+                enabled: true,
+                action,
+            },
+            SubItem::Listed { label, number, action } => {
+                let (label, mnemonic) = match number {
+                    1..=10 => (format!("{} {label}", number % 10), Some(0)),
+                    _ => (label, None),
+                };
+                ItemSpec::Action { label: label.into(), mnemonic, keys: None, checked: None, enabled: true, action }
+            }
+            SubItem::Choice { label, checked, enabled, action } => ItemSpec::Action {
+                label: label.into(),
+                mnemonic: None,
+                keys: None,
+                checked: Some(checked),
+                enabled,
+                action,
+            },
+            SubItem::Group { label, items } => ItemSpec::Submenu {
+                label: tr(label).into(),
+                mnemonic: mnemonic(label),
+                enabled: true,
+                items: own_items(items),
+            },
+            SubItem::Empty(label) => ItemSpec::Action {
+                label: tr(label).into(),
+                mnemonic: None,
+                keys: None,
+                checked: None,
+                enabled: false,
+                action: Box::new(NoAction),
+            },
+            SubItem::Separator => ItemSpec::Separator,
+        })
+        .collect()
+}
+
+/// The items a module made for a submenu, as the menus of the system show them.
+fn system_items(items: Vec<SubItem>) -> Vec<MenuItem> {
+    let action = |name: SharedString, action: Box<dyn Action>, checked: bool, disabled: bool| MenuItem::Action {
+        name,
+        action,
+        os_action: None,
+        checked,
+        disabled,
+    };
+    items
+        .into_iter()
+        .map(|item| match item {
+            SubItem::Command { label, action: command } => action(tr(label).into(), command, false, false),
+            SubItem::Listed { label, action: listed, .. } => action(label.into(), listed, false, false),
+            SubItem::Choice { label, checked, enabled, action: choice } => {
+                action(label.into(), choice, checked, !enabled)
+            }
+            SubItem::Group { label, items } => MenuItem::submenu(Menu::new(tr(label)).items(system_items(items))),
+            SubItem::Empty(label) => action(tr(label).into(), Box::new(NoAction), false, true),
+            SubItem::Separator => MenuItem::separator(),
+        })
+        .collect()
 }
 
 /// The items of the open windows, the active one checked. macOS lists the windows itself in the

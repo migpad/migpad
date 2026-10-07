@@ -19,7 +19,7 @@ pub use save::SaveError;
 
 use crate::encoding::{Encoding, Losses};
 use crate::history::{Edit, EditKind, History, Selection, Transaction};
-use crate::line_ending::LineEnding;
+use crate::line_ending::{self, LineEnding};
 use crate::text::{GapBuffer, LineIndex, MAX_LEN, TextStore};
 
 /// A random identifier of a document; it names the journal file and stays the same when the
@@ -226,8 +226,11 @@ impl Document {
         for edit in transaction.edits.iter().rev() {
             apply(&mut self.text, &mut self.lines, edit.pos..edit.pos + edit.inserted.len(), &edit.deleted);
         }
-        let before = transaction.before;
+        let (before, breaks) = (transaction.before, transaction.edits.iter().any(Edit::breaks_line));
         self.version = next_version();
+        if breaks {
+            self.follow_line_endings();
+        }
         self.journal_write(journal::Journal::write_undo);
         self.journal_after_change();
         Some(before)
@@ -243,11 +246,83 @@ impl Document {
         for edit in &transaction.edits {
             apply(&mut self.text, &mut self.lines, edit.pos..edit.pos + edit.deleted.len(), &edit.inserted);
         }
-        let after = transaction.after;
+        let (after, breaks) = (transaction.after, transaction.edits.iter().any(Edit::breaks_line));
         self.version = next_version();
+        if breaks {
+            self.follow_line_endings();
+        }
         self.journal_write(journal::Journal::write_redo);
         self.journal_after_change();
         Some(after)
+    }
+
+    /// After undo or redo of line breaks — of a conversion, say — Enter inserts the line break the
+    /// text uses most again, as for a file just read. Not in a large document: that would take a
+    /// walk over all of it, and it cannot be converted anyway. The journal needs no record: undo and
+    /// redo do the same when it is read.
+    fn follow_line_endings(&mut self) {
+        if self.large {
+            return;
+        }
+        if let Some(line_ending) = LineEnding::dominant(line_ending::count(&self.text)) {
+            self.format.line_ending = line_ending;
+        }
+    }
+
+    /// Makes every line break of the text `to`, as one undo step from `selection`, and Enter insert
+    /// it from now on. Returns where the selection is in the new text — `None` if no line break had
+    /// to change, and only Enter changes.
+    pub fn convert_line_endings(
+        &mut self,
+        to: LineEnding,
+        selection: Selection,
+        now: Instant,
+    ) -> Result<Option<Selection>, EditError> {
+        if self.preview {
+            return Err(EditError::Preview);
+        }
+        let target = to.as_bytes();
+        let points = [selection.anchor, selection.head];
+        let mut mapped = points;
+        // The text from the first line break to change to the end of the last one, converted.
+        let mut span: Option<(usize, usize)> = None;
+        let mut converted = Vec::new();
+        {
+            let text = self.text.make_contiguous();
+            let mut at = 0;
+            while let Some(found) = memchr::memchr2(b'\r', b'\n', &text[at..]) {
+                let pos = at + found;
+                let len = if text[pos] == b'\r' && text.get(pos + 1) == Some(&b'\n') { 2 } else { 1 };
+                at = pos + len;
+                if &text[pos..at] == target {
+                    continue;
+                }
+                let copied = span.map_or(pos, |(_, end)| end);
+                if span.is_none() {
+                    span = Some((pos, pos));
+                }
+                converted.extend_from_slice(&text[copied..pos]);
+                converted.extend_from_slice(target);
+                span = span.map(|(start, _)| (start, at));
+                for (point, mapped) in points.iter().zip(&mut mapped) {
+                    if *point >= at {
+                        *mapped = *mapped + target.len() - len;
+                    } else if *point > pos {
+                        // Inside a CRLF: before the line break that takes its place.
+                        *mapped -= *point - pos;
+                    }
+                }
+            }
+        }
+        let format = Format { line_ending: to, ..self.format };
+        let Some((start, end)) = span else {
+            self.set_format(format);
+            return Ok(None);
+        };
+        let after = Selection { anchor: mapped[0], head: mapped[1] };
+        self.edit(&[(start..end, &converted)], selection, after, EditKind::Other, now)?;
+        self.set_format(format);
+        Ok(Some(after))
     }
 
     pub fn can_undo(&self) -> bool {
@@ -402,6 +477,52 @@ mod tests {
         doc.seal_undo_step();
         assert_eq!(doc.redo(), None);
         assert_eq!(doc.version(), version);
+    }
+
+    fn document(text: &[u8], line_ending: LineEnding) -> Document {
+        let mut doc = Document::new();
+        doc.edit(&[(0..0, text)], Selection::caret(0), Selection::caret(0), EditKind::Other, Instant::now()).unwrap();
+        doc.format.line_ending = line_ending;
+        doc
+    }
+
+    #[test]
+    fn line_breaks_convert_as_one_step_and_undo_brings_them_back() {
+        let mut doc = document(b"a\r\nb\r\nc\nd", LineEnding::CrLf);
+        let now = Instant::now();
+        // The caret before d, and a selection from inside the first CRLF to after b.
+        let after = doc.convert_line_endings(LineEnding::Lf, Selection::caret(8), now).unwrap();
+        assert_eq!(text(&doc), b"a\nb\nc\nd");
+        assert_eq!(after, Some(Selection::caret(6)));
+        assert_eq!(doc.format.line_ending, LineEnding::Lf);
+        assert_eq!(doc.undo(), Some(Selection::caret(8)));
+        assert_eq!(text(&doc), b"a\r\nb\r\nc\nd");
+        assert_eq!(doc.format.line_ending, LineEnding::CrLf, "Enter follows the text again");
+        assert_eq!(doc.redo(), Some(Selection::caret(6)));
+        assert_eq!(doc.format.line_ending, LineEnding::Lf);
+        assert!(!doc.can_redo());
+
+        let mut doc = document(b"a\nb\rc", LineEnding::Lf);
+        let selection = Selection { anchor: 1, head: 5 };
+        let after = doc.convert_line_endings(LineEnding::CrLf, selection, now).unwrap();
+        assert_eq!(text(&doc), b"a\r\nb\r\nc");
+        assert_eq!(after, Some(Selection { anchor: 1, head: 7 }));
+        let inside =
+            document(b"x\r\ny", LineEnding::CrLf).convert_line_endings(LineEnding::Cr, Selection::caret(2), now);
+        assert_eq!(inside.unwrap(), Some(Selection::caret(1)), "inside a CRLF: before its line break");
+    }
+
+    #[test]
+    fn converting_to_what_the_text_has_changes_only_enter() {
+        let mut doc = document(b"a\nb\n", LineEnding::CrLf);
+        let version = doc.version();
+        assert_eq!(doc.convert_line_endings(LineEnding::Lf, Selection::caret(1), Instant::now()), Ok(None));
+        assert_eq!((text(&doc), doc.format.line_ending), (b"a\nb\n".to_vec(), LineEnding::Lf));
+        assert_eq!(doc.version(), version, "the text did not change");
+        assert_eq!(
+            document(b"", LineEnding::Lf).convert_line_endings(LineEnding::Cr, Selection::caret(0), Instant::now()),
+            Ok(None)
+        );
     }
 
     #[test]
