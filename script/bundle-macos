@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# Makes MigPad.app and MigPad.dmg in target/bundle from release builds: a universal one, for Apple
+# silicon and Intel, or with --native one for this Mac only, for checks. --build-only builds and
+# stops; --no-build takes the builds made before — so that CI builds without the secrets of
+# signing, which no build script of a dependency is to see.
+#
+# Signs with the Developer ID of MACOS_SIGNING_IDENTITY and the hardened runtime, or ad hoc without
+# one. With a key of App Store Connect — APPLE_API_KEY_PATH (the .p8 file), APPLE_API_KEY_ID and
+# APPLE_API_ISSUER — notarizes the app and the disk image and staples their tickets to them. Puts
+# the licenses of the components, THIRD_PARTY_LICENSES (target/THIRD-PARTY-LICENSES.txt by
+# default), in the bundle if there is such a file.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+bundle=target/bundle
+app=$bundle/MigPad.app
+
+native=false build=true make=true
+for option in "$@"; do
+    case $option in
+        --native) native=true ;;
+        --build-only) make=false ;;
+        --no-build) build=false ;;
+        *) echo "unknown option $option" >&2; exit 2 ;;
+    esac
+done
+
+if $native; then
+    binaries=(target/release/migpad)
+    if $build; then
+        cargo build --release --locked -p migpad
+    fi
+else
+    binaries=(target/aarch64-apple-darwin/release/migpad target/x86_64-apple-darwin/release/migpad)
+    if $build; then
+        # GPUI draws with Metal for macOS 10.15.7 and later; Apple silicon starts at macOS 11.
+        MACOSX_DEPLOYMENT_TARGET=11.0 cargo build --release --locked -p migpad --target aarch64-apple-darwin
+        MACOSX_DEPLOYMENT_TARGET=10.15.7 cargo build --release --locked -p migpad --target x86_64-apple-darwin
+    fi
+fi
+if ! $make; then
+    exit 0
+fi
+
+rm -rf "$bundle"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+lipo -create -output "$app/Contents/MacOS/migpad" "${binaries[@]}"
+# macOS takes numbers only, without the suffix of a version in development: 0.1.0 of 0.1.0-dev.
+sed "s/@VERSION@/${version%%-*}/g" crates/migpad/resources/macos/Info.plist > "$app/Contents/Info.plist"
+plutil -lint -s "$app/Contents/Info.plist"
+printf 'APPL????' > "$app/Contents/PkgInfo"
+cp crates/migpad/resources/macos/MigPad.icns "$app/Contents/Resources/"
+licenses=${THIRD_PARTY_LICENSES:-target/THIRD-PARTY-LICENSES.txt}
+if [[ -f $licenses ]]; then
+    cp "$licenses" "$app/Contents/Resources/THIRD-PARTY-LICENSES.txt"
+fi
+
+sign() {
+    if [[ -n ${MACOS_SIGNING_IDENTITY:-} ]]; then
+        codesign --force --timestamp --options runtime --sign "$MACOS_SIGNING_IDENTITY" "$1"
+    else
+        codesign --force --sign - "$1"
+    fi
+}
+
+notarizing() {
+    [[ -n ${APPLE_API_KEY_PATH:-} && -n ${APPLE_API_KEY_ID:-} && -n ${APPLE_API_ISSUER:-} ]]
+}
+
+notarize() {
+    xcrun notarytool submit "$1" --wait \
+        --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER"
+}
+
+sign "$app"
+codesign --verify --strict "$app"
+# The app is notarized on its own too, so that a copy taken out of the disk image carries its
+# ticket and opens without the network.
+if notarizing; then
+    ditto -c -k --keepParent "$app" "$bundle/MigPad.zip"
+    notarize "$bundle/MigPad.zip"
+    rm "$bundle/MigPad.zip"
+    xcrun stapler staple "$app"
+fi
+
+# The disk image: the app and a link to Applications to drag it to.
+staging=$bundle/dmg
+mkdir -p "$staging"
+ditto "$app" "$staging/MigPad.app"
+ln -s /Applications "$staging/Applications"
+hdiutil create -quiet -volname MigPad -srcfolder "$staging" -fs HFS+ -format ULFO -ov "$bundle/MigPad.dmg"
+rm -rf "$staging"
+sign "$bundle/MigPad.dmg"
+if notarizing; then
+    notarize "$bundle/MigPad.dmg"
+    xcrun stapler staple "$bundle/MigPad.dmg"
+fi
+echo "$app"
+echo "$bundle/MigPad.dmg"

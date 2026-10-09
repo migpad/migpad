@@ -3237,8 +3237,11 @@ dependencies = [
 name = "migpad"
 version = "0.1.0-dev"
 dependencies = [
+ "block2 0.6.2",
+ "embed-resource",
  "gpui-pre",
  "gpui-pre-platform",
+ "libc",
  "migpad-core",
  "migpad-editor",
  "migpad-ui",

@@ -45,6 +45,44 @@ pub fn files(args: impl IntoIterator<Item = OsString>, cwd: &Path, exists: impl 
     files
 }
 
+/// What the installer of Windows puts after MigPad in the command that replaces Notepad: Windows
+/// starts that command with the command line Notepad was started with after it.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub const NOTEPAD: &str = "--notepad";
+
+/// The file of the command line of Notepad that Windows gives MigPad in its place, `command_line`
+/// being the whole line: `migpad.exe --notepad C:\Windows\notepad.exe C:\My notes.txt`. As for
+/// Notepad, what follows its program is one file, spaces and all, quoted or not; its options `/A`
+/// and `/W` (encodings) and `/P` (printing) are passed over. `None` for another command line.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn notepad(command_line: &str, cwd: &Path) -> Option<Vec<FileArg>> {
+    let rest = after_word(command_line.trim_start()).trim_start().strip_prefix(NOTEPAD)?;
+    if rest.starts_with(|c: char| !c.is_whitespace()) {
+        return None;
+    }
+    let mut rest = after_word(rest.trim_start()).trim();
+    while let Some(option) = rest.get(..2)
+        && ["/a", "/w", "/p"].contains(&option.to_ascii_lowercase().as_str())
+        && !rest[2..].starts_with(|c: char| !c.is_whitespace())
+    {
+        rest = rest[2..].trim_start();
+    }
+    let name = match rest.strip_prefix('"') {
+        Some(quoted) => quoted.split('"').next().unwrap_or_default(),
+        None => rest,
+    };
+    Some(Vec::from_iter((!name.is_empty()).then(|| FileArg::new(cwd.join(name)))))
+}
+
+/// The line after its first word: a quoted one ends with its closing quote, another at a space.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn after_word(line: &str) -> &str {
+    match line.strip_prefix('"') {
+        Some(quoted) => quoted.find('"').map_or("", |end| &quoted[end + 1..]),
+        None => line.find(char::is_whitespace).map_or("", |end| &line[end..]),
+    }
+}
+
 /// The file of an argument: as it is, if there is such a file; otherwise without a place at its
 /// end, `:line` or `:line:column`.
 fn file(arg: OsString, cwd: &Path, exists: &impl Fn(&Path) -> bool) -> FileArg {
@@ -113,6 +151,24 @@ mod tests {
         assert_eq!(parse(&[":12"], &[]), [at("/work/:12", None, None)]);
         // A column without a line is a line.
         assert_eq!(parse(&["a.txt:x:5"], &[]), [at("/work/a.txt:x", Some(5), None)]);
+    }
+
+    #[test]
+    fn notepad_gives_one_file_with_spaces() {
+        let cwd = Path::new("/work");
+        let notepad = |line: &str| notepad(line, cwd);
+        let file = |name: &str| Some(vec![FileArg::new(cwd.join(name))]);
+        let migpad = r#""C:\Program Files\MigPad\migpad.exe" --notepad"#;
+        assert_eq!(notepad(&format!(r"{migpad} C:\Windows\system32\notepad.exe my notes.txt")), file("my notes.txt"));
+        assert_eq!(notepad(&format!(r#"{migpad} "C:\Windows\NOTEPAD.EXE" "my notes.txt""#)), file("my notes.txt"));
+        assert_eq!(notepad(&format!("{migpad} notepad  /A  /p log.txt ")), file("log.txt"));
+        assert_eq!(notepad(&format!("{migpad} notepad /Apples.txt")), file("/Apples.txt"));
+        assert_eq!(notepad(&format!("{migpad} notepad")), Some(Vec::new()));
+        assert_eq!(notepad(&format!(r#"{migpad} "C:\Windows\notepad.exe""#)), Some(Vec::new()));
+        // Not a command line of Notepad.
+        assert_eq!(notepad(r#""C:\MigPad\migpad.exe" notes.txt"#), None);
+        assert_eq!(notepad(r#""C:\MigPad\migpad.exe" --notepads x"#), None);
+        assert_eq!(notepad("migpad"), None);
     }
 
     #[test]

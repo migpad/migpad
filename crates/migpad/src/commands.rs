@@ -122,10 +122,12 @@ pub enum MenuId {
     Edit,
     View,
     Window,
+    /// Windows and Linux: About MigPad.
+    Help,
 }
 
 impl MenuId {
-    const ALL: [MenuId; 5] = [MenuId::App, MenuId::File, MenuId::Edit, MenuId::View, MenuId::Window];
+    const ALL: [MenuId; 6] = [MenuId::App, MenuId::File, MenuId::Edit, MenuId::View, MenuId::Window, MenuId::Help];
 
     fn title(self) -> &'static str {
         self.key().map_or("MigPad", tr)
@@ -139,6 +141,7 @@ impl MenuId {
             MenuId::Edit => Some(Key::EditMenu),
             MenuId::View => Some(Key::ViewMenu),
             MenuId::Window => Some(Key::WindowMenu),
+            MenuId::Help => Some(Key::HelpMenu),
         }
     }
 }
@@ -658,6 +661,25 @@ mod tests {
             module.register(&mut registry);
         }
         registry
+    }
+
+    #[test]
+    fn about_is_where_each_system_has_it() {
+        let registry = registry();
+        let menus: Vec<(MenuId, u8)> = registry
+            .placements
+            .iter()
+            .filter(|placement| matches!(placement.entry, Entry::Command("app.about")))
+            .map(|placement| (placement.menu, placement.group))
+            .collect();
+        // First in the menu of the application on macOS; in the Help menu on Windows and Linux.
+        let first = registry
+            .placements
+            .iter()
+            .filter(|placement| placement.menu == menus[0].0)
+            .all(|placement| placement.group >= menus[0].1);
+        let menu = if cfg!(target_os = "macos") { MenuId::App } else { MenuId::Help };
+        assert_eq!((menus.len(), menus[0].0, first), (1, menu, true));
     }
 
     #[test]

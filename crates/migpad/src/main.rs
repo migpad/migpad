@@ -3,10 +3,14 @@
 // Release builds on Windows are GUI applications: no console window.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod about;
 mod appearance;
 mod cli;
+mod command_link;
 mod commands;
 mod debug_input;
+#[cfg(target_os = "macos")]
+mod default_app;
 mod find;
 mod go_to;
 mod instance;
@@ -32,6 +36,7 @@ mod view_options;
 mod windows;
 mod workspace;
 
+use std::io::Write as _;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -40,13 +45,25 @@ use gpui::App;
 use crate::instance::{Inbox, Request};
 
 fn main() {
+    // The version, for scripts and the checks of the packages: nothing starts.
+    if std::env::args_os().nth(1).is_some_and(|arg| arg == "--version") {
+        let _ = writeln!(std::io::stdout(), "MigPad {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
     let cwd = std::env::current_dir().unwrap_or_default();
-    let files = cli::files(std::env::args_os().skip(1), &cwd, |path| path.exists());
+    // In place of Notepad, the command line is Notepad's, and MigPad is a window of its own, as
+    // Notepad is: what started it waits until it closes — Git for the message of a commit — it has
+    // the rights it was started with, to save the hosts file as an administrator, and it opens an
+    // untitled document without a file. It neither gives its file to the MigPad that runs nor
+    // takes the folder of data from it, and brings back no windows.
+    let notepad = command_line().and_then(|line| cli::notepad(&line, &cwd));
+    let alone = notepad.is_some();
+    let files = notepad.unwrap_or_else(|| cli::files(std::env::args_os().skip(1), &cwd, |path| path.exists()));
     let request = Request { files };
     let found = journals::find();
     let root = found.as_ref().map(|dir| dir.root().to_path_buf());
     // Another copy runs with this folder of data: it takes the files, and this one is done.
-    let sent = root.as_ref().map(|root| instance::send(root, &request));
+    let sent = root.as_ref().filter(|_| !alone).map(|root| instance::send(root, &request));
     if let Some(Ok(())) = sent {
         return;
     }
@@ -57,7 +74,7 @@ fn main() {
     if instance::leave_terminal() {
         return;
     }
-    let data = journals::take(found);
+    let data = if alone { journals::without_folder(found) } else { journals::take(found) };
     let inbox = Inbox::new();
     match &root {
         Some(root) if data.holds_folder() => {
@@ -158,4 +175,24 @@ fn main() {
         instance::serve(inbox, cx);
         cx.activate(true);
     });
+}
+
+/// The command line as Windows gave it, before it is split into arguments: Notepad takes the rest
+/// of it as one file, spaces and all.
+#[cfg(windows)]
+fn command_line() -> Option<String> {
+    use windows_sys::Win32::System::Environment::GetCommandLineW;
+    // SAFETY: the command line of the process, a string that ends with a zero and lives as long.
+    let line = unsafe { GetCommandLineW() };
+    if line.is_null() {
+        return None;
+    }
+    // SAFETY: the characters up to the zero.
+    let length = (0..).take_while(|&i| unsafe { *line.add(i) } != 0).count();
+    Some(String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(line, length) }))
+}
+
+#[cfg(not(windows))]
+fn command_line() -> Option<String> {
+    None
 }

@@ -2,6 +2,7 @@
 //! folder `.migpad` next to the program, on macOS next to `MigPad.app`. Settings are there, and the
 //! state the program keeps for itself: journals of documents, the session, recent files.
 
+use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -20,9 +21,7 @@ impl DataDir {
     /// The folder of the data of this program: next to it if there is one there, at home
     /// otherwise; `None` without a home folder.
     pub fn find() -> Option<DataDir> {
-        // A link to the program, such as the command `migpad`, is followed to the program.
-        let exe = std::env::current_exe().ok().map(|exe| std::fs::canonicalize(&exe).unwrap_or(exe));
-        Self::find_for(exe.as_deref(), std::env::home_dir().as_deref())
+        Self::find_for(program().as_deref(), std::env::home_dir().as_deref())
     }
 
     /// The folder of the data for the program at `exe` and the home folder `home`.
@@ -72,6 +71,24 @@ impl DataDir {
     }
 }
 
+/// The program as one sees it: the file that was started, links followed — the command `migpad`
+/// is the program in its bundle — and for an AppImage the AppImage file rather than the program
+/// in the folder it mounts while it runs.
+pub fn program() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let exe = fs::canonicalize(&exe).unwrap_or(exe);
+    Some(appimage_of(&exe, std::env::var_os("APPDIR"), std::env::var_os("APPIMAGE")).unwrap_or(exe))
+}
+
+/// The AppImage file that `exe` runs from. Its runtime mounts it at `APPDIR` and names the file in
+/// `APPIMAGE`, for the programs started from it too — which are not in `APPDIR`.
+fn appimage_of(exe: &Path, appdir: Option<OsString>, appimage: Option<OsString>) -> Option<PathBuf> {
+    let appdir = PathBuf::from(appdir.filter(|dir| !dir.is_empty())?);
+    let appdir = fs::canonicalize(&appdir).unwrap_or(appdir);
+    let appimage = appimage.filter(|file| !file.is_empty())?;
+    exe.starts_with(&appdir).then(|| PathBuf::from(appimage))
+}
+
 /// The folder the program is in as one sees it: for a program inside an application bundle of
 /// macOS, `…/MigPad.app/Contents/MacOS/migpad`, the folder of the bundle.
 fn program_folder(exe: &Path) -> Option<&Path> {
@@ -117,6 +134,23 @@ mod tests {
         assert_eq!((data.root(), data.is_portable()), (programs.join(".migpad").as_path(), true));
         // Without a home folder too.
         assert_eq!(DataDir::find_for(Some(&programs.join("migpad.exe")), None), Some(data));
+    }
+
+    #[test]
+    fn an_appimage_is_the_program_its_folder_is_next_to() {
+        let mount = Some(OsString::from("/tmp/.mount_MigPad"));
+        let file = Some(OsString::from("/home/me/Apps/MigPad.AppImage"));
+        let inside = Path::new("/tmp/.mount_MigPad/usr/bin/migpad");
+        assert_eq!(
+            appimage_of(inside, mount.clone(), file.clone()),
+            Some(PathBuf::from("/home/me/Apps/MigPad.AppImage"))
+        );
+        // A program started from an AppImage has its variables, but runs from elsewhere.
+        assert_eq!(appimage_of(Path::new("/usr/bin/migpad"), mount.clone(), file.clone()), None);
+        assert_eq!(appimage_of(inside, None, file), None);
+        assert_eq!(appimage_of(inside, mount, Some(OsString::new())), None);
+        let data = DataDir::find_for(Some(Path::new("/home/me/Apps/MigPad.AppImage")), Some(Path::new("/home/me")));
+        assert_eq!(data.unwrap().root(), Path::new("/home/me/.migpad"), "no folder next to it");
     }
 
     #[test]

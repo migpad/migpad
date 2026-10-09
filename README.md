@@ -19,6 +19,14 @@ macOS, Linux (X11 and Wayland) and Windows from a single Rust codebase built on 
 
 Windows: Windows 10 version 1903 or later and Windows 11, 64-bit, with nothing else to install. Windows 7, 8 and 8.1 are not supported: neither Rust nor GPUI supports them.
 
+## Installation
+
+Download MigPad from [the releases](https://github.com/migpad/migpad/releases/latest) or [migpad.com](https://migpad.com). It never goes online, so it does not look for updates either: new versions are there.
+
+- **macOS** 10.15.7 or later, Apple silicon and Intel: `MigPad.dmg` — drag MigPad to Applications. MigPad ▸ Install the migpad Command… adds the command `migpad` for terminals; the button Make MigPad the Default in its settings opens text files in it.
+- **Windows** 10 version 1903 or later and 11, x64 and ARM64: the installer, `MigPad-x64-setup.exe` or `MigPad-arm64-setup.exe`, installs MigPad for you alone without administrator rights, or for all users; it can add the command `migpad` to `PATH`, Open in MigPad to the context menu of files in Explorer, and start MigPad in place of Notepad. The portable `MigPad-x64-portable.zip` and `MigPad-arm64-portable.zip` keep the data in the folder `.migpad` next to `migpad.exe`. MigPad for Windows is not signed yet, and SmartScreen warns about it: choose More info, then Run anyway.
+- **Linux**, x86_64 and ARM64, with glibc 2.35 or later — Ubuntu 22.04, Debian 12, Fedora 36 and later: `sudo apt install ./migpad-amd64.deb`, `sudo dnf install ./migpad-x86_64.rpm`, or `MigPad-x86_64.AppImage`, which runs as it is once made executable (`chmod +x`); a folder `.migpad` next to the AppImage makes it portable. MigPad draws with Vulkan: the system needs a Vulkan driver, such as Mesa's.
+
 ## Settings
 
 The settings are in `settings.toml` in `~/.migpad` — or in a folder `.migpad` next to the program, which makes it portable — and in the settings window: the language, the theme, the font and its size, the width of a tab, whether the windows of the last time open again. The file can be edited by hand, kept with dotfiles and linked from there; MigPad takes a change when one of its windows comes back to the front.

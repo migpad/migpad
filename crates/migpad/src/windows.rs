@@ -425,6 +425,7 @@ pub fn open_window_with(
     let options = window_options(place, cx);
     let window = cx
         .open_window(options, |window, cx| {
+            window.set_app_id(APP_ID);
             let workspace = cx.new(|cx| {
                 let mut tabs = tabs.into_iter();
                 let first =
@@ -558,12 +559,23 @@ pub fn activate_open(path: &Path, cx: &mut App) -> bool {
         .is_ok()
 }
 
+/// The identifier of the windows of MigPad on Linux, that of its desktop file and its icon: Wayland
+/// takes it with the options of a window, X11 as its class.
+pub const APP_ID: &str = "com.migpad.MigPad";
+
 /// A new window: at `place` and on its screen, or down and to the right of the active one, or in
 /// the middle of the screen.
 fn window_options(place: Option<(WindowBounds, Option<DisplayId>)>, cx: &mut App) -> WindowOptions {
     let titlebar = Some(TitlebarOptions { title: Some("MigPad".into()), ..Default::default() });
     if let Some((window_bounds, display_id)) = place {
-        return WindowOptions { window_bounds: Some(window_bounds), display_id, titlebar, ..Default::default() };
+        let app_id = Some(APP_ID.to_owned());
+        return WindowOptions {
+            window_bounds: Some(window_bounds),
+            display_id,
+            titlebar,
+            app_id,
+            ..Default::default()
+        };
     }
     let size = size(px(WINDOW_SIZE.0), px(WINDOW_SIZE.1));
     let bounds = cx
@@ -578,5 +590,6 @@ fn window_options(place: Option<(WindowBounds, Option<DisplayId>)>, cx: &mut App
             Bounds::new(origin, active.size)
         })
         .unwrap_or_else(|| Bounds::centered(None, size, cx));
-    WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), titlebar, ..Default::default() }
+    let app_id = Some(APP_ID.to_owned());
+    WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), titlebar, app_id, ..Default::default() }
 }

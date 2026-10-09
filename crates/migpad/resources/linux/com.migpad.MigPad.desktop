@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Name=MigPad
+GenericName=Text Editor
+GenericName[ru]=Текстовый редактор
+Comment=A fast text editor
+Comment[ru]=Быстрый текстовый редактор
+Keywords=text;editor;notepad;encoding;
+Keywords[ru]=текст;редактор;блокнот;кодировка;
+Exec=migpad %F
+Icon=com.migpad.MigPad
+Terminal=false
+StartupNotify=true
+StartupWMClass=com.migpad.MigPad
+Categories=Utility;TextEditor;
+MimeType=text/plain;text/markdown;text/x-log;text/csv;text/tab-separated-values;text/xml;application/xml;application/json;application/x-yaml;application/yaml;application/toml;text/x-ini;text/x-csrc;text/x-chdr;text/x-c++src;text/x-c++hdr;text/x-java;text/x-python;text/x-rust;text/x-go;text/javascript;text/css;text/html;text/x-sql;application/x-shellscript;

@@ -17,6 +17,7 @@ use migpad_ui::{Button, Checkbox, ContextMenu, Dropdown, ItemSpec, TextField, te
 use crate::settings;
 use crate::settings_window::{self, LANGUAGES, THEMES, font_label, language_label, theme_label};
 use crate::strings::{Key, Plural, plural, tr};
+use crate::windows;
 
 /// The key context of the window: Tab, Shift+Tab and Escape.
 const CONTEXT: &str = "SettingsWindow";
@@ -91,9 +92,13 @@ pub fn show(cx: &mut App) {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         is_resizable: false,
         is_minimizable: false,
+        app_id: Some(windows::APP_ID.to_owned()),
         ..Default::default()
     };
-    let opened = cx.open_window(options, |window, cx| cx.new(|cx| SettingsView::new(window, cx)));
+    let opened = cx.open_window(options, |window, cx| {
+        window.set_app_id(windows::APP_ID);
+        cx.new(|cx| SettingsView::new(window, cx))
+    });
     match opened {
         Ok(window) => cx.set_global(Opened(window)),
         Err(error) => eprintln!("MigPad could not open its settings window: {error:#}"),

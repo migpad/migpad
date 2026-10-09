@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+# Makes the packages of MigPad for Linux in target/bundle from a release build for this machine,
+# x86_64 or aarch64: a .deb, an .rpm and an AppImage.
+#
+# Needs dpkg-deb and dpkg-shlibdeps (dpkg-dev), rpmbuild (rpm), and for the AppImage appimagetool
+# and the runtime of AppImages: APPIMAGETOOL and APPIMAGE_RUNTIME, the paths of the files of their
+# releases. MIGPAD_EXE is the build (target/release/migpad by default), THIRD_PARTY_LICENSES the
+# file of the licenses of the components (target/THIRD-PARTY-LICENSES.txt by default), if there
+# is one.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+# Debian and RPM sort 0.1.0~dev before 0.1.0.
+package_version=${version/-/\~}
+exe=${MIGPAD_EXE:-target/release/migpad}
+arch=$(uname -m)
+case $arch in
+    x86_64) deb_arch=amd64 ;;
+    aarch64) deb_arch=arm64 ;;
+    *) echo "no packages for $arch" >&2; exit 1 ;;
+esac
+bundle=$PWD/target/bundle
+work=$bundle/linux
+root=$work/root
+resources=crates/migpad/resources/linux
+rm -rf "$work"
+mkdir -p "$work"
+
+# The files, as they lie in the system.
+install -Dm755 "$exe" "$root/usr/bin/migpad"
+install -Dm644 "$resources/com.migpad.MigPad.desktop" "$root/usr/share/applications/com.migpad.MigPad.desktop"
+mkdir -p "$root/usr/share/metainfo"
+sed -e "s/@VERSION@/$version/" -e "s/@DATE@/$(date -u +%F)/" "$resources/com.migpad.MigPad.metainfo.xml" \
+    > "$root/usr/share/metainfo/com.migpad.MigPad.metainfo.xml"
+cp -R "$resources/icons" "$root/usr/share/"
+doc=$root/usr/share/doc/migpad
+mkdir -p "$doc"
+{
+    echo "Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/"
+    echo "Upstream-Name: MigPad"
+    echo "Source: https://github.com/migpad/migpad"
+    echo "Comment: The licenses of the components MigPad is built from are in THIRD-PARTY-LICENSES.txt."
+    echo
+    echo "Files: *"
+    echo "Copyright: 2026 Iaroslav Vorobev"
+    echo "License: MIT"
+    sed -e 's/^/ /' -e 's/^ $/ ./' LICENSE
+} > "$doc/copyright"
+licenses=${THIRD_PARTY_LICENSES:-target/THIRD-PARTY-LICENSES.txt}
+if [[ -f $licenses ]]; then
+    install -m644 "$licenses" "$doc/THIRD-PARTY-LICENSES.txt"
+fi
+chmod -R u=rwX,go=rX "$root"
+
+summary="fast text editor"
+description="MigPad is a small, fast text editor in the spirit of AkelPad: it starts at once, is
+careful with encodings and line endings, finds and replaces with regular expressions, and keeps
+every edit, so quitting brings back the windows, tabs and unsaved changes."
+
+# .deb: the libraries the program links, as dpkg-shlibdeps finds them, and those it loads as it
+# runs: Vulkan and Wayland.
+deb=$work/deb
+cp -a "$root" "$deb"
+mkdir -p "$deb/DEBIAN" "$work/shlibs/debian"
+touch "$work/shlibs/debian/control"
+linked=$(cd "$work/shlibs" && dpkg-shlibdeps -O "$deb/usr/bin/migpad" | sed -n 's/^shlibs:Depends=//p')
+cat > "$deb/DEBIAN/control" <<EOT
+Package: migpad
+Version: $package_version
+Architecture: $deb_arch
+Maintainer: Iaroslav Vorobev <https://github.com/migpad/migpad/issues>
+Installed-Size: $(du -sk "$deb/usr" | cut -f1)
+Depends: $linked, libvulkan1, libwayland-client0
+Recommends: mesa-vulkan-drivers | vulkan-icd, xdg-desktop-portal
+Section: editors
+Priority: optional
+Homepage: https://migpad.com
+Description: $summary
+$(sed 's/^/ /' <<< "$description")
+EOT
+dpkg-deb --root-owner-group -Zxz --build "$deb" "$bundle/migpad-$deb_arch.deb" > /dev/null
+
+# .rpm: rpmbuild finds the libraries the program links; those it loads as it runs are named by
+# their files, as Fedora and openSUSE package them differently.
+rpm=$work/rpm
+mkdir -p "$rpm/SPECS"
+cat > "$rpm/SPECS/migpad.spec" <<EOT
+%global debug_package %{nil}
+%global __os_install_post %{nil}
+Name: migpad
+Version: $package_version
+Release: 1
+Summary: ${summary^}
+License: MIT
+URL: https://migpad.com
+Requires: libvulkan.so.1()(64bit)
+Requires: libwayland-client.so.0()(64bit)
+
+%description
+$description
+
+%install
+cp -a "$root/." %{buildroot}/
+
+%files
+/usr/bin/migpad
+/usr/share/applications/com.migpad.MigPad.desktop
+/usr/share/metainfo/com.migpad.MigPad.metainfo.xml
+/usr/share/icons/hicolor/*/apps/com.migpad.MigPad.*
+/usr/share/doc/migpad
+EOT
+rpmbuild -bb --quiet --define "_topdir $rpm" --define "_build_id_links none" --target "$arch" "$rpm/SPECS/migpad.spec"
+mv "$rpm"/RPMS/*/*.rpm "$bundle/migpad-$arch.rpm"
+
+# AppImage: the same files, the desktop file and the icon at the top, the program as AppRun; the
+# libraries are those of the system.
+appdir=$work/MigPad.AppDir
+cp -a "$root" "$appdir"
+ln -s usr/bin/migpad "$appdir/AppRun"
+cp "$resources/com.migpad.MigPad.desktop" "$appdir/"
+cp "$resources/icons/hicolor/256x256/apps/com.migpad.MigPad.png" "$appdir/"
+ln -s com.migpad.MigPad.png "$appdir/.DirIcon"
+ARCH=$arch APPIMAGE_EXTRACT_AND_RUN=1 "$APPIMAGETOOL" --no-appstream --runtime-file "$APPIMAGE_RUNTIME" \
+    "$appdir" "$bundle/MigPad-$arch.AppImage" > /dev/null
+
+ls -1 "$bundle/migpad-$deb_arch.deb" "$bundle/migpad-$arch.rpm" "$bundle/MigPad-$arch.AppImage"

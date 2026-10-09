@@ -19,16 +19,21 @@ gpui = { package = "gpui-pre", version = "=0.3.7" }
 # Without `font-kit` there is no text on macOS; without `wayland` and `x11` there is no window on Linux.
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.7", features = ["font-kit", "wayland", "x11"] }
 
+# macOS: blocks of Objective-C, for the system calls that take them; GPUI has this version too.
+block2 = "0.6"
 chardetng = "1.0"
+# Windows: the resources of migpad.exe, at build time; GPUI has this version too.
+embed-resource = "3.0"
 encoding_rs = "0.8.42"
 libc = "0.2"
 memchr = "2.8"
-# macOS: the context menus of the system, the appearance of what it draws, the settings window. GPUI uses these
-# versions too: no new packages.
+# macOS: the context menus of the system, the appearance of what it draws, the settings window, the About panel,
+# MigPad as the program of texts. GPUI uses these versions too: no new packages.
 objc2 = "0.6.4"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "NSAppearance",
     "NSApplication",
+    "NSAttributedString",
     "NSButton",
     "NSCell",
     "NSColor",
@@ -42,6 +47,7 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "NSLayoutConstraint",
     "NSMenu",
     "NSMenuItem",
+    "NSParagraphStyle",
     "NSPopUpButton",
     "NSResponder",
     "NSStackView",
@@ -51,12 +57,17 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "NSUserInterfaceLayout",
     "NSView",
     "NSWindow",
+    "NSWorkspace",
     "std",
 ] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "NSArray",
+    "NSAttributedString",
+    "NSBundle",
+    "NSDictionary",
     "NSGeometry",
     "NSString",
+    "NSURL",
     "std",
 ] }
 regex = "1.13"

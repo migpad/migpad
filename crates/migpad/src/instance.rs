@@ -146,22 +146,21 @@ fn stable_hash(bytes: &[u8]) -> u64 {
 #[cfg(unix)]
 const MAX_SOCKET_PATH: usize = 100;
 
-/// Where the socket of the copy with the folder of data `data` is: in it, or — when that path is
-/// too long for a socket — under a hash of it in a folder of the user's own: the runtime folder of
-/// Linux, the temporary folder of macOS, which is the user's there.
+/// Where the socket of the copy with the folder of data `data` may be, in this order: in it, and
+/// under a hash of it in a folder of the user's own — the runtime folder of Linux, the temporary
+/// folder of macOS, which is the user's there. The second is for a path too long for a socket, and
+/// for a folder on a disk without sockets, such as FAT and exFAT of memory sticks.
 #[cfg(unix)]
-pub fn socket_path(data: &Path) -> PathBuf {
+fn socket_paths(data: &Path) -> Vec<PathBuf> {
     let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).filter(|dir| dir.is_dir());
-    socket_path_in(data, &runtime.unwrap_or_else(std::env::temp_dir))
+    socket_paths_in(data, &runtime.unwrap_or_else(std::env::temp_dir))
 }
 
 #[cfg(unix)]
-fn socket_path_in(data: &Path, temp: &Path) -> PathBuf {
-    let path = data.join("migpad.sock");
-    if path.as_os_str().len() <= MAX_SOCKET_PATH {
-        return path;
-    }
-    temp.join(format!("migpad-{:016x}.sock", stable_hash(&path_bytes(data))))
+fn socket_paths_in(data: &Path, temp: &Path) -> Vec<PathBuf> {
+    let inside = data.join("migpad.sock");
+    let hashed = temp.join(format!("migpad-{:016x}.sock", stable_hash(&path_bytes(data))));
+    if inside.as_os_str().len() <= MAX_SOCKET_PATH { vec![inside, hashed] } else { vec![hashed] }
 }
 
 /// The name of the pipe of the copy with the folder of data `data`.
@@ -193,16 +192,25 @@ pub fn send(data: &Path, request: &Request) -> io::Result<()> {
 #[cfg(unix)]
 fn connect(data: &Path) -> io::Result<std::os::unix::net::UnixStream> {
     use std::os::unix::fs::MetadataExt;
-    let path = socket_path(data);
-    // Only a socket of the owner of the folder: one another user left in a shared folder is not
-    // given the files.
-    if std::fs::metadata(&path)?.uid() != std::fs::metadata(data)?.uid() {
-        return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+    let mut failure = io::Error::from(io::ErrorKind::NotFound);
+    for path in socket_paths(data) {
+        let connected = || {
+            // Only a socket of the owner of the folder: one another user left in a shared folder
+            // is not given the files.
+            if std::fs::metadata(&path)?.uid() != std::fs::metadata(data)?.uid() {
+                return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+            }
+            let stream = std::os::unix::net::UnixStream::connect(&path)?;
+            stream.set_read_timeout(Some(TIMEOUT))?;
+            stream.set_write_timeout(Some(TIMEOUT))?;
+            Ok(stream)
+        };
+        match connected() {
+            Ok(stream) => return Ok(stream),
+            Err(error) => failure = error,
+        }
     }
-    let stream = std::os::unix::net::UnixStream::connect(path)?;
-    stream.set_read_timeout(Some(TIMEOUT))?;
-    stream.set_write_timeout(Some(TIMEOUT))?;
-    Ok(stream)
+    Err(failure)
 }
 
 #[cfg(windows)]
@@ -217,10 +225,16 @@ pub fn listen(data: &Path, inbox: Arc<Inbox>) -> io::Result<()> {
     {
         use std::os::unix::fs::PermissionsExt;
         use std::os::unix::net::UnixListener;
-        let path = socket_path(data);
-        // A socket left by a copy that crashed: this one holds the folder now.
-        let _ = std::fs::remove_file(&path);
-        let listener = UnixListener::bind(&path)?;
+        let mut bound = Err(io::Error::from(io::ErrorKind::NotFound));
+        for path in socket_paths(data) {
+            // A socket left by a copy that crashed: this one holds the folder now.
+            let _ = std::fs::remove_file(&path);
+            bound = UnixListener::bind(&path).map(|listener| (listener, path));
+            if bound.is_ok() {
+                break;
+            }
+        }
+        let (listener, path) = bound?;
         // Only the user may give files to their MigPad, the socket in a shared folder too.
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
         std::thread::Builder::new().name("migpad-channel".into()).spawn(move || {
@@ -336,9 +350,11 @@ pub fn leave_terminal() -> bool {
         if !(io::stdin().is_terminal() || io::stdout().is_terminal() || io::stderr().is_terminal()) {
             return false;
         }
-        let Ok(exe) = std::env::current_exe() else { return false };
+        // The program itself, not a link to it: macOS finds the bundle of the program, with its
+        // icon, by where it is; an AppImage mounts itself anew for the new process.
+        let Some(program) = migpad_core::data::program() else { return false };
         // A group of its own: keys and the end of the terminal do not reach it.
-        Command::new(exe)
+        Command::new(program)
             .args(std::env::args_os().skip(1))
             .env("MIGPAD_DETACHED", "1")
             .stdin(Stdio::null())
@@ -458,13 +474,16 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_socket_too_deep_goes_to_the_temporary_folder() {
+    fn a_socket_goes_to_the_temporary_folder_if_not_in_the_folder_of_data() {
         let temp = Path::new("/tmp");
-        assert_eq!(socket_path_in(Path::new("/Users/me/.migpad"), temp), Path::new("/Users/me/.migpad/migpad.sock"));
+        let paths = socket_paths_in(Path::new("/Users/me/.migpad"), temp);
+        assert_eq!(paths[0], Path::new("/Users/me/.migpad/migpad.sock"));
+        // A disk without sockets: the second place.
+        assert!(paths[1].starts_with(temp) && paths[1].to_string_lossy().ends_with(".sock"), "{paths:?}");
         let deep = PathBuf::from(format!("/Users/me/{}/.migpad", "very-long-folder-name/".repeat(5)));
-        let path = socket_path_in(&deep, temp);
-        assert!(path.starts_with(temp) && path.to_string_lossy().ends_with(".sock"), "{path:?}");
-        assert_eq!(path, socket_path_in(&deep, temp), "the same name each time");
+        let paths = socket_paths_in(&deep, temp);
+        assert!(paths.len() == 1 && paths[0].starts_with(temp), "too deep for a socket: {paths:?}");
+        assert_eq!(paths, socket_paths_in(&deep, temp), "the same name each time");
     }
 
     #[test]

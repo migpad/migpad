@@ -17,19 +17,29 @@ sys-locale.workspace = true
 toml_edit.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-# The named pipe the first copy listens on.
+# The named pipe the first copy listens on; the command line of Notepad, which MigPad replaces.
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Storage_FileSystem",
+    "Win32_System_Environment",
     "Win32_System_IO",
     "Win32_System_Pipes",
 ] }
 
+[target.'cfg(unix)'.dependencies]
+# Whether the program runs from a disk that cannot be written: a disk image of macOS.
+libc.workspace = true
+
 [target.'cfg(target_os = "macos")'.dependencies]
+block2.workspace = true
 objc2.workspace = true
 objc2-app-kit.workspace = true
 objc2-foundation.workspace = true
 
 [build-dependencies]
 toml_edit.workspace = true
+
+[target.'cfg(windows)'.build-dependencies]
+# The icon and the version of migpad.exe; GPUI builds its resources with it too.
+embed-resource.workspace = true

@@ -7,6 +7,9 @@ hide_others = "Скрыть остальные"
 show_all = "Показать все"
 quit = "Завершить MigPad"
 exit = "Вы&ход"
+about_macos = "О программе MigPad"
+about = "&О программе MigPad"
+install_command = "Установить команду migpad…"
 
 [file]
 menu = "&Файл"
@@ -107,6 +110,16 @@ next_tab = "&Следующая вкладка"
 previous_tab = "&Предыдущая вкладка"
 select_tab = "Выбрать вкладку"
 
+[help]
+menu = "&Справка"
+
+[about]
+version = "Версия {version}"
+summary = "Быстрый текстовый редактор для macOS, Linux и Windows."
+license = "Лицензия MIT"
+third_party = "Лицензии сторонних компонентов"
+ok = "ОК"
+
 [close]
 question = "Сохранить изменения в «{file}»?"
 detail = "Если не сохранить, правки пропадут."
@@ -154,6 +167,10 @@ recover_failed = "Не удалось восстановить правки «{f
 load_from_disk = "Загрузить с диска"
 keep_mine = "Оставить мою версию"
 another_copy = "Уже работает другая копия MigPad: эта не возвращает окна и не ведёт журналы правок, а при выходе спросит, сохранить ли их."
+command_installed = "Команда migpad установлена: {path}."
+command_failed = "Не удалось установить команду migpad: {reason}"
+command_temporary = "MigPad запущен с образа диска или из временной копии, которая исчезнет: сначала перенесите его в «Программы», затем установите команду migpad."
+command_in_the_way = "{path} — файл другой программы, MigPad его не трогает."
 recent_gone = "Файла «{file}» больше нет — он убран из недавних."
 save_in_utf8 = "Сохранить в UTF-8"
 show_first = "Показать первый"
@@ -189,6 +206,10 @@ tab_width_unit = { one = "пробел", few = "пробела", many = "про�
 startup = "При запуске:"
 restore_session = "Открывать окна и вкладки прошлого сеанса"
 restore_note = "Документы с несохранёнными правками открываются всегда."
+default_app = "Текстовые файлы:"
+make_default = "Сделать MigPad программой по умолчанию"
+default_types = "Текст, журналы, Markdown, JSON, XML, CSV, YAML и файлы настроек."
+default_done = "Текст, журналы, Markdown, JSON, XML, CSV, YAML и файлы настроек открываются в MigPad."
 
 [translation]
 unreadable = "Не удалось прочитать перевод «{file}»: {reason}. Показаны встроенные строки."

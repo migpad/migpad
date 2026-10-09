@@ -12,6 +12,11 @@ hide_others = "Hide Others"
 show_all = "Show All"
 quit = "Quit MigPad"
 exit = "E&xit"
+# About MigPad: in the menu of the application on macOS, in the Help menu on Windows and Linux.
+about_macos = "About MigPad"
+about = "&About MigPad"
+# macOS: a link to MigPad in /usr/local/bin, for terminals.
+install_command = "Install the migpad Command…"
 
 [file]
 menu = "&File"
@@ -123,6 +128,18 @@ next_tab = "&Next Tab"
 previous_tab = "&Previous Tab"
 select_tab = "Select Tab"
 
+[help]
+# The menu of Windows and Linux.
+menu = "&Help"
+
+[about]
+# What About MigPad tells under the name.
+version = "Version {version}"
+summary = "A fast text editor for macOS, Linux and Windows."
+license = "MIT License"
+third_party = "Third-Party Licenses"
+ok = "OK"
+
 [close]
 question = "Save the changes to “{file}”?"
 detail = "If you don't save them, your changes will be lost."
@@ -171,6 +188,10 @@ recover_failed = "Could not recover the changes to “{file}”: {reason}. Its j
 load_from_disk = "Load from Disk"
 keep_mine = "Keep My Version"
 another_copy = "Another copy of MigPad is running: this one does not bring back windows or keep journals of changes, and asks on quitting whether to save them."
+command_installed = "The migpad command is installed: {path}."
+command_failed = "Could not install the migpad command: {reason}"
+command_temporary = "MigPad is running from a disk image or a temporary copy, which goes away: move it to Applications first, then install the migpad command."
+command_in_the_way = "{path} is a file of another program, which MigPad leaves alone."
 recent_gone = "“{file}” is not there any more: it is taken off the recent files."
 save_in_utf8 = "Save in UTF-8"
 show_first = "Show the First"
@@ -212,6 +233,11 @@ tab_width_unit = { one = "space", other = "spaces" }
 startup = "On start:"
 restore_session = "Reopen the windows and tabs of the last time"
 restore_note = "Documents with unsaved changes always reopen."
+# macOS: MigPad as the program that opens these types of files.
+default_app = "Text files:"
+make_default = "Make MigPad the Default"
+default_types = "Plain text, logs, Markdown, JSON, XML, CSV, YAML and settings files."
+default_done = "Plain text, logs, Markdown, JSON, XML, CSV, YAML and settings files open in MigPad."
 
 [translation]
 # A translation the user put in the folder of the data, locales/<language>.toml.
