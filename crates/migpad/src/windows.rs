@@ -445,8 +445,9 @@ pub fn open_window_with(
             // with everything in it ([ADR 0020]).
             window.on_window_should_close(cx, |window, cx| {
                 let Some(Some(workspace)) = window.root::<Workspace>() else { return true };
-                // Quitting goes on once this window is done with the question whether to close.
-                if !cfg!(target_os = "macos") && cx.windows().len() == 1 {
+                // Quitting goes on once this window is done with the question whether to close. The
+                // settings window does not count: it closes with the program.
+                if !cfg!(target_os = "macos") && workspaces(cx).count() == 1 {
                     cx.defer(session::quit);
                     return false;
                 }

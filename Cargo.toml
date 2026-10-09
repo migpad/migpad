@@ -23,22 +23,42 @@ chardetng = "1.0"
 encoding_rs = "0.8.42"
 libc = "0.2"
 memchr = "2.8"
-# macOS: the context menus of the system, the appearance of what it draws. GPUI uses these versions too: no
-# new packages.
+# macOS: the context menus of the system, the appearance of what it draws, the settings window. GPUI uses these
+# versions too: no new packages.
 objc2 = "0.6.4"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "NSAppearance",
     "NSApplication",
+    "NSButton",
     "NSCell",
+    "NSColor",
+    "NSControl",
     "NSEvent",
+    "NSFont",
+    "NSFontManager",
+    "NSGraphics",
+    "NSGridView",
+    "NSLayoutAnchor",
+    "NSLayoutConstraint",
     "NSMenu",
     "NSMenuItem",
+    "NSPopUpButton",
     "NSResponder",
+    "NSStackView",
+    "NSStepper",
+    "NSText",
+    "NSTextField",
+    "NSUserInterfaceLayout",
     "NSView",
     "NSWindow",
     "std",
 ] }
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSGeometry", "NSString", "std"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "NSArray",
+    "NSGeometry",
+    "NSString",
+    "std",
+] }
 regex = "1.13"
 # The language of the system.
 sys-locale = "0.3"

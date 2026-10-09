@@ -15,6 +15,7 @@ use crate::appearance;
 use crate::commands::refresh_menus;
 use crate::journals;
 use crate::notices::{self, Notice, Topic};
+use crate::settings_window;
 use crate::strings::{self, Language};
 use crate::view_options;
 use crate::windows;
@@ -59,12 +60,15 @@ fn default() -> &'static Settings {
     DEFAULT.get_or_init(Settings::default)
 }
 
-/// Changes a setting: it takes effect, and goes to the file.
+/// Changes a setting: it takes effect, and goes to the file. A value it has already changes
+/// nothing.
 pub fn set(setting: Setting, cx: &mut App) {
     let Some(state) = cx.try_global::<State>() else { return };
     let old = state.file.settings().clone();
     let state = cx.global_mut::<State>();
-    state.file.set(setting);
+    if !state.file.set(setting) {
+        return;
+    }
     let new = state.file.settings().clone();
     let failure = match &state.path {
         Some(path) if state.writable => match state.file.write(path) {
@@ -181,6 +185,7 @@ fn apply(old: Option<&Settings>, new: &Settings, cx: &mut App) {
     }
     if old.is_some() {
         refresh_menus(cx);
+        settings_window::refresh(cx);
     }
 }
 

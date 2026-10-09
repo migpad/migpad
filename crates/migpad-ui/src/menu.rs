@@ -209,6 +209,11 @@ impl Levels {
         Levels(vec![None])
     }
 
+    /// The menu open with the item `item` highlighted.
+    pub fn at(item: usize) -> Levels {
+        Levels(vec![Some(item)])
+    }
+
     /// The highlighted item at `depth`: of the menu at 0, of the submenu open from it at 1…
     pub fn highlighted(&self, depth: usize) -> Option<usize> {
         self.0.get(depth).copied().flatten()

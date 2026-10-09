@@ -15,10 +15,14 @@ mod keys;
 mod modules;
 #[cfg(target_os = "macos")]
 mod native_menu;
+#[cfg(target_os = "macos")]
+mod native_settings;
 mod notices;
+mod own_settings;
 mod recent;
 mod session;
 mod settings;
+mod settings_window;
 mod status;
 mod strings;
 mod table;
@@ -81,7 +85,7 @@ fn main() {
     // A click on MigPad in the Dock while it has no windows opens one, as on macOS it stays open
     // without them.
     application.on_reopen(|cx| {
-        if cx.windows().is_empty() {
+        if windows::workspaces(cx).next().is_none() {
             windows::open_window(&[], cx);
         }
     });
@@ -98,12 +102,14 @@ fn main() {
         }
         recent::init(cx);
         migpad_editor::init(cx);
+        own_settings::init(cx);
         commands::init(&modules::all(), cx);
         commands::update_menus(None, cx);
         cx.on_window_closed(|cx, closed| {
             session::window_closed(closed, cx);
-            // On macOS MigPad stays open without windows, as applications there do.
-            if cx.windows().is_empty() && !cfg!(target_os = "macos") {
+            // On macOS MigPad stays open without windows, as applications there do; elsewhere it
+            // quits with its last window of documents, the settings window with it.
+            if windows::workspaces(cx).next().is_none() && !cfg!(target_os = "macos") {
                 cx.quit();
             }
             // The menus show the check marks of the active window, which may not have changed.

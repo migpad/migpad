@@ -320,16 +320,18 @@ impl SettingsFile {
         self.doc.is_some()
     }
 
-    /// Changes a setting, in the text of the file as well; tells whether the settings changed.
+    /// Changes a setting, in the text of the file as well; tells whether anything changed — the
+    /// settings, or the text: a value MigPad could not take there gives way to the one set.
     pub fn set(&mut self, setting: Setting) -> bool {
         let key = setting.key();
         self.problems.retain(|problem| !matches!(problem, Problem::Invalid { key: wrong, .. } if *wrong == key));
+        let text = self.to_toml();
         if let Some(doc) = &mut self.doc {
             put(doc.as_table_mut(), key, setting.to_value());
         }
         let before = self.settings.clone();
         self.settings.apply(setting);
-        self.settings != before
+        self.settings != before || self.to_toml() != text
     }
 
     /// The text of the file with the changes; `None` if it is not to be written over.
@@ -350,8 +352,8 @@ impl SettingsFile {
 pub fn template() -> String {
     let mut text = String::from(
         "# The settings of MigPad. The settings window writes them here, and you can edit them by hand:\n\
-         # MigPad takes the changes once the file is saved. A setting that is not here, or has a value\n\
-         # MigPad cannot take, has its default.\n\
+         # MigPad takes the changes once the file is saved. A setting that is not here has its default;\n\
+         # one with a value MigPad cannot take keeps the value it had.\n\
          \n\
          # The language of the interface: \"en\", \"ru\", or \"system\" — Russian if the system is in\n\
          # Russian, English otherwise.\n\
@@ -539,10 +541,12 @@ mod tests {
     fn a_setting_changed_is_no_longer_a_problem() {
         let mut file = parse("[editor]\ntab_width = 100 # too wide\n");
         assert_eq!(file.problems().len(), 1);
-        // Even to the value it has now — the default — the file gets it.
-        assert!(!file.set(Setting::TabWidth(8)));
+        // Even to the value it has now — the default — the file gets it: that is a change.
+        assert!(file.set(Setting::TabWidth(8)));
         assert!(file.problems().is_empty());
         assert_eq!(file.to_toml().unwrap(), "[editor]\ntab_width = 8 # too wide\n");
+        // Again, nothing changes.
+        assert!(!file.set(Setting::TabWidth(8)));
     }
 
     #[test]

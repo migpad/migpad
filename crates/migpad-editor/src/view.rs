@@ -472,7 +472,9 @@ impl EditorView {
             (levels, indent::indent_step(&indents, tab_width))
         });
         let Selection { anchor, head } = self.selection;
-        let (start, end) = (anchor.min(head), anchor.max(head));
+        // An input field without the keyboard shows no selection, as the fields of the systems do.
+        let (start, end) =
+            if self.single_line && !active { (head, head) } else { (anchor.min(head), anchor.max(head)) };
         let metrics = &self.metrics;
         // Room for the caret at either end of the text of an input field.
         let clip = if self.single_line {

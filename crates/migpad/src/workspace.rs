@@ -1061,8 +1061,9 @@ impl Workspace {
     /// first, in one question for all the documents that have them ([ADR 0020]).
     pub fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // The last window on Windows and Linux: closing it is quitting, which keeps the window for
-        // the next start, as its button does — once this window is done with the action.
-        if !cfg!(target_os = "macos") && cx.windows().len() == 1 {
+        // the next start, as its button does — once this window is done with the action. The
+        // settings window does not count: it closes with the program.
+        if !cfg!(target_os = "macos") && windows::workspaces(cx).count() == 1 {
             cx.defer(session::quit);
             return;
         }

@@ -2,7 +2,9 @@
 //! context menus and notification bars.
 
 pub mod button;
+pub mod checkbox;
 pub mod context_menu;
+pub mod dropdown;
 mod menu;
 pub mod menu_bar;
 pub mod notification;
@@ -15,7 +17,9 @@ pub mod tooltip;
 use gpui::{Pixels, px};
 
 pub use button::Button;
+pub use checkbox::Checkbox;
 pub use context_menu::ContextMenu;
+pub use dropdown::Dropdown;
 pub use menu::{ItemSpec, action_at};
 pub use menu_bar::MenuBar;
 pub use status_bar::StatusBar;
