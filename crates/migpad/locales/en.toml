@@ -191,3 +191,17 @@ expected_text = "a string in quotes"
 write_failed = "Could not write the settings to “{file}”: {reason}."
 font_missing = "The font “{font}” is not in the system: documents show in {fallback}."
 open_file = "Open the Settings File"
+# After the field of the width of a tab, which has the number.
+tab_width_unit = { one = "space", other = "spaces" }
+
+[translation]
+# A translation the user put in the folder of the data, locales/<language>.toml.
+unreadable = "Could not read the translation “{file}”: {reason}. MigPad shows its own strings."
+unfit = "The translation “{file}” has strings MigPad cannot take, and shows its own for them: {list}."
+# An item of the list of unfit: the key of a string and why.
+item = "{key} ({why})"
+more = "and {count} more"
+unknown = "no such string"
+placeholders = "other placeholders"
+forms = "other forms of a number"
+ampersand = "a stray “&&”"

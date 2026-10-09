@@ -42,7 +42,8 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = ["N
 regex = "1.13"
 # The language of the system.
 sys-locale = "0.3"
-# TOML: the tables of interface strings at build time; the state the program keeps between starts.
+# TOML: the tables of interface strings, at build time and translations of the user; the settings and the state
+# the program keeps between starts.
 toml_edit = { version = "0.25", default-features = false, features = ["parse"] }
 windows-sys = "0.61"
 

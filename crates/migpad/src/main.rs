@@ -21,7 +21,9 @@ mod session;
 mod settings;
 mod status;
 mod strings;
+mod table;
 mod tabs;
+mod translations;
 mod view_options;
 mod windows;
 mod workspace;
@@ -88,8 +90,12 @@ fn main() {
     application.on_open_urls(move |list| urls.push(Request { files: instance::files_of_urls(&list) }));
     application.run(move |cx: &mut App| {
         journals::init(data, cx);
-        // The language, the theme, the font: before anything shows.
+        // The language, the theme, the font, the strings of the user: before anything shows. What
+        // is wrong with the strings is told in the language of the settings.
         settings::init(cx);
+        if let Some(root) = journals::root(cx) {
+            translations::load(&root, cx);
+        }
         recent::init(cx);
         migpad_editor::init(cx);
         commands::init(&modules::all(), cx);
@@ -133,7 +139,8 @@ fn main() {
                 if journals::another_copy(cx) {
                     let _ = window.update(cx, |workspace, _, cx| workspace.notify(notices::another_copy(), cx));
                 }
-                if let Some(notice) = settings::notice(cx) {
+                let told = translations::take_notices(cx).into_iter().chain(settings::notice(cx));
+                for notice in told.collect::<Vec<_>>() {
                     let _ = window.update(cx, |workspace, _, cx| workspace.notify(notice, cx));
                 }
                 instance::go_to_places(&files, cx);

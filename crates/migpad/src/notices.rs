@@ -10,7 +10,7 @@ use migpad_core::settings::{Expected, Problem};
 use migpad_core::text::TextStore;
 use migpad_ui::notification::Severity;
 
-use crate::strings::{Key, fill, number, tr};
+use crate::strings::{Key, Unfit, fill, number, tr};
 
 /// A notification of a tab.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -303,6 +303,36 @@ pub fn font_missing(font: &str, fallback: &str) -> Notice {
         actions: vec![NoticeAction::OpenSettings],
         target: None,
     }
+}
+
+/// How many strings of a translation that MigPad cannot take are named.
+const UNFIT_NAMED: usize = 10;
+
+/// The translation `file` could not be read: MigPad shows its own strings.
+pub fn translation_unreadable(file: &str, reason: &str) -> Notice {
+    Notice::new(Severity::Warning, fill(Key::TranslationUnreadable, &[("file", file), ("reason", reason)]))
+}
+
+/// The translation `file` has strings MigPad cannot take, `unfit`: it shows its own for them.
+pub fn translation_unfit(file: &str, unfit: &[(String, Unfit)]) -> Notice {
+    let mut items: Vec<String> = unfit
+        .iter()
+        .take(UNFIT_NAMED)
+        .map(|(key, why)| {
+            let why = tr(match why {
+                Unfit::UnknownKey => Key::TranslationUnknown,
+                Unfit::Placeholders => Key::TranslationPlaceholders,
+                Unfit::Forms => Key::TranslationForms,
+                Unfit::StrayAmpersand => Key::TranslationAmpersand,
+            });
+            fill(Key::TranslationItem, &[("key", key.as_str()), ("why", why)])
+        })
+        .collect();
+    if unfit.len() > UNFIT_NAMED {
+        items.push(fill(Key::TranslationMore, &[("count", &number((unfit.len() - UNFIT_NAMED) as u64))]));
+    }
+    let message = fill(Key::TranslationUnfit, &[("file", file), ("list", &items.join("; "))]);
+    Notice::new(Severity::Warning, message)
 }
 
 /// Why a file could not be written, told by the kind of the error: the system's own words only

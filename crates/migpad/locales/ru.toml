@@ -172,3 +172,14 @@ expected_text = "строка в кавычках"
 write_failed = "Не удалось записать настройки в «{file}»: {reason}."
 font_missing = "Шрифта «{font}» нет в системе: документы показаны шрифтом {fallback}."
 open_file = "Открыть файл настроек"
+tab_width_unit = { one = "пробел", few = "пробела", many = "пробелов" }
+
+[translation]
+unreadable = "Не удалось прочитать перевод «{file}»: {reason}. Показаны встроенные строки."
+unfit = "В переводе «{file}» есть строки, которые MigPad не принимает, — вместо них показаны встроенные: {list}."
+item = "{key} ({why})"
+more = "и ещё {count}"
+unknown = "такой строки нет"
+placeholders = "другие подстановки"
+forms = "не те формы числа"
+ampersand = "лишний «&&»"
