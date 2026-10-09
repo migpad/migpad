@@ -16,3 +16,7 @@ indent_size = 2
 
 [*.md]
 trim_trailing_whitespace = false
+
+# Inno Setup reads a script without the mark of UTF-8 as ANSI.
+[*.iss]
+charset = utf-8-bom

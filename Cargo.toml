@@ -22,6 +22,8 @@ gpui_platform = { package = "gpui-pre-platform", version = "=0.3.7", features = 
 # macOS: blocks of Objective-C, for the system calls that take them; GPUI has this version too.
 block2 = "0.6"
 chardetng = "1.0"
+# Windows: the resources of migpad.exe, at build time; GPUI has this version too.
+embed-resource = "3.0"
 encoding_rs = "0.8.42"
 libc = "0.2"
 memchr = "2.8"

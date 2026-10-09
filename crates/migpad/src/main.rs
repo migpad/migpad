@@ -51,7 +51,9 @@ fn main() {
         return;
     }
     let cwd = std::env::current_dir().unwrap_or_default();
-    let files = cli::files(std::env::args_os().skip(1), &cwd, |path| path.exists());
+    // In place of Notepad, the command line is Notepad's.
+    let notepad = command_line().and_then(|line| cli::notepad(&line, &cwd));
+    let files = notepad.unwrap_or_else(|| cli::files(std::env::args_os().skip(1), &cwd, |path| path.exists()));
     let request = Request { files };
     let found = journals::find();
     let root = found.as_ref().map(|dir| dir.root().to_path_buf());
@@ -168,4 +170,24 @@ fn main() {
         instance::serve(inbox, cx);
         cx.activate(true);
     });
+}
+
+/// The command line as Windows gave it, before it is split into arguments: Notepad takes the rest
+/// of it as one file, spaces and all.
+#[cfg(windows)]
+fn command_line() -> Option<String> {
+    use windows_sys::Win32::System::Environment::GetCommandLineW;
+    // SAFETY: the command line of the process, a string that ends with a zero and lives as long.
+    let line = unsafe { GetCommandLineW() };
+    if line.is_null() {
+        return None;
+    }
+    // SAFETY: the characters up to the zero.
+    let length = (0..).take_while(|&i| unsafe { *line.add(i) } != 0).count();
+    Some(String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(line, length) }))
+}
+
+#[cfg(not(windows))]
+fn command_line() -> Option<String> {
+    None
 }

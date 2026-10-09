@@ -3,7 +3,7 @@
 //! mnemonics and of the forms of the strings about a number, so that nothing is parsed when MigPad
 //! starts. A key missing from a table, or found in one table only, a placeholder that one table
 //! has and another has not, forms other than those of the language, or a stray "&" fails the
-//! build.
+//! build. For Windows it makes the resources of `migpad.exe` too: its icon and its version.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -104,6 +104,34 @@ fn main() {
         .unwrap();
     }
     fs::write(Path::new(&env::var("OUT_DIR").unwrap()).join("strings.rs"), code).unwrap();
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        windows_resources();
+    }
+}
+
+/// Windows: the icon and the version of `migpad.exe`, from `resources/windows/migpad.rc` with the
+/// version of the package and the path of the icon put in.
+#[cfg(windows)]
+fn windows_resources() {
+    println!("cargo::rerun-if-changed=resources/windows");
+    let version = env::var("CARGO_PKG_VERSION").unwrap();
+    // Four numbers: 0,1,0,0 for 0.1.0-dev.
+    let numbers = version.split('-').next().unwrap().replace('.', ",") + ",0";
+    let icon = Path::new(&env::var("CARGO_MANIFEST_DIR").unwrap()).join("resources/windows/migpad.ico");
+    let template = fs::read_to_string("resources/windows/migpad.rc").unwrap();
+    let rc = template
+        .replace("@ICON@", &icon.to_string_lossy().replace('\\', "/"))
+        .replace("@NUMBERS@", &numbers)
+        .replace("@VERSION@", &version);
+    let path = Path::new(&env::var("OUT_DIR").unwrap()).join("migpad.rc");
+    fs::write(&path, rc).unwrap();
+    embed_resource::compile(&path, embed_resource::NONE).manifest_optional().unwrap();
+}
+
+/// The compiler of resources is that of Windows: a build for Windows elsewhere goes without them.
+#[cfg(not(windows))]
+fn windows_resources() {
+    println!("cargo::warning=migpad.exe is built without its icon and version: they are made on Windows");
 }
 
 /// The strings of the table of `language`, in their order there.
