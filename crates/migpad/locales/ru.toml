@@ -7,6 +7,8 @@ hide_others = "Скрыть остальные"
 show_all = "Показать все"
 quit = "Завершить MigPad"
 exit = "Вы&ход"
+about_macos = "О программе MigPad"
+about = "&О программе MigPad"
 
 [file]
 menu = "&Файл"
@@ -106,6 +108,16 @@ zoom = "Изменить масштаб"
 next_tab = "&Следующая вкладка"
 previous_tab = "&Предыдущая вкладка"
 select_tab = "Выбрать вкладку"
+
+[help]
+menu = "&Справка"
+
+[about]
+version = "Версия {version}"
+summary = "Быстрый текстовый редактор для macOS, Linux и Windows."
+license = "Лицензия MIT"
+third_party = "Лицензии сторонних компонентов"
+ok = "ОК"
 
 [close]
 question = "Сохранить изменения в «{file}»?"

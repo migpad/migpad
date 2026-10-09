@@ -12,6 +12,9 @@ hide_others = "Hide Others"
 show_all = "Show All"
 quit = "Quit MigPad"
 exit = "E&xit"
+# About MigPad: in the menu of the application on macOS, in the Help menu on Windows and Linux.
+about_macos = "About MigPad"
+about = "&About MigPad"
 
 [file]
 menu = "&File"
@@ -122,6 +125,18 @@ zoom = "Zoom"
 next_tab = "&Next Tab"
 previous_tab = "&Previous Tab"
 select_tab = "Select Tab"
+
+[help]
+# The menu of Windows and Linux.
+menu = "&Help"
+
+[about]
+# What About MigPad tells under the name.
+version = "Version {version}"
+summary = "A fast text editor for macOS, Linux and Windows."
+license = "MIT License"
+third_party = "Third-Party Licenses"
+ok = "OK"
 
 [close]
 question = "Save the changes to “{file}”?"
