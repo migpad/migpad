@@ -6,8 +6,11 @@
 mod about;
 mod appearance;
 mod cli;
+mod command_link;
 mod commands;
 mod debug_input;
+#[cfg(target_os = "macos")]
+mod default_app;
 mod find;
 mod go_to;
 mod instance;
@@ -33,6 +36,7 @@ mod view_options;
 mod windows;
 mod workspace;
 
+use std::io::Write as _;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -41,6 +45,11 @@ use gpui::App;
 use crate::instance::{Inbox, Request};
 
 fn main() {
+    // The version, for scripts and the checks of the packages: nothing starts.
+    if std::env::args_os().nth(1).is_some_and(|arg| arg == "--version") {
+        let _ = writeln!(std::io::stdout(), "MigPad {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
     let cwd = std::env::current_dir().unwrap_or_default();
     let files = cli::files(std::env::args_os().skip(1), &cwd, |path| path.exists());
     let request = Request { files };

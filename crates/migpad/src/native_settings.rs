@@ -7,6 +7,7 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::ops::RangeInclusive;
 use std::task::{Poll, Waker};
+use std::time::Duration;
 
 use gpui::App;
 use migpad_core::settings::{FONT_SIZES, Setting, Settings, TAB_WIDTHS};
@@ -21,8 +22,9 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{NSArray, NSPoint, NSRect, NSSize, NSString};
 
+use crate::default_app;
 use crate::settings;
-use crate::settings_window::{self, LANGUAGES, THEMES, font_label, language_label, theme_label};
+use crate::settings_window::{self, LANGUAGES, THEMES, default_app_strings, font_label, language_label, theme_label};
 use crate::strings::{Key, Language, Plural, plural, tr};
 
 /// Space around the fields, in points.
@@ -36,8 +38,11 @@ enum Change {
     OpenFile,
     /// A field has text that is not a number: it shows the setting again.
     Revert,
-    /// The window is back in front: another program may have changed the file of the settings.
+    /// The window is back in front: another program may have changed the file of the settings, or
+    /// the program of texts.
     CheckFile,
+    /// MigPad is to be the program of texts.
+    MakeDefault,
 }
 
 /// An item of the list of fonts.
@@ -185,6 +190,11 @@ define_class!(
         fn open_file(&self, _sender: &NSButton) {
             push(Change::OpenFile);
         }
+
+        #[unsafe(method(makeDefault:))]
+        fn make_default(&self, _sender: &NSButton) {
+            push(Change::MakeDefault);
+        }
     }
 );
 
@@ -231,6 +241,8 @@ struct Controls {
     tab_width_stepper: Retained<NSStepper>,
     tab_width_unit: Retained<NSTextField>,
     restore: Retained<NSButton>,
+    /// The button that makes MigPad the program of texts, and the note under it; only in a bundle.
+    default_app: Option<(Retained<NSButton>, Retained<NSTextField>)>,
 }
 
 /// Opens the window, or brings it forward.
@@ -260,7 +272,20 @@ pub fn show(cx: &mut App) {
                     }
                     Change::OpenFile => settings::open_file(cx),
                     Change::Revert => refresh(cx),
-                    Change::CheckFile => settings::check_file(cx),
+                    Change::CheckFile => {
+                        settings::check_file(cx);
+                        refresh(cx);
+                    }
+                    Change::MakeDefault => {
+                        default_app::make_default();
+                        // The system takes the choice in a moment; on macOS 26.4 and later, after
+                        // its questions, which bring the window back to the front as they close.
+                        cx.spawn(async |cx| {
+                            cx.background_executor().timer(Duration::from_millis(500)).await;
+                            cx.update(refresh);
+                        })
+                        .detach();
+                    }
                 });
             }
         })
@@ -346,6 +371,11 @@ impl SettingsWindow {
         controls.tab_width_unit.setStringValue(&NSString::from_str(&unit));
         let restore = if settings.restore_session { NSControlStateValueOn } else { NSControlStateValueOff };
         controls.restore.setState(restore);
+        if let Some((button, note)) = &controls.default_app {
+            let done = default_app::is_default();
+            button.setEnabled(!done);
+            note.setStringValue(&NSString::from_str(default_app_strings(done)[2]));
+        }
     }
 }
 
@@ -469,6 +499,25 @@ fn build(window: &NSWindow, target: &Target, font_items: &[FontItem], mtm: MainT
         )
     };
 
+    // MigPad as the program of texts, if it runs from its bundle.
+    let default_app = default_app::available().then(|| {
+        let [_, make_default, types] = default_app_strings(false);
+        // SAFETY: the target answers the action, and lives as long as the window.
+        let button = unsafe {
+            NSButton::buttonWithTitle_target_action(
+                &NSString::from_str(make_default),
+                Some(target),
+                Some(sel!(makeDefault:)),
+                mtm,
+            )
+        };
+        let note = NSTextField::wrappingLabelWithString(&NSString::from_str(types), mtm);
+        note.setFont(Some(&NSFont::systemFontOfSize(NSFont::smallSystemFontSize())));
+        note.setTextColor(Some(&NSColor::secondaryLabelColor()));
+        note.setPreferredMaxLayoutWidth(width + 60.);
+        (button, note)
+    });
+
     let stack = |views: &[&NSView]| {
         let stack = NSStackView::stackViewWithViews(&NSArray::from_slice(views), mtm);
         stack.setSpacing(6.);
@@ -478,7 +527,7 @@ fn build(window: &NSWindow, target: &Target, font_items: &[FontItem], mtm: MainT
     let label = |key: Key| into_view(&*label(key));
     let font_size_row: [&NSView; 2] = [&font_size, &font_size_stepper];
     let tab_width_row: [&NSView; 3] = [&tab_width, &tab_width_stepper, &tab_width_unit];
-    let rows: [[Retained<NSView>; 2]; 8] = [
+    let mut rows: Vec<[Retained<NSView>; 2]> = vec![
         [label(Key::SettingsLanguage), into_view(&*language)],
         [label(Key::SettingsTheme), into_view(&*theme)],
         [label(Key::SettingsFont), into_view(&*font)],
@@ -486,17 +535,31 @@ fn build(window: &NSWindow, target: &Target, font_items: &[FontItem], mtm: MainT
         [label(Key::SettingsTabWidth), stack(&tab_width_row)],
         [label(Key::SettingsStartup), into_view(&*restore)],
         [empty(), into_view(&*note)],
-        [empty(), into_view(&*open)],
     ];
+    // The rows of notes, which go with the row above them, and of buttons, which stand apart.
+    let mut notes = vec![rows.len() - 1];
+    let mut apart = Vec::new();
+    if let Some((button, note)) = &default_app {
+        let text = NSTextField::labelWithString(&NSString::from_str(default_app_strings(false)[0]), mtm);
+        apart.push(rows.len());
+        rows.push([into_view(&*text), into_view(&**button)]);
+        notes.push(rows.len());
+        rows.push([empty(), into_view(&**note)]);
+    }
+    apart.push(rows.len());
+    rows.push([empty(), into_view(&*open)]);
     let rows: Vec<Retained<NSArray<NSView>>> = rows.iter().map(|row| NSArray::from_retained_slice(row)).collect();
     let grid = NSGridView::gridViewWithViews(&NSArray::from_retained_slice(&rows), mtm);
     grid.setRowSpacing(10.);
     grid.setColumnSpacing(8.);
     grid.setRowAlignment(NSGridRowAlignment::FirstBaseline);
     grid.columnAtIndex(0).setXPlacement(NSGridCellPlacement::Trailing);
-    // The note goes with the check box above it; the button stands apart.
-    grid.rowAtIndex(6).setTopPadding(-6.);
-    grid.rowAtIndex(7).setTopPadding(10.);
+    for row in notes {
+        grid.rowAtIndex(row as isize).setTopPadding(-6.);
+    }
+    for row in apart {
+        grid.rowAtIndex(row as isize).setTopPadding(10.);
+    }
 
     let size = grid.fittingSize();
     grid.setFrame(NSRect::new(NSPoint::new(MARGIN, MARGIN), size));
@@ -516,6 +579,7 @@ fn build(window: &NSWindow, target: &Target, font_items: &[FontItem], mtm: MainT
         tab_width_stepper,
         tab_width_unit,
         restore,
+        default_app,
     }
 }
 

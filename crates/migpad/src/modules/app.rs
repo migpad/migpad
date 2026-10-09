@@ -3,12 +3,13 @@
 use gpui::actions;
 
 use crate::about;
+use crate::command_link;
 use crate::commands::{Command, MenuId, Module, Registry, by_os};
 use crate::session;
 use crate::settings_window;
 use crate::strings::Key;
 
-actions!(app, [About, OpenSettings, Quit, Hide, HideOthers, ShowAll]);
+actions!(app, [About, OpenSettings, InstallCommand, Quit, Hide, HideOthers, ShowAll]);
 
 pub struct AppModule;
 
@@ -36,6 +37,11 @@ impl Module for AppModule {
         let settings =
             Command::new("app.settings", label, OpenSettings).keys(by_os(&["cmd-,"], &["ctrl-,"], &["ctrl-,"]));
         registry.add(settings, place);
+        // macOS: the command `migpad`, if MigPad runs from its bundle; Windows and Linux have it from
+        // the installer and the packages.
+        if cfg!(target_os = "macos") && command_link::available() {
+            registry.add(Command::new("app.install_command", Key::AppInstallCommand, InstallCommand), menu(1));
+        }
         if cfg!(target_os = "macos") {
             registry.add_services(MenuId::App, 2);
             registry.add(Command::new("app.hide", Key::AppHide, Hide).keys(&["cmd-h"]), menu(3));
@@ -46,6 +52,7 @@ impl Module for AppModule {
             if cfg!(target_os = "macos") { (Key::AppQuit, menu(4)) } else { (Key::AppExit, Some((MenuId::File, 9))) };
         registry.add(Command::new("app.quit", label, Quit).keys(by_os(&["cmd-q"], &[], &["ctrl-q"])), place);
         registry.on_app_action(|_: &About, cx| cx.defer(about::show));
+        registry.on_app_action(|_: &InstallCommand, cx| cx.defer(command_link::install));
         // Once the window the keys came from is done with them.
         registry.on_app_action(|_: &OpenSettings, cx| cx.defer(settings_window::open));
         // The documents of every window are asked whether their changes are kept.

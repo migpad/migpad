@@ -222,6 +222,16 @@ pub fn another_copy() -> Notice {
     Notice::new(Severity::Warning, tr(Key::NoticeAnotherCopy).to_owned())
 }
 
+/// The command `migpad` is a link at `path` to MigPad.
+pub fn command_installed(path: &str) -> Notice {
+    Notice::new(Severity::Info, fill(Key::NoticeCommandInstalled, &[("path", path)]))
+}
+
+/// The command `migpad` could not be made.
+pub fn command_failed(reason: &str) -> Notice {
+    Notice::new(Severity::Error, fill(Key::NoticeCommandFailed, &[("reason", reason)]))
+}
+
 /// The recent file `file` is not there any more: it leaves the list.
 pub fn recent_gone(file: &str) -> Notice {
     Notice::new(Severity::Warning, fill(Key::NoticeRecentGone, &[("file", file)]))

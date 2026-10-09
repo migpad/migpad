@@ -44,6 +44,14 @@ pub fn title() -> &'static str {
     tr(if cfg!(target_os = "macos") { Key::SettingsTitleMacos } else { Key::SettingsTitle })
 }
 
+/// What the settings window of macOS tells about MigPad as the program of texts: the label of its
+/// row, the button, and the note under it — `done` once MigPad opens them.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn default_app_strings(done: bool) -> [&'static str; 3] {
+    let note = if done { Key::SettingsDefaultDone } else { Key::SettingsDefaultTypes };
+    [tr(Key::SettingsDefaultApp), tr(Key::SettingsMakeDefault), tr(note)]
+}
+
 /// What the window calls a language: each by its own name.
 pub fn language_label(language: Language) -> String {
     match language {

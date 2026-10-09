@@ -336,9 +336,11 @@ pub fn leave_terminal() -> bool {
         if !(io::stdin().is_terminal() || io::stdout().is_terminal() || io::stderr().is_terminal()) {
             return false;
         }
-        let Ok(exe) = std::env::current_exe() else { return false };
+        // The program itself, not a link to it: macOS finds the bundle of the program, with its
+        // icon, by where it is; an AppImage mounts itself anew for the new process.
+        let Some(program) = migpad_core::data::program() else { return false };
         // A group of its own: keys and the end of the terminal do not reach it.
-        Command::new(exe)
+        Command::new(program)
             .args(std::env::args_os().skip(1))
             .env("MIGPAD_DETACHED", "1")
             .stdin(Stdio::null())
