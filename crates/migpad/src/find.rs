@@ -122,6 +122,12 @@ pub struct FindBar {
 }
 
 impl FindBar {
+    /// The hints of the fields, in the language of the interface now.
+    pub fn language_changed(&mut self, cx: &mut Context<Self>) {
+        self.find.update(cx, |view, cx| view.set_placeholder(tr(Key::FindPlaceholder), cx));
+        self.replace.update(cx, |view, cx| view.set_placeholder(tr(Key::FindReplacePlaceholder), cx));
+    }
+
     pub fn new(workspace: WeakEntity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let find = cx.new(|cx| {
             let mut view = EditorView::single_line(window, cx);

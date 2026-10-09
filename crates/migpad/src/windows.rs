@@ -364,6 +364,16 @@ pub fn same_file(a: &Path, b: &Path) -> bool {
     a == b || resolve(a) == resolve(b)
 }
 
+/// The language of the interface changed: each window shows it — its title, the bars over the
+/// text; what is drawn anew takes it anyway.
+pub fn language_changed(cx: &mut App) {
+    let windows: Vec<WindowHandle<Workspace>> = workspaces(cx).map(|(window, _)| window).collect();
+    for window in windows {
+        let _ = window.update(cx, |workspace, window, cx| workspace.language_changed(window, cx));
+    }
+    cx.refresh_windows();
+}
+
 /// The window used last: the active one, or the one in front, or any.
 pub fn last_active(cx: &App) -> Option<WindowHandle<Workspace>> {
     let active = cx.active_window().and_then(|window| window.downcast::<Workspace>());

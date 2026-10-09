@@ -8,7 +8,7 @@ use migpad_core::document::Text;
 use migpad_core::text::LineIndex;
 
 use super::EditorView;
-use crate::layout::{ScreenLine, TAB_WIDTH};
+use crate::layout::ScreenLine;
 use crate::wrap;
 
 /// A row on screen: a line of the document, and the row of it.
@@ -34,7 +34,7 @@ impl EditorView {
         let mut wraps = self.wraps.borrow_mut();
         let starts = wraps
             .entry(range.start)
-            .or_insert_with(|| Rc::from(wrap::row_starts(text, range, self.wrap_cells, TAB_WIDTH)));
+            .or_insert_with(|| Rc::from(wrap::row_starts(text, range, self.wrap_cells, self.columns.tab_width())));
         starts.clone()
     }
 

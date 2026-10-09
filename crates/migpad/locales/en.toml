@@ -176,3 +176,18 @@ save_in_utf8 = "Save in UTF-8"
 show_first = "Show the First"
 save_replacing = "Replace Them and Save"
 save_as = "Save As…"
+
+[settings]
+# Notifications about the file of the settings, settings.toml.
+unreadable = "Could not read the settings file: {reason}. MigPad does not take settings from it or write to it."
+syntax = "The settings file has an error on line {line}: {reason}. Until it is fixed, MigPad does not take settings from it or write to it."
+invalid = "Some settings have values MigPad cannot take, which are left out: {list}."
+# An item of the list of invalid: a key of the file, its line, and what it takes.
+invalid_item = "{key} on line {line} takes {expected}"
+expected_bool = "true or false"
+expected_number = "a whole number from {min} to {max}"
+expected_one_of = "one of {values}"
+expected_text = "a string in quotes"
+write_failed = "Could not write the settings to “{file}”: {reason}."
+font_missing = "The font “{font}” is not in the system: documents show in {fallback}."
+open_file = "Open the Settings File"

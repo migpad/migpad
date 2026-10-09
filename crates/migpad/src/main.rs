@@ -3,6 +3,7 @@
 // Release builds on Windows are GUI applications: no console window.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod appearance;
 mod cli;
 mod commands;
 mod debug_input;
@@ -17,6 +18,7 @@ mod native_menu;
 mod notices;
 mod recent;
 mod session;
+mod settings;
 mod status;
 mod strings;
 mod tabs;
@@ -28,10 +30,8 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use gpui::App;
-use migpad_ui::ThemeMode;
 
 use crate::instance::{Inbox, Request};
-use crate::strings::Language;
 
 fn main() {
     let cwd = std::env::current_dir().unwrap_or_default();
@@ -87,11 +87,10 @@ fn main() {
     let urls = inbox.clone();
     application.on_open_urls(move |list| urls.push(Request { files: instance::files_of_urls(&list) }));
     application.run(move |cx: &mut App| {
-        strings::set_language(Language::of_system());
         journals::init(data, cx);
+        // The language, the theme, the font: before anything shows.
+        settings::init(cx);
         recent::init(cx);
-        view_options::init(cx);
-        migpad_ui::theme::set_mode(theme_mode(), cx);
         migpad_editor::init(cx);
         commands::init(&modules::all(), cx);
         commands::update_menus(None, cx);
@@ -129,9 +128,13 @@ fn main() {
             .or_else(|| windows::open_window(&[], cx));
         match window {
             Some(window) => {
-                // A second copy keeps nothing in the folder of data: it says so.
+                // A second copy keeps nothing in the folder of data: it says so. What is wrong with the
+                // settings is told too.
                 if journals::another_copy(cx) {
                     let _ = window.update(cx, |workspace, _, cx| workspace.notify(notices::another_copy(), cx));
+                }
+                if let Some(notice) = settings::notice(cx) {
+                    let _ = window.update(cx, |workspace, _, cx| workspace.notify(notice, cx));
                 }
                 instance::go_to_places(&files, cx);
                 debug_input::play(window, cx)
@@ -142,14 +145,4 @@ fn main() {
         instance::serve(inbox, cx);
         cx.activate(true);
     });
-}
-
-/// Light or dark as the system is; a debug build takes `MIGPAD_THEME=light` or `dark` for
-/// screenshots, until the settings can choose.
-fn theme_mode() -> ThemeMode {
-    match std::env::var("MIGPAD_THEME") {
-        Ok(theme) if cfg!(debug_assertions) && theme == "light" => ThemeMode::Light,
-        Ok(theme) if cfg!(debug_assertions) && theme == "dark" => ThemeMode::Dark,
-        _ => ThemeMode::System,
-    }
 }

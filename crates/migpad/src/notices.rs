@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use migpad_core::document::{Document, Format, OpenError, SaveError};
 use migpad_core::encoding::Losses;
+use migpad_core::settings::{Expected, Problem};
 use migpad_core::text::TextStore;
 use migpad_ui::notification::Severity;
 
@@ -47,6 +48,8 @@ pub enum Topic {
     Journal,
     /// The file on disk, changed by another program.
     Disk,
+    /// The file of the settings.
+    Settings,
 }
 
 /// What a button of a notification does.
@@ -64,6 +67,8 @@ pub enum NoticeAction {
     LoadFromDisk,
     /// Keeps the text of the document over the file changed on disk.
     KeepMine,
+    /// Opens the file of the settings in a tab.
+    OpenSettings,
 }
 
 impl NoticeAction {
@@ -75,6 +80,7 @@ impl NoticeAction {
             NoticeAction::SaveAs => Key::NoticeSaveAs,
             NoticeAction::LoadFromDisk => Key::NoticeLoadFromDisk,
             NoticeAction::KeepMine => Key::NoticeKeepMine,
+            NoticeAction::OpenSettings => Key::SettingsOpenFile,
         })
     }
 }
@@ -226,6 +232,79 @@ pub fn recover_failed(file: &str, reason: &str) -> Notice {
     Notice::new(Severity::Error, fill(Key::NoticeRecoverFailed, &[("file", file), ("reason", reason)]))
 }
 
+/// What is wrong with the file of the settings, if anything: the settings it could not give have
+/// their defaults.
+pub fn settings_problems(problems: &[Problem]) -> Option<Notice> {
+    let invalid: Vec<String> = problems
+        .iter()
+        .filter_map(|problem| match problem {
+            Problem::Invalid { key, line, expected } => {
+                let line = line.map_or_else(|| "?".to_owned(), |line| number(line as u64));
+                let expected = expected_value(expected);
+                let values = [("key", *key), ("line", line.as_str()), ("expected", expected.as_str())];
+                Some(fill(Key::SettingsInvalidItem, &values))
+            }
+            _ => None,
+        })
+        .collect();
+    let (severity, message) = match problems.first()? {
+        Problem::Unreadable(reason) => (Severity::Error, fill(Key::SettingsUnreadable, &[("reason", reason)])),
+        Problem::Syntax { line, message } => {
+            let line = number(*line as u64);
+            (Severity::Error, fill(Key::SettingsSyntax, &[("line", line.as_str()), ("reason", message.as_str())]))
+        }
+        Problem::Invalid { .. } => (Severity::Warning, fill(Key::SettingsInvalid, &[("list", &invalid.join("; "))])),
+    };
+    Some(Notice {
+        severity,
+        message,
+        topic: Some(Topic::Settings),
+        actions: vec![NoticeAction::OpenSettings],
+        target: None,
+    })
+}
+
+/// What a setting takes, in words.
+fn expected_value(expected: &Expected) -> String {
+    match expected {
+        Expected::Bool => tr(Key::SettingsExpectedBool).to_owned(),
+        Expected::Number(range) => {
+            let (min, max) = (range.start().to_string(), range.end().to_string());
+            fill(Key::SettingsExpectedNumber, &[("min", min.as_str()), ("max", max.as_str())])
+        }
+        Expected::OneOf(values) => {
+            let values: Vec<String> = values.iter().map(|value| format!("\"{value}\"")).collect();
+            fill(Key::SettingsExpectedOneOf, &[("values", values.join(", ").as_str())])
+        }
+        Expected::Text => tr(Key::SettingsExpectedText).to_owned(),
+    }
+}
+
+/// The settings could not be written to the file at `path`.
+pub fn settings_write_failed(path: &Path, error: &io::Error) -> Notice {
+    let (file, reason) = (path.display().to_string(), write_reason(error));
+    let message = fill(Key::SettingsWriteFailed, &[("file", file.as_str()), ("reason", reason.as_str())]);
+    Notice {
+        severity: Severity::Error,
+        message,
+        topic: Some(Topic::Settings),
+        actions: vec![NoticeAction::OpenSettings],
+        target: None,
+    }
+}
+
+/// The font of the settings, `font`, is not in the system: documents show in `fallback`.
+pub fn font_missing(font: &str, fallback: &str) -> Notice {
+    let message = fill(Key::SettingsFontMissing, &[("font", font), ("fallback", fallback)]);
+    Notice {
+        severity: Severity::Warning,
+        message,
+        topic: Some(Topic::Settings),
+        actions: vec![NoticeAction::OpenSettings],
+        target: None,
+    }
+}
+
 /// Why a file could not be written, told by the kind of the error: the system's own words only
 /// for what has no words here.
 fn write_reason(error: &io::Error) -> String {
@@ -351,6 +430,33 @@ mod tests {
         let error = SaveError::Io(io::Error::from(io::ErrorKind::StorageFull));
         let notice = save_failed(&Document::new(), Path::new("/notes/plan.txt"), format("UTF-8"), &error).unwrap();
         assert_eq!(notice.message, "Could not save “plan.txt”: the disk is full.");
+    }
+
+    #[test]
+    fn problems_of_the_settings_are_told() {
+        let _lock = LANGUAGE_LOCK.lock();
+        set_language(Language::English);
+        assert_eq!(settings_problems(&[]), None);
+        let syntax = Problem::Syntax { line: 3, message: "invalid table header".into() };
+        let notice = settings_problems(&[syntax]).unwrap();
+        assert_eq!(
+            notice.message,
+            "The settings file has an error on line 3: invalid table header. Until it is fixed, MigPad does not take settings from it or write to it."
+        );
+        assert_eq!((notice.severity, notice.topic), (Severity::Error, Some(Topic::Settings)));
+        assert_eq!(notice.actions, [NoticeAction::OpenSettings]);
+        let problems = [
+            Problem::Invalid { key: "editor.tab_width", line: Some(5), expected: Expected::Number(1..=16) },
+            Problem::Invalid { key: "theme", line: Some(2), expected: Expected::OneOf(&["system", "light", "dark"]) },
+        ];
+        set_language(Language::Russian);
+        let notice = settings_problems(&problems).unwrap();
+        assert_eq!(
+            notice.message,
+            "У некоторых настроек значения, которые MigPad не принимает, — они не применены: editor.tab_width в строке 5 — целое число от 1 до 16; theme в строке 2 — одно из значений \"system\", \"light\", \"dark\"."
+        );
+        assert_eq!(notice.severity, Severity::Warning);
+        set_language(Language::English);
     }
 
     #[test]

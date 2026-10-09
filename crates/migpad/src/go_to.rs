@@ -25,6 +25,8 @@ pub struct GoToBar {
     field: Entity<EditorView>,
     /// Whether the input was not a place, which the bar tells until it is typed anew.
     invalid: bool,
+    /// The lines of the document the bar was opened for, which its hint tells.
+    lines: usize,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -38,19 +40,23 @@ impl GoToBar {
             }
         });
         let menu = find::context_menu_of(&field, &workspace, window, cx);
-        GoToBar { workspace, field, invalid: false, _subscriptions: vec![typed, menu] }
+        GoToBar { workspace, field, invalid: false, lines: 1, _subscriptions: vec![typed, menu] }
     }
 
     /// Shows the bar for a document of `lines` lines: the field takes the focus, all its text
     /// selected.
     pub fn open(&mut self, lines: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let hint = fill(Key::GoToPlaceholder, &[("count", &number(lines as u64))]);
-        self.field.update(cx, |field, cx| {
-            field.set_placeholder(hint, cx);
-            field.select_all(window, cx);
-        });
+        self.lines = lines;
+        self.language_changed(cx);
+        self.field.update(cx, |field, cx| field.select_all(window, cx));
         window.focus(&self.field.focus_handle(cx), cx);
         cx.notify();
+    }
+
+    /// The hint of the field, in the language of the interface now.
+    pub fn language_changed(&mut self, cx: &mut Context<Self>) {
+        let hint = fill(Key::GoToPlaceholder, &[("count", &number(self.lines as u64))]);
+        self.field.update(cx, |field, cx| field.set_placeholder(hint, cx));
     }
 
     /// The field, if it has the focus.

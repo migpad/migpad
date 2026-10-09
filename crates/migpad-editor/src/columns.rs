@@ -29,6 +29,11 @@ impl Columns {
         Columns { lines: RefCell::default(), tab_width, step }
     }
 
+    /// Columns between tab stops.
+    pub fn tab_width(&self) -> usize {
+        self.tab_width
+    }
+
     /// Forgets every checkpoint: the text has changed.
     pub fn clear(&mut self) {
         self.lines.get_mut().clear();
