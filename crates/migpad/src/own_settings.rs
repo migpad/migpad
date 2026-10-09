@@ -34,10 +34,11 @@ enum List {
     Font,
 }
 
-/// The item at a place in a list was chosen.
+/// An item of a list was chosen: its setting, fixed as the list opened — the fonts found meanwhile
+/// do not change what an item stands for.
 #[derive(Clone, Debug, PartialEq, gpui::Action)]
 #[action(namespace = settings_window, no_json)]
-struct Choose(List, usize);
+struct Choose(Setting);
 
 /// A field of a number.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -221,16 +222,18 @@ impl SettingsView {
         }
     }
 
-    /// The items of `list`, by their labels, and the place of the one chosen now.
-    fn items(&self, list: List, settings: &Settings) -> (Vec<String>, Option<usize>) {
+    /// The items of `list` — their labels and settings — and the place of the one chosen now.
+    fn items(&self, list: List, settings: &Settings) -> (Vec<(String, Setting)>, Option<usize>) {
         match list {
             List::Language => {
                 let chosen = LANGUAGES.iter().position(|&language| language == settings.language);
-                (LANGUAGES.iter().map(|&language| language_label(language)).collect(), chosen)
+                let items = LANGUAGES.iter().map(|&language| (language_label(language), Setting::Language(language)));
+                (items.collect(), chosen)
             }
             List::Theme => {
                 let chosen = THEMES.iter().position(|&theme| theme == settings.theme);
-                (THEMES.iter().map(|&theme| theme_label(theme).to_owned()).collect(), chosen)
+                let items = THEMES.iter().map(|&theme| (theme_label(theme).to_owned(), Setting::Theme(theme)));
+                (items.collect(), chosen)
             }
             List::Font => {
                 let fonts = self.fonts(settings);
@@ -238,8 +241,9 @@ impl SettingsView {
                     None => Some(0),
                     Some(font) => fonts.iter().position(|family| family == font).map(|at| at + 1),
                 };
-                let labels = std::iter::once(font_label(None)).chain(fonts).collect();
-                (labels, chosen)
+                let system = (font_label(None), Setting::Font(None));
+                let families = fonts.into_iter().map(|family| (family.clone(), Setting::Font(Some(family))));
+                (std::iter::once(system).chain(families).collect(), chosen)
             }
         }
     }
@@ -257,23 +261,8 @@ impl SettingsView {
         fonts
     }
 
-    /// The setting of the item at `index` of `list`.
-    fn setting(&self, list: List, index: usize, settings: &Settings) -> Option<Setting> {
-        match list {
-            List::Language => LANGUAGES.get(index).map(|&language| Setting::Language(language)),
-            List::Theme => THEMES.get(index).map(|&theme| Setting::Theme(theme)),
-            List::Font => match index {
-                0 => Some(Setting::Font(None)),
-                _ => self.fonts(settings).get(index - 1).map(|family| Setting::Font(Some(family.clone()))),
-            },
-        }
-    }
-
-    fn choose(&mut self, Choose(list, index): &Choose, _: &mut Window, cx: &mut Context<Self>) {
-        let settings = settings::get(cx).clone();
-        if let Some(setting) = self.setting(*list, *index, &settings) {
-            set(setting, cx);
-        }
+    fn choose(&mut self, Choose(setting): &Choose, _: &mut Window, cx: &mut Context<Self>) {
+        set(setting.clone(), cx);
     }
 
     /// Up and Down on a list: the item before or after the one chosen, without opening it.
@@ -281,7 +270,7 @@ impl SettingsView {
         let settings = settings::get(cx).clone();
         let (items, chosen) = self.items(list, &settings);
         let index = chosen.map_or(0, |chosen| chosen.saturating_add_signed(delta).min(items.len().saturating_sub(1)));
-        if let Some(setting) = self.setting(list, index, &settings) {
+        if let Some((_, setting)) = items.into_iter().nth(index) {
             set(setting, cx);
         }
     }
@@ -296,17 +285,17 @@ impl SettingsView {
         cx: &mut Context<Self>,
     ) {
         let settings = settings::get(cx).clone();
-        let (labels, chosen) = self.items(list, &settings);
-        let mut items: Vec<ItemSpec> = labels
+        let (choices, chosen) = self.items(list, &settings);
+        let mut items: Vec<ItemSpec> = choices
             .into_iter()
             .enumerate()
-            .map(|(index, label)| ItemSpec::Action {
+            .map(|(index, (label, setting))| ItemSpec::Action {
                 label: label.into(),
                 mnemonic: None,
                 keys: None,
                 checked: Some(chosen == Some(index)),
                 enabled: true,
-                action: Box::new(Choose(list, index)),
+                action: Box::new(Choose(setting)),
             })
             .collect();
         // The font of the system stands apart from the others.
@@ -339,8 +328,8 @@ impl SettingsView {
         settings: &Settings,
         cx: &Context<Self>,
     ) -> Dropdown {
-        let (labels, chosen) = self.items(list, settings);
-        let label = chosen.and_then(|chosen| labels.get(chosen).cloned()).unwrap_or_default();
+        let (items, chosen) = self.items(list, settings);
+        let label = chosen.and_then(|chosen| items.into_iter().nth(chosen)).map(|(label, _)| label).unwrap_or_default();
         let (opener, stepper) = (cx.weak_entity(), cx.weak_entity());
         Dropdown::new(SharedString::from(format!("{list:?}")), label, tr(name), focus, px(LIST_WIDTH))
             .on_open(move |bounds, keyboard, window, cx| {

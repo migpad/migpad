@@ -85,7 +85,7 @@ fn main() {
     // A click on MigPad in the Dock while it has no windows opens one, as on macOS it stays open
     // without them.
     application.on_reopen(|cx| {
-        if windows::workspaces(cx).next().is_none() {
+        if windows::document_windows(cx) == 0 {
             windows::open_window(&[], cx);
         }
     });
@@ -109,7 +109,7 @@ fn main() {
             session::window_closed(closed, cx);
             // On macOS MigPad stays open without windows, as applications there do; elsewhere it
             // quits with its last window of documents, the settings window with it.
-            if windows::workspaces(cx).next().is_none() && !cfg!(target_os = "macos") {
+            if windows::document_windows(cx) == 0 && !cfg!(target_os = "macos") {
                 cx.quit();
             }
             // The menus show the check marks of the active window, which may not have changed.

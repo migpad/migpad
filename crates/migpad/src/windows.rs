@@ -192,6 +192,12 @@ pub fn open_documents(cx: &App) -> Vec<Entity<Document>> {
     open.chain(closed).collect()
 }
 
+/// How many windows of documents are open, one that is being updated now among them — which
+/// [`workspaces`] leaves out: the settings window is not one.
+pub fn document_windows(cx: &App) -> usize {
+    cx.windows().iter().filter(|window| window.downcast::<Workspace>().is_some()).count()
+}
+
 /// The workspaces of the open windows, except one that is being updated now.
 pub fn workspaces(cx: &App) -> impl Iterator<Item = (WindowHandle<Workspace>, &Workspace)> {
     cx.windows().into_iter().filter_map(|window| {
@@ -447,7 +453,7 @@ pub fn open_window_with(
                 let Some(Some(workspace)) = window.root::<Workspace>() else { return true };
                 // Quitting goes on once this window is done with the question whether to close. The
                 // settings window does not count: it closes with the program.
-                if !cfg!(target_os = "macos") && workspaces(cx).count() == 1 {
+                if !cfg!(target_os = "macos") && document_windows(cx) == 1 {
                     cx.defer(session::quit);
                     return false;
                 }

@@ -252,7 +252,12 @@ pub fn show(cx: &mut App) {
             loop {
                 let change = next_change().await;
                 cx.update(|cx| match change {
-                    Change::Set(setting) => settings::set(setting, cx),
+                    Change::Set(setting) => {
+                        settings::set(setting, cx);
+                        // A number brought within its range may be the one the setting has: the
+                        // field shows it all the same, not what was typed.
+                        refresh(cx);
+                    }
                     Change::OpenFile => settings::open_file(cx),
                     Change::Revert => refresh(cx),
                     Change::CheckFile => settings::check_file(cx),

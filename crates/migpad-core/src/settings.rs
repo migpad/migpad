@@ -384,12 +384,20 @@ pub fn template() -> String {
     text
 }
 
-/// Where the file at `path` is written: the file a link there points to, if it is a link.
+/// Where the file at `path` is written: the file a link there points to, if it is a link — one to
+/// a file not made yet too, which is made there then.
 fn target(path: &Path) -> PathBuf {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => fs::canonicalize(path).unwrap_or_else(|_| path.into()),
-        _ => path.into(),
+    let mut target = path.to_path_buf();
+    // A link to a link is followed as well, but not round and round; a relative one is relative to
+    // the folder it is in.
+    for _ in 0..40 {
+        let Ok(next) = fs::read_link(&target) else { break };
+        target = match target.parent() {
+            Some(folder) => folder.join(next),
+            None => next,
+        };
     }
+    target
 }
 
 /// The item of `key`, such as `editor.tab_width`, in `table`.
@@ -637,6 +645,15 @@ word_wrap = false
             file.write(&link).unwrap();
             assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
             assert_eq!(fs::read_to_string(&kept).unwrap(), "theme = \"dark\"\n\n[editor]\ntab_width = 3\n");
+            // A link made before the file it points to, relative to its folder: the file is made
+            // there, and the link stays.
+            let ahead = dir.0.join("ahead.toml");
+            std::os::unix::fs::symlink("dotfiles/new.toml", &ahead).unwrap();
+            let mut file = read(&ahead);
+            file.set(Setting::Theme(Theme::Light));
+            file.write(&ahead).unwrap();
+            assert!(fs::symlink_metadata(&ahead).unwrap().file_type().is_symlink());
+            assert_eq!(read(&dotfiles.join("new.toml")).settings().theme, Theme::Light);
         }
     }
 

@@ -1063,7 +1063,7 @@ impl Workspace {
         // The last window on Windows and Linux: closing it is quitting, which keeps the window for
         // the next start, as its button does — once this window is done with the action. The
         // settings window does not count: it closes with the program.
-        if !cfg!(target_os = "macos") && windows::workspaces(cx).count() == 1 {
+        if !cfg!(target_os = "macos") && windows::document_windows(cx) == 1 {
             cx.defer(session::quit);
             return;
         }

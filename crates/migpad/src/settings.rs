@@ -63,6 +63,8 @@ fn default() -> &'static Settings {
 /// Changes a setting: it takes effect, and goes to the file. A value it has already changes
 /// nothing.
 pub fn set(setting: Setting, cx: &mut App) {
+    // Another program may have changed the file since MigPad read it: the change goes on top.
+    check_file(cx);
     let Some(state) = cx.try_global::<State>() else { return };
     let old = state.file.settings().clone();
     let state = cx.global_mut::<State>();
@@ -71,7 +73,8 @@ pub fn set(setting: Setting, cx: &mut App) {
     }
     let new = state.file.settings().clone();
     let failure = match &state.path {
-        Some(path) if state.writable => match state.file.write(path) {
+        // A file that is not TOML is not written: it stays as MigPad read it.
+        Some(path) if state.writable && state.file.is_writable() => match state.file.write(path) {
             Ok(()) => {
                 state.fingerprint = Fingerprint::of_path(path).ok();
                 None
@@ -145,7 +148,9 @@ pub fn open_file(cx: &mut App) {
 
 /// Whether `path` is the file of the settings.
 pub fn is_settings_file(path: &Path, cx: &App) -> bool {
-    cx.try_global::<State>().and_then(|state| state.path.as_deref()).is_some_and(|settings| settings == path)
+    let settings = cx.try_global::<State>().and_then(|state| state.path.as_deref());
+    // Through a link, or the file a link points to.
+    settings.is_some_and(|settings| windows::same_file(settings, path))
 }
 
 /// Puts the settings `new` in effect: all of them, or those that differ from `old`.
