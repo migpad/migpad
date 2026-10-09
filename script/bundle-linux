@@ -59,7 +59,7 @@ careful with encodings and line endings, finds and replaces with regular express
 every edit, so quitting brings back the windows, tabs and unsaved changes."
 
 # .deb: the libraries the program links, as dpkg-shlibdeps finds them, and those it loads as it
-# runs: Vulkan, Wayland, xkbcommon.
+# runs: Vulkan and Wayland.
 deb=$work/deb
 cp -a "$root" "$deb"
 mkdir -p "$deb/DEBIAN" "$work/shlibs/debian"
@@ -71,7 +71,7 @@ Version: $package_version
 Architecture: $deb_arch
 Maintainer: Iaroslav Vorobev <https://github.com/migpad/migpad/issues>
 Installed-Size: $(du -sk "$deb/usr" | cut -f1)
-Depends: $linked, libvulkan1, libwayland-client0, libxkbcommon0, libxkbcommon-x11-0
+Depends: $linked, libvulkan1, libwayland-client0
 Recommends: mesa-vulkan-drivers | vulkan-icd, xdg-desktop-portal
 Section: editors
 Priority: optional
@@ -96,7 +96,6 @@ License: MIT
 URL: https://migpad.com
 Requires: libvulkan.so.1()(64bit)
 Requires: libwayland-client.so.0()(64bit)
-Requires: libxkbcommon-x11.so.0()(64bit)
 
 %description
 $description
