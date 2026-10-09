@@ -10,6 +10,7 @@ pub mod history;
 pub mod line_ending;
 mod platform;
 pub mod search;
+pub mod settings;
 pub mod state;
 pub mod text;
 

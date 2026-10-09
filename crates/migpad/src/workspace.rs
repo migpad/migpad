@@ -30,6 +30,7 @@ use crate::modules::format;
 use crate::notices::{self, Notice, NoticeAction, Topic};
 use crate::recent;
 use crate::session;
+use crate::settings;
 use crate::status::{self, COUNT_STEP, Loading, SelectionCount, count_chars};
 use crate::strings::{Key, fill, mnemonic, tr};
 use crate::tabs::Tabs;
@@ -170,8 +171,10 @@ impl Workspace {
             if window.is_window_active() {
                 update_menus(Some(workspace), cx);
                 session::activated(workspace.window_id, cx);
-                // Back in the window: other programs may have changed its files meanwhile.
+                // Back in the window: other programs may have changed its files meanwhile, and the
+                // file of the settings.
                 workspace.check_files(cx);
+                cx.defer(settings::check_file);
             } else {
                 for tab in workspace.tabs.iter() {
                     journals::sync(&tab.document, cx);
@@ -258,6 +261,20 @@ impl Workspace {
                 }
             }
             _ => return,
+        }
+        cx.notify();
+    }
+
+    /// The language of the interface changed: the title of the window and the hints of the fields
+    /// of its bars are in the new one.
+    pub fn language_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.title = Title::default();
+        self.update_title(window, cx);
+        if let Some(bar) = &self.find_bar {
+            bar.update(cx, |bar, cx| bar.language_changed(cx));
+        }
+        if let Some(bar) = &self.go_to_bar {
+            bar.update(cx, |bar, cx| bar.language_changed(cx));
         }
         cx.notify();
     }
@@ -510,6 +527,13 @@ impl Workspace {
         }
     }
 
+    /// Closes the notifications about `topic` of every tab: what they told is over.
+    pub fn clear_topic(&mut self, topic: Topic, cx: &mut Context<Self>) {
+        for index in 0..self.tabs.len() {
+            self.clear_notices(index, topic, cx);
+        }
+    }
+
     /// Closes the notifications about `topic` of the tab at `index`: what they told is over.
     fn clear_notices(&mut self, index: usize, topic: Topic, cx: &mut Context<Self>) {
         if let Some(tab) = self.tabs.get_mut(index) {
@@ -573,6 +597,7 @@ impl Workspace {
             NoticeAction::SaveAs => self.save_as(index, format, window, cx).detach(),
             NoticeAction::LoadFromDisk => self.read_again(index, None, window, cx),
             NoticeAction::KeepMine => self.keep_mine(index, cx),
+            NoticeAction::OpenSettings => cx.defer(settings::open_file),
         }
     }
 
@@ -717,6 +742,10 @@ impl Workspace {
                 if let Some(tab) = self.tabs.get(index) {
                     let selection = tab.editor.read(cx).selection();
                     recent::saved(&path, format.encoding, selection, cx);
+                }
+                // The settings edited in MigPad take effect once saved.
+                if settings::is_settings_file(&path, cx) {
+                    cx.defer(settings::check_file);
                 }
                 true
             }
@@ -1032,8 +1061,9 @@ impl Workspace {
     /// first, in one question for all the documents that have them ([ADR 0020]).
     pub fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // The last window on Windows and Linux: closing it is quitting, which keeps the window for
-        // the next start, as its button does — once this window is done with the action.
-        if !cfg!(target_os = "macos") && cx.windows().len() == 1 {
+        // the next start, as its button does — once this window is done with the action. The
+        // settings window does not count: it closes with the program.
+        if !cfg!(target_os = "macos") && windows::document_windows(cx) == 1 {
             cx.defer(session::quit);
             return;
         }
@@ -1656,13 +1686,8 @@ impl Tab {
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) -> Tab {
-        let editor = cx.new(|cx| {
-            let mut editor = EditorView::new(document.clone(), window, cx);
-            // Lines wrap to the width of the window until View > Word Wrap turns it off; those of a
-            // large file never do.
-            editor.set_word_wrap(true, cx);
-            editor
-        });
+        // The view shows the document as the settings have it: its font, wrapping, invisibles.
+        let editor = cx.new(|cx| EditorView::new(document.clone(), window, cx));
         let observe = cx.observe_in(&document, window, |workspace, document, window, cx| {
             workspace.document_changed(document.entity_id(), window, cx)
         });

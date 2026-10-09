@@ -21,8 +21,8 @@ use migpad_core::state::{TabState, write_atomically};
 use crate::journals;
 use crate::notices::{self, Notice};
 use crate::recent;
+use crate::settings;
 use crate::strings::{Key, tr};
-use crate::view_options;
 use crate::windows::{self, ForTab, Opening};
 use crate::workspace::Workspace;
 
@@ -37,9 +37,9 @@ struct Writer {
     active: Option<WindowId>,
     /// Writes the files a moment after the last change.
     pending: Option<Task<()>>,
-    /// What the files had when they were last written: the session, the closed tabs, the recent
-    /// files and how the windows show.
-    written: Option<[String; 4]>,
+    /// What the files had when they were last written: the session, the closed tabs and the recent
+    /// files.
+    written: Option<[String; 3]>,
     /// The program is quitting and the session is written for the last time: the windows that
     /// close now stay in it.
     done: bool,
@@ -102,7 +102,6 @@ fn write(cx: &mut App) {
     let Some(state) = journals::data(cx).map(|data| data.state()) else { return };
     let closed = closed::to_toml(&windows::closed_state(cx));
     let recent = recent::to_toml(cx);
-    let view = view_options::to_toml(cx);
     let writer = cx.default_global::<Writer>();
     if writer.done {
         return;
@@ -110,11 +109,11 @@ fn write(cx: &mut App) {
     let active = writer.active.and_then(|active| writer.windows.iter().position(|(id, _)| *id == active));
     let windows = writer.windows.iter().map(|(_, window)| window.clone()).collect();
     let session = Session { windows, active: active.unwrap_or(0) }.to_toml();
-    let files = [session, closed, recent, view];
+    let files = [session, closed, recent];
     if writer.written.as_ref() == Some(&files) {
         return;
     }
-    let result = ["session.toml", "closed.toml", "recent.toml", "view.toml"]
+    let result = ["session.toml", "closed.toml", "recent.toml"]
         .iter()
         .zip(&files)
         .try_for_each(|(name, text)| write_atomically(&state.join(name), text));
@@ -244,7 +243,8 @@ fn set_aside(journal: &Path, cx: &App) {
 
 /// Opens the windows of the session again, with their tabs, the tabs closed lately, and the
 /// documents with changes whose journals the session does not know; `paths` open in the active
-/// window. Returns that window — `None` if there was nothing to open.
+/// window. Returns that window — `None` if there was nothing to open. Without the setting to bring
+/// the session back, only documents with unsaved changes open again, in their windows.
 pub fn restore(paths: &[PathBuf], cx: &mut App) -> Option<WindowHandle<Workspace>> {
     let data = journals::data(cx)?;
     let state = data.state();
@@ -266,11 +266,13 @@ pub fn restore(paths: &[PathBuf], cx: &mut App) -> Option<WindowHandle<Workspace
     known.extend(closed.iter().flat_map(tabs_of).filter_map(|tab| tab.document));
     windows::restore_closed(closed, cx);
 
+    let everything = settings::get(cx).restore_session;
     let mut opened: Vec<(usize, WindowHandle<Workspace>)> = Vec::new();
     for (i, window) in session.windows.iter().enumerate() {
         let (mut tabs, mut notices, mut active) = (Vec::new(), Vec::new(), None);
         for (j, tab) in window.tabs.iter().enumerate() {
-            match restore_tab(tab, cx) {
+            let restored = if everything { restore_tab(tab, cx) } else { restore_changes(tab, cx) };
+            match restored {
                 Restored::Tab(tab) => {
                     if j == window.active {
                         active = Some(tabs.len());
@@ -351,6 +353,25 @@ fn restore_tab(tab: &TabState, cx: &mut App) -> Restored {
             Restored::Tab(ForTab { document, loading, selection, notice: failure, encoding_chosen })
         }
         Opening::Failed(notice) => Restored::Notice(notice),
+    }
+}
+
+/// A tab of the session, if its document has unsaved changes: the session itself is not brought
+/// back. The journal of a document without them goes, as the tab does.
+fn restore_changes(tab: &TabState, cx: &mut App) -> Restored {
+    let Some(id) = tab.document else { return Restored::Nothing };
+    match recover(id, tab.path.as_deref(), cx) {
+        Recovery::Document(document, notice) if document.read(cx).is_modified() => {
+            let encoding_chosen = tab.encoding.is_some();
+            Restored::Tab(ForTab { document, loading: None, selection: Some(tab.selection), notice, encoding_chosen })
+        }
+        // What happened to changes set aside is still told.
+        Recovery::Document(document, notice) => {
+            document.update(cx, |doc, _| doc.remove_journal());
+            notice.map_or(Restored::Nothing, Restored::Notice)
+        }
+        Recovery::Failed(notice) => Restored::Notice(notice),
+        Recovery::FromFile => Restored::Nothing,
     }
 }
 

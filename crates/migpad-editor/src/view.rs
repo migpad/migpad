@@ -30,8 +30,9 @@ use crate::columns::Columns;
 use crate::element::EditorElement;
 use crate::indent;
 use crate::keymap;
-use crate::layout::{Geometry, Layout, LineStyle, Metrics, TAB_WIDTH};
+use crate::layout::{Geometry, Layout, LineStyle, Metrics};
 use crate::movement;
+use crate::settings::EditorSettings;
 
 /// Space between the gutter and the text.
 const PAD_LEFT: f32 = 4.0;
@@ -76,11 +77,9 @@ pub struct EditorView {
     widest: f64,
     /// Columns of the long lines, found as they are laid out.
     columns: Columns,
-    /// Whether spaces, tabs and line breaks are marked.
-    show_whitespace: bool,
-    show_indent_guides: bool,
-    /// Whether lines wrap to the width of the view; they do not in a large file.
-    word_wrap: bool,
+    /// The settings of the last layout: those the application gave, or the defaults for an input
+    /// field.
+    settings: EditorSettings,
     /// The cells of a row lines wrap to; none when they do not wrap.
     wrap_cells: usize,
     /// Where the rows of the lines laid out since the text or the width last changed start, by
@@ -139,6 +138,7 @@ impl EditorView {
     fn create(document: Entity<Document>, single_line: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle().tab_stop(single_line);
         let version = document.read(cx).version();
+        let settings = if single_line { EditorSettings::default() } else { EditorSettings::current(cx) };
         let subscriptions = vec![
             cx.observe(&document, |view, _, cx| view.document_changed(cx)),
             cx.on_focus(&focus, window, Self::restart_blink),
@@ -149,7 +149,7 @@ impl EditorView {
             document,
             focus,
             single_line,
-            metrics: Metrics::new(window),
+            metrics: Metrics::new(settings.font.as_deref(), settings.font_size, window),
             colors: EditorColors::current(cx),
             scroll_top: 0.0,
             scroll_x: 0.0,
@@ -157,10 +157,8 @@ impl EditorView {
             view_lines: 1.0,
             text_width: 0.0,
             widest: 0.0,
-            columns: Columns::new(TAB_WIDTH),
-            show_whitespace: false,
-            show_indent_guides: false,
-            word_wrap: false,
+            columns: Columns::new(settings.tab_width),
+            settings,
             wrap_cells: 0,
             wraps: RefCell::default(),
             caret_at_row_end: false,
@@ -266,36 +264,26 @@ impl EditorView {
         self.single_line.then_some(self.metrics.line_height)
     }
 
-    /// Whether spaces, tabs and line breaks are marked.
-    pub fn shows_whitespace(&self) -> bool {
-        self.show_whitespace
-    }
-
-    pub fn set_show_whitespace(&mut self, show: bool, cx: &mut Context<Self>) {
-        self.show_whitespace = show;
-        cx.notify();
-    }
-
-    /// Whether levels of indentation are marked by vertical lines.
-    pub fn shows_indent_guides(&self) -> bool {
-        self.show_indent_guides
-    }
-
-    pub fn set_show_indent_guides(&mut self, show: bool, cx: &mut Context<Self>) {
-        self.show_indent_guides = show;
-        cx.notify();
-    }
-
-    /// Whether lines wrap to the width of the view: they do not in a large file even so.
-    pub fn wraps_lines(&self) -> bool {
-        self.word_wrap
-    }
-
-    pub fn set_word_wrap(&mut self, wrap: bool, cx: &mut Context<Self>) {
-        self.word_wrap = wrap;
-        self.wraps.get_mut().clear();
-        self.caret_at_row_end = false;
-        cx.notify();
+    /// Takes the settings the application gave since the last layout: a new font is measured
+    /// anew, and what was found about the rows and the columns of the lines goes if the width of a
+    /// tab or wrapping changed. The view stays at the line it was at.
+    fn apply_settings(&mut self, settings: EditorSettings, window: &Window) {
+        let old = std::mem::replace(&mut self.settings, settings);
+        let new = &self.settings;
+        if new.font != old.font || new.font_size != old.font_size {
+            let char_width = self.metrics.char_width;
+            self.metrics = Metrics::new(new.font.as_deref(), new.font_size, window);
+            self.scroll_x *= self.metrics.char_width / char_width;
+            self.goal_x = None;
+        }
+        if new.tab_width != old.tab_width {
+            self.columns = Columns::new(new.tab_width);
+        }
+        if new.tab_width != old.tab_width || new.word_wrap != old.word_wrap {
+            self.wraps.get_mut().clear();
+            self.caret_at_row_end = false;
+            self.goal_x = None;
+        }
     }
 
     /// Forgets what was found about the lines: the text has changed.
@@ -312,7 +300,7 @@ impl EditorView {
             colors: &self.colors,
             columns: &self.columns,
             scroll_x: self.scroll_x,
-            whitespace: self.show_whitespace,
+            whitespace: self.settings.show_whitespace,
             underline: self.marked.as_ref(),
         }
     }
@@ -394,6 +382,12 @@ impl EditorView {
     pub(crate) fn layout(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut Context<Self>) -> Layout {
         let active = self.focus.is_focused(window) && window.is_window_active();
         self.colors = EditorColors::current(cx);
+        if !self.single_line {
+            let settings = EditorSettings::current(cx);
+            if settings != self.settings {
+                self.apply_settings(settings, window);
+            }
+        }
         let colors = self.colors;
         let (count, large) = {
             let doc = self.document.read(cx);
@@ -421,8 +415,11 @@ impl EditorView {
         self.text_width = f64::from(text_area.size.width) - f64::from(PAD_LEFT + pad_right);
         // Lines wrap to the whole cells of the text width, one left for the caret; not those of a
         // large file or of an input field.
-        let cells =
-            if self.word_wrap && !large && !self.single_line { (self.text_width / char_width) as usize } else { 0 };
+        let cells = if self.settings.word_wrap && !large && !self.single_line {
+            (self.text_width / char_width) as usize
+        } else {
+            0
+        };
         let cells = if cells > MIN_WRAP_CELLS { cells - 1 } else { 0 };
         if cells != self.wrap_cells {
             self.wrap_cells = cells;
@@ -466,15 +463,18 @@ impl EditorView {
 
         let scroll_x = self.scroll_x;
         let screen_x = |x: f64| text_left + px((x - scroll_x) as f32);
-        let guides = (self.show_indent_guides && !self.single_line).then(|| {
-            let levels = indent::guide_levels(text, lines, first_line..end_line, TAB_WIDTH);
+        let tab_width = self.columns.tab_width();
+        let guides = (self.settings.show_indent_guides && !self.single_line).then(|| {
+            let levels = indent::guide_levels(text, lines, first_line..end_line, tab_width);
             let indents: Vec<Option<usize>> = (first_line..end_line)
-                .map(|line| indent::indentation(text, lines.line_range(text, line).0, TAB_WIDTH))
+                .map(|line| indent::indentation(text, lines.line_range(text, line).0, tab_width))
                 .collect();
-            (levels, indent::indent_step(&indents, TAB_WIDTH))
+            (levels, indent::indent_step(&indents, tab_width))
         });
         let Selection { anchor, head } = self.selection;
-        let (start, end) = (anchor.min(head), anchor.max(head));
+        // An input field without the keyboard shows no selection, as the fields of the systems do.
+        let (start, end) =
+            if self.single_line && !active { (head, head) } else { (anchor.min(head), anchor.max(head)) };
         let metrics = &self.metrics;
         // Room for the caret at either end of the text of an input field.
         let clip = if self.single_line {
@@ -526,7 +526,7 @@ impl EditorView {
                 }
             }
             let eol = lines.line_range(text, at.line).1;
-            if self.show_whitespace && last && eol > 0 && row.range.end <= row.shown.end {
+            if self.settings.show_whitespace && last && eol > 0 && row.range.end <= row.shown.end {
                 let label = match (eol, text.byte(row.range.end)) {
                     (2, _) => "CRLF",
                     (_, b'\r') => "CR",

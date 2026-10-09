@@ -5,13 +5,15 @@
 
 use gpui::{
     Context, DismissEvent, EventEmitter, FocusHandle, Focusable, KeyDownEvent, MouseButton, MouseDownEvent, Pixels,
-    Point, Render, SharedString, Subscription, Window, anchored, deferred, div, point, prelude::*, px,
+    Point, Render, ScrollHandle, SharedString, Subscription, Window, anchored, deferred, div, point, prelude::*, px,
 };
 
 use crate::menu::{self, Item, ItemSpec, Levels, MenuHost, Step, menu_key};
 
 /// Over the menu bar and its menus, which never show with a context menu.
 const PRIORITY: usize = 20;
+/// A menu taller than its window less this at either end — a long list of fonts — scrolls.
+const MARGIN: Pixels = px(4.);
 
 pub struct ContextMenu {
     focus: FocusHandle,
@@ -23,6 +25,8 @@ pub struct ContextMenu {
     keyboard: bool,
     /// The focus before the menu took it, to give back.
     previous_focus: Option<FocusHandle>,
+    /// The items, when there are more than the window has room for: a long list of fonts.
+    scroll: ScrollHandle,
     _activation: Subscription,
 }
 
@@ -55,8 +59,16 @@ impl ContextMenu {
             levels: Levels::open(&kinds, keyboard),
             keyboard,
             previous_focus,
+            scroll: ScrollHandle::new(),
             _activation: activation,
         }
+    }
+
+    /// Highlights the item `item` as the menu opens: the item chosen in a list, which the keys go
+    /// on from.
+    pub fn highlighted(self, item: usize) -> Self {
+        self.scroll.scroll_to_item(item);
+        ContextMenu { levels: Levels::at(item), ..self }
     }
 
     /// Closes the menu: the focus goes back.
@@ -80,7 +92,11 @@ impl ContextMenu {
             return;
         };
         self.keyboard = true;
-        match self.levels.key(&key, &kinds) {
+        let step = self.levels.key(&key, &kinds);
+        if let Some(item) = self.levels.highlighted(0) {
+            self.scroll.scroll_to_item(item);
+        }
+        match step {
             Step::Stay | Step::Left | Step::Right => cx.notify(),
             Step::Escape => self.dismiss(window, cx),
             Step::Choose(path) => MenuHost::choose(self, path, window, cx),
@@ -131,7 +147,10 @@ impl Render for ContextMenu {
             .on_mouse_down(MouseButton::Left, cx.listener(dismiss))
             .on_mouse_down(MouseButton::Right, cx.listener(dismiss))
             .on_mouse_down(MouseButton::Middle, cx.listener(dismiss));
-        let panel = menu::panel(self, SharedString::default(), self.items.clone(), 0, PRIORITY + 1, cx);
+        let panel = menu::panel(self, SharedString::default(), self.items.clone(), 0, PRIORITY + 1, cx)
+            .max_h(size.height - MARGIN * 2.)
+            .overflow_y_scroll()
+            .track_scroll(&self.scroll);
         div()
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key_down))

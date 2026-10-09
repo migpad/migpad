@@ -10,21 +10,7 @@ use migpad_core::text::{LineIndex, TextStore};
 use crate::colors::EditorColors;
 use crate::columns::Columns;
 use crate::display::{DisplayText, MAX_SHAPED, OffsetMap};
-
-/// Columns between tab stops, until the settings give it.
-pub(crate) const TAB_WIDTH: usize = 8;
-const FONT_SIZE: f32 = 13.0;
-
-/// The monospace font of the system.
-fn font_family() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "Menlo"
-    } else if cfg!(target_os = "windows") {
-        "Consolas"
-    } else {
-        "DejaVu Sans Mono"
-    }
-}
+use crate::settings::{installed, system_font};
 
 pub(crate) struct Metrics {
     pub font: Font,
@@ -35,15 +21,20 @@ pub(crate) struct Metrics {
 }
 
 impl Metrics {
-    pub fn new(window: &Window) -> Self {
-        let font = gpui::font(font_family());
-        let font_size = px(FONT_SIZE);
+    /// The metrics of the font `family` at `size`; of the monospace font of the system without a
+    /// family, or for one the system does not have.
+    pub fn new(family: Option<&str>, size: f32, window: &Window) -> Self {
         let text_system = window.text_system();
-        let id = text_system.resolve_font(&font);
+        let (font, id) = family.and_then(|family| installed(text_system, family)).unwrap_or_else(|| {
+            let font = gpui::font(system_font());
+            let id = text_system.resolve_font(&font);
+            (font, id)
+        });
+        let font_size = px(size);
         let char_width = text_system.advance(id, font_size, 'm').map(|advance| f64::from(advance.width)).unwrap_or(7.8);
         let ascent = f32::from(text_system.ascent(id, font_size)).abs().round();
         let descent = f32::from(text_system.descent(id, font_size)).abs().round();
-        Metrics { font, font_size, line_height: px((ascent + descent).max(FONT_SIZE)), char_width }
+        Metrics { font, font_size, line_height: px((ascent + descent).max(size.round())), char_width }
     }
 
     pub fn run(&self, len: usize, color: u32) -> TextRun {
@@ -109,7 +100,7 @@ impl ScreenLine {
     pub fn part(text: &Text, range: Range<usize>, shown: Range<usize>, style: &LineStyle, window: &Window) -> Self {
         let column = if shown.start == range.start { 0 } else { style.columns.column_of(text, &range, shown.start) };
         let DisplayText { text: shown_text, map, marks } =
-            DisplayText::new(&text.to_vec(shown.clone()), column, TAB_WIDTH, style.whitespace);
+            DisplayText::new(&text.to_vec(shown.clone()), column, style.columns.tab_width(), style.whitespace);
         let underline = style.underline.filter(|underline| underline.start < shown.end && underline.end > shown.start);
         let underline = underline.map(|underline| {
             let at = |pos: usize| map.display_offset(pos.clamp(shown.start, shown.end) - shown.start);

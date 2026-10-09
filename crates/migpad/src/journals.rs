@@ -16,6 +16,9 @@ pub const SYNC_DELAY: Duration = Duration::from_millis(1500);
 /// The folder of the data, if this copy of the program has one.
 pub struct Data {
     dir: Option<DataDir>,
+    /// The folder found for the program, even if another copy holds it: the settings are read from
+    /// there.
+    root: Option<PathBuf>,
     /// Holds the folder for this copy of the program while it runs.
     lock: Option<File>,
     /// Another running copy holds the folder: this one keeps nothing there.
@@ -48,19 +51,20 @@ pub fn find() -> Option<DataDir> {
 /// Takes the folder of the data found for this copy of the program. A second copy, which another
 /// one runs before it, keeps nothing there: their journals and sessions would mix.
 pub fn take(found: Option<DataDir>) -> Data {
+    let root = found.as_ref().map(|dir| dir.root().to_path_buf());
     match found {
         Some(dir) => match dir.lock() {
-            Ok(Some(lock)) => Data { dir: Some(dir), lock: Some(lock), another_copy: false },
-            Ok(None) => Data { dir: None, lock: None, another_copy: true },
+            Ok(Some(lock)) => Data { dir: Some(dir), root, lock: Some(lock), another_copy: false },
+            Ok(None) => Data { dir: None, root, lock: None, another_copy: true },
             // The journals will tell what is wrong with the folder.
             Err(error) => {
                 eprintln!("MigPad could not take its folder of data {}: {error}", dir.root().display());
-                Data { dir: Some(dir), lock: None, another_copy: false }
+                Data { dir: Some(dir), root, lock: None, another_copy: false }
             }
         },
         None => {
             eprintln!("MigPad has no home folder for its data: changes are not kept safe from a crash.");
-            Data { dir: None, lock: None, another_copy: false }
+            Data { dir: None, root, lock: None, another_copy: false }
         }
     }
 }
@@ -78,6 +82,11 @@ pub fn another_copy(cx: &App) -> bool {
 /// The folder of the data, if this copy has one.
 pub fn data(cx: &App) -> Option<DataDir> {
     cx.try_global::<Data>()?.dir.clone()
+}
+
+/// The folder of the data found for the program, even if another running copy holds it.
+pub fn root(cx: &App) -> Option<PathBuf> {
+    cx.try_global::<Data>()?.root.clone()
 }
 
 /// The folder of the journals.

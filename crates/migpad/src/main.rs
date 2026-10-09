@@ -3,6 +3,7 @@
 // Release builds on Windows are GUI applications: no console window.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod appearance;
 mod cli;
 mod commands;
 mod debug_input;
@@ -14,12 +15,19 @@ mod keys;
 mod modules;
 #[cfg(target_os = "macos")]
 mod native_menu;
+#[cfg(target_os = "macos")]
+mod native_settings;
 mod notices;
+mod own_settings;
 mod recent;
 mod session;
+mod settings;
+mod settings_window;
 mod status;
 mod strings;
+mod table;
 mod tabs;
+mod translations;
 mod view_options;
 mod windows;
 mod workspace;
@@ -28,10 +36,8 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use gpui::App;
-use migpad_ui::ThemeMode;
 
 use crate::instance::{Inbox, Request};
-use crate::strings::Language;
 
 fn main() {
     let cwd = std::env::current_dir().unwrap_or_default();
@@ -79,7 +85,7 @@ fn main() {
     // A click on MigPad in the Dock while it has no windows opens one, as on macOS it stays open
     // without them.
     application.on_reopen(|cx| {
-        if cx.windows().is_empty() {
+        if windows::document_windows(cx) == 0 {
             windows::open_window(&[], cx);
         }
     });
@@ -87,18 +93,23 @@ fn main() {
     let urls = inbox.clone();
     application.on_open_urls(move |list| urls.push(Request { files: instance::files_of_urls(&list) }));
     application.run(move |cx: &mut App| {
-        strings::set_language(Language::of_system());
         journals::init(data, cx);
+        // The language, the theme, the font, the strings of the user: before anything shows. What
+        // is wrong with the strings is told in the language of the settings.
+        settings::init(cx);
+        if let Some(root) = journals::root(cx) {
+            translations::load(&root, cx);
+        }
         recent::init(cx);
-        view_options::init(cx);
-        migpad_ui::theme::set_mode(theme_mode(), cx);
         migpad_editor::init(cx);
+        own_settings::init(cx);
         commands::init(&modules::all(), cx);
         commands::update_menus(None, cx);
         cx.on_window_closed(|cx, closed| {
             session::window_closed(closed, cx);
-            // On macOS MigPad stays open without windows, as applications there do.
-            if cx.windows().is_empty() && !cfg!(target_os = "macos") {
+            // On macOS MigPad stays open without windows, as applications there do; elsewhere it
+            // quits with its last window of documents, the settings window with it.
+            if windows::document_windows(cx) == 0 && !cfg!(target_os = "macos") {
                 cx.quit();
             }
             // The menus show the check marks of the active window, which may not have changed.
@@ -129,9 +140,14 @@ fn main() {
             .or_else(|| windows::open_window(&[], cx));
         match window {
             Some(window) => {
-                // A second copy keeps nothing in the folder of data: it says so.
+                // A second copy keeps nothing in the folder of data: it says so. What is wrong with the
+                // settings is told too.
                 if journals::another_copy(cx) {
                     let _ = window.update(cx, |workspace, _, cx| workspace.notify(notices::another_copy(), cx));
+                }
+                let told = translations::take_notices(cx).into_iter().chain(settings::notice(cx));
+                for notice in told.collect::<Vec<_>>() {
+                    let _ = window.update(cx, |workspace, _, cx| workspace.notify(notice, cx));
                 }
                 instance::go_to_places(&files, cx);
                 debug_input::play(window, cx)
@@ -142,14 +158,4 @@ fn main() {
         instance::serve(inbox, cx);
         cx.activate(true);
     });
-}
-
-/// Light or dark as the system is; a debug build takes `MIGPAD_THEME=light` or `dark` for
-/// screenshots, until the settings can choose.
-fn theme_mode() -> ThemeMode {
-    match std::env::var("MIGPAD_THEME") {
-        Ok(theme) if cfg!(debug_assertions) && theme == "light" => ThemeMode::Light,
-        Ok(theme) if cfg!(debug_assertions) && theme == "dark" => ThemeMode::Dark,
-        _ => ThemeMode::System,
-    }
 }

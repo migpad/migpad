@@ -192,6 +192,12 @@ pub fn open_documents(cx: &App) -> Vec<Entity<Document>> {
     open.chain(closed).collect()
 }
 
+/// How many windows of documents are open, one that is being updated now among them — which
+/// [`workspaces`] leaves out: the settings window is not one.
+pub fn document_windows(cx: &App) -> usize {
+    cx.windows().iter().filter(|window| window.downcast::<Workspace>().is_some()).count()
+}
+
 /// The workspaces of the open windows, except one that is being updated now.
 pub fn workspaces(cx: &App) -> impl Iterator<Item = (WindowHandle<Workspace>, &Workspace)> {
     cx.windows().into_iter().filter_map(|window| {
@@ -364,6 +370,16 @@ pub fn same_file(a: &Path, b: &Path) -> bool {
     a == b || resolve(a) == resolve(b)
 }
 
+/// The language of the interface changed: each window shows it — its title, the bars over the
+/// text; what is drawn anew takes it anyway.
+pub fn language_changed(cx: &mut App) {
+    let windows: Vec<WindowHandle<Workspace>> = workspaces(cx).map(|(window, _)| window).collect();
+    for window in windows {
+        let _ = window.update(cx, |workspace, window, cx| workspace.language_changed(window, cx));
+    }
+    cx.refresh_windows();
+}
+
 /// The window used last: the active one, or the one in front, or any.
 pub fn last_active(cx: &App) -> Option<WindowHandle<Workspace>> {
     let active = cx.active_window().and_then(|window| window.downcast::<Workspace>());
@@ -435,8 +451,9 @@ pub fn open_window_with(
             // with everything in it ([ADR 0020]).
             window.on_window_should_close(cx, |window, cx| {
                 let Some(Some(workspace)) = window.root::<Workspace>() else { return true };
-                // Quitting goes on once this window is done with the question whether to close.
-                if !cfg!(target_os = "macos") && cx.windows().len() == 1 {
+                // Quitting goes on once this window is done with the question whether to close. The
+                // settings window does not count: it closes with the program.
+                if !cfg!(target_os = "macos") && document_windows(cx) == 1 {
                     cx.defer(session::quit);
                     return false;
                 }

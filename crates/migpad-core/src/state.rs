@@ -1,12 +1,11 @@
 //! What MigPad keeps for itself between starts, in TOML files in the folder `state` of the data:
-//! the session — windows and their tabs — the tabs closed lately, the recent files, and how the
-//! windows show. A file is written whole,
-//! through a temporary file, so that a crash leaves either the old one or the new one.
+//! the session — windows and their tabs — the tabs closed lately and the recent files. A file is
+//! written whole, through a temporary file, so that a crash leaves either the old one or the new
+//! one.
 
 pub mod closed;
 pub mod recent;
 pub mod session;
-pub mod view;
 
 use std::fmt;
 use std::fs::{self, File};

@@ -13,6 +13,8 @@ migpad-core.workspace = true
 migpad-editor.workspace = true
 migpad-ui.workspace = true
 sys-locale.workspace = true
+# The translations the user puts in the folder of the data.
+toml_edit.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 # The named pipe the first copy listens on.
