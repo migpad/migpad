@@ -25,7 +25,7 @@ impl Default for EditorSettings {
         EditorSettings {
             font: None,
             font_size: 13.0,
-            tab_width: 8,
+            tab_width: 4,
             word_wrap: true,
             show_whitespace: false,
             show_indent_guides: false,

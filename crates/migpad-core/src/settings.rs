@@ -91,7 +91,7 @@ impl Default for Settings {
             restore_session: true,
             font: None,
             font_size: 13,
-            tab_width: 8,
+            tab_width: 4,
             word_wrap: true,
             invisibles: false,
             indent_guides: false,
@@ -370,7 +370,7 @@ pub fn template() -> String {
          # The size of the font, from 6 to 72.\n\
          font_size = 13\n\
          # Columns between tab stops, from 1 to 16.\n\
-         tab_width = 8\n\
+         tab_width = 4\n\
          \n\
          # The View menu: each is on or off in every window.\n\
          [view]\n\
@@ -465,7 +465,7 @@ mod tests {
             Setting::RestoreSession(false),
             Setting::Font(Some("Fira Code".into())),
             Setting::FontSize(20),
-            Setting::TabWidth(4),
+            Setting::TabWidth(2),
             Setting::WordWrap(false),
             Setting::Invisibles(true),
             Setting::IndentGuides(true),
@@ -483,7 +483,7 @@ mod tests {
         let again = parse(&text);
         assert_eq!(again.settings(), &expected, "{text}");
         assert!(again.problems().is_empty());
-        assert!(text.contains("[editor]") && text.contains("tab_width = 4"), "{text}");
+        assert!(text.contains("[editor]") && text.contains("tab_width = 2"), "{text}");
         // An empty font is that of the system.
         let mut file = parse("[editor]\nfont = \"  \"\n");
         assert_eq!(file.settings().font, None);
@@ -493,9 +493,9 @@ mod tests {
 
     #[test]
     fn values_out_of_place_have_their_defaults() {
-        let text = "language = \"de\"\ntheme = 1\n\n[editor]\nfont_size = 100\ntab_width = 4\nfont = 5\n\n[view]\nword_wrap = \"yes\"\n";
+        let text = "language = \"de\"\ntheme = 1\n\n[editor]\nfont_size = 100\ntab_width = 6\nfont = 5\n\n[view]\nword_wrap = \"yes\"\n";
         let file = parse(text);
-        let expected = Settings { tab_width: 4, ..Settings::default() };
+        let expected = Settings { tab_width: 6, ..Settings::default() };
         assert_eq!(file.settings(), &expected);
         let problems = file.problems();
         assert_eq!(problems.len(), 5, "{problems:?}");
@@ -542,11 +542,11 @@ mod tests {
         let mut file = parse("[editor]\ntab_width = 100 # too wide\n");
         assert_eq!(file.problems().len(), 1);
         // Even to the value it has now — the default — the file gets it: that is a change.
-        assert!(file.set(Setting::TabWidth(8)));
+        assert!(file.set(Setting::TabWidth(4)));
         assert!(file.problems().is_empty());
-        assert_eq!(file.to_toml().unwrap(), "[editor]\ntab_width = 8 # too wide\n");
+        assert_eq!(file.to_toml().unwrap(), "[editor]\ntab_width = 4 # too wide\n");
         // Again, nothing changes.
-        assert!(!file.set(Setting::TabWidth(8)));
+        assert!(!file.set(Setting::TabWidth(4)));
     }
 
     #[test]
@@ -607,8 +607,8 @@ word_wrap = false
 "
         );
         // Dotted keys and inline tables are settings too, and are changed where they are.
-        let mut file = parse("editor.tab_width = 4\nview = { invisibles = true }\n");
-        assert_eq!((file.settings().tab_width, file.settings().invisibles), (4, true));
+        let mut file = parse("editor.tab_width = 6\nview = { invisibles = true }\n");
+        assert_eq!((file.settings().tab_width, file.settings().invisibles), (6, true));
         file.set(Setting::TabWidth(3));
         file.set(Setting::Invisibles(false));
         assert_eq!(file.to_toml().unwrap(), "editor.tab_width = 3\nview = { invisibles = false }\n");
