@@ -1,5 +1,5 @@
 # cargo-about: the file of the licenses of the components MigPad is built from, which its packages
-# carry (THIRD-PARTY-LICENSES.html). CI makes it with the template script/licenses.hbs.
+# carry (THIRD-PARTY-LICENSES.txt). CI makes it with the template script/licenses.hbs.
 # https://embarkstudios.github.io/cargo-about/
 
 # The licenses deny.toml allows, in the order of choice for a crate under several: MIT first, as

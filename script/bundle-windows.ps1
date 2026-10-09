@@ -3,13 +3,13 @@
 #
 #     script\bundle-windows.ps1 -Arch x64 [-Exe target\release\migpad.exe]
 #
-# The licenses of the components, -Licenses (target\THIRD-PARTY-LICENSES.html by default), go with
+# The licenses of the components, -Licenses (target\THIRD-PARTY-LICENSES.txt by default), go with
 # them if there is such a file. The portable archive has an empty folder .migpad next to
 # migpad.exe: MigPad keeps its data there.
 param(
     [Parameter(Mandatory)][ValidateSet('x64', 'arm64')][string]$Arch,
     [string]$Exe = 'target\release\migpad.exe',
-    [string]$Licenses = 'target\THIRD-PARTY-LICENSES.html'
+    [string]$Licenses = 'target\THIRD-PARTY-LICENSES.txt'
 )
 $ErrorActionPreference = 'Stop'
 Set-Location (Split-Path $PSScriptRoot)
@@ -22,7 +22,7 @@ New-Item -ItemType Directory -Force "$staging\MigPad\.migpad" | Out-Null
 Copy-Item $Exe "$staging\MigPad\migpad.exe"
 Copy-Item LICENSE "$staging\MigPad\LICENSE.txt"
 if (Test-Path $Licenses) {
-    Copy-Item $Licenses "$staging\MigPad\THIRD-PARTY-LICENSES.html"
+    Copy-Item $Licenses "$staging\MigPad\THIRD-PARTY-LICENSES.txt"
 }
 
 $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"

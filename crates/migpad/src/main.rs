@@ -51,14 +51,19 @@ fn main() {
         return;
     }
     let cwd = std::env::current_dir().unwrap_or_default();
-    // In place of Notepad, the command line is Notepad's.
+    // In place of Notepad, the command line is Notepad's, and MigPad is a window of its own, as
+    // Notepad is: what started it waits until it closes — Git for the message of a commit — it has
+    // the rights it was started with, to save the hosts file as an administrator, and it opens an
+    // untitled document without a file. It neither gives its file to the MigPad that runs nor
+    // takes the folder of data from it, and brings back no windows.
     let notepad = command_line().and_then(|line| cli::notepad(&line, &cwd));
+    let alone = notepad.is_some();
     let files = notepad.unwrap_or_else(|| cli::files(std::env::args_os().skip(1), &cwd, |path| path.exists()));
     let request = Request { files };
     let found = journals::find();
     let root = found.as_ref().map(|dir| dir.root().to_path_buf());
     // Another copy runs with this folder of data: it takes the files, and this one is done.
-    let sent = root.as_ref().map(|root| instance::send(root, &request));
+    let sent = root.as_ref().filter(|_| !alone).map(|root| instance::send(root, &request));
     if let Some(Ok(())) = sent {
         return;
     }
@@ -69,7 +74,7 @@ fn main() {
     if instance::leave_terminal() {
         return;
     }
-    let data = journals::take(found);
+    let data = if alone { journals::without_folder(found) } else { journals::take(found) };
     let inbox = Inbox::new();
     match &root {
         Some(root) if data.holds_folder() => {

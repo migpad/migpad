@@ -27,6 +27,10 @@ windows-sys = { workspace = true, features = [
     "Win32_System_Pipes",
 ] }
 
+[target.'cfg(unix)'.dependencies]
+# Whether the program runs from a disk that cannot be written: a disk image of macOS.
+libc.workspace = true
+
 [target.'cfg(target_os = "macos")'.dependencies]
 block2.workspace = true
 objc2.workspace = true

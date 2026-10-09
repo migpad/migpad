@@ -86,7 +86,7 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 [Files]
 Source: "{#Source}\migpad.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Source}\LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#Source}\THIRD-PARTY-LICENSES.html"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#Source}\THIRD-PARTY-LICENSES.txt"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Icons]
 Name: "{autoprograms}\MigPad"; Filename: "{app}\migpad.exe"
@@ -103,17 +103,14 @@ Root: HKA; Subkey: "Software\Classes\Applications\migpad.exe\shell\open\command"
 Root: HKA; Subkey: "Software\Classes\MigPad.Text"; ValueType: string; ValueName: ""; ValueData: "{cm:TextDocument}"; Flags: uninsdeletekey
 Root: HKA; Subkey: "Software\Classes\MigPad.Text\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: """{app}\migpad.exe"",0"
 Root: HKA; Subkey: "Software\Classes\MigPad.Text\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\migpad.exe"" ""%1"""
-; Among the default apps of Settings.
+; Among the default apps of Settings. The key of MigPad goes before its subkey, which is taken back
+; first: then it is empty.
+Root: HKA; Subkey: "Software\MigPad"; Flags: uninsdeletekeyifempty
 Root: HKA; Subkey: "Software\MigPad\Capabilities"; ValueType: string; ValueName: "ApplicationName"; ValueData: "MigPad"; Flags: uninsdeletekey
 Root: HKA; Subkey: "Software\MigPad\Capabilities"; ValueType: string; ValueName: "ApplicationDescription"; ValueData: "{cm:Description}"
-Root: HKA; Subkey: "Software\MigPad"; Flags: uninsdeletekeyifempty
 Root: HKA; Subkey: "Software\RegisteredApplications"; ValueType: string; ValueName: "MigPad"; ValueData: "Software\MigPad\Capabilities"; Flags: uninsdeletevalue
-; Open in MigPad for any file.
-Root: HKA; Subkey: "Software\Classes\*\shell\MigPad"; ValueType: string; ValueName: ""; ValueData: "{cm:OpenInMigPad}"; Tasks: explorer; Flags: uninsdeletekey
-Root: HKA; Subkey: "Software\Classes\*\shell\MigPad"; ValueType: string; ValueName: "Icon"; ValueData: """{app}\migpad.exe"",0"; Tasks: explorer
-Root: HKA; Subkey: "Software\Classes\*\shell\MigPad\command"; ValueType: string; ValueName: ""; ValueData: """{app}\migpad.exe"" ""%1"""; Tasks: explorer
-; In place of Notepad: Windows starts MigPad with the command line of Notepad after --notepad.
-Root: HKLM; Subkey: "SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\notepad.exe"; ValueType: string; ValueName: "Debugger"; ValueData: """{app}\migpad.exe"" --notepad"; Tasks: notepad; Flags: uninsdeletevalue uninsdeletekeyifempty
+; Open in MigPad, PATH and the place of Notepad follow their tasks in [Code], also when a task is
+; unchecked on installing again.
 
 [Run]
 Filename: "{app}\migpad.exe"; Description: "{cm:LaunchProgram,MigPad}"; Flags: nowait postinstall skipifsilent
@@ -140,6 +137,63 @@ begin
     Result := 'Environment';
 end;
 
+// What starts in place of Notepad: Windows starts it with the command line of Notepad after it.
+const
+  NotepadKey = 'SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\notepad.exe';
+
+function NotepadDebugger: String;
+begin
+  Result := '"' + ExpandConstant('{app}') + '\migpad.exe" --notepad';
+end;
+
+// Puts MigPad in place of Notepad, keeping what was there — another editor — to put it back.
+procedure ReplaceNotepad;
+var
+  Before: String;
+begin
+  if RegQueryStringValue(HKLM, NotepadKey, 'Debugger', Before) then
+    if Before <> NotepadDebugger then
+      RegWriteStringValue(HKLM, 'Software\MigPad', 'NotepadBefore', Before);
+  RegWriteStringValue(HKLM, NotepadKey, 'Debugger', NotepadDebugger);
+end;
+
+// Takes MigPad out of the place of Notepad, if it is there — another editor put there since is left
+// alone — and puts back what was there before it.
+procedure RestoreNotepad;
+var
+  Current, Before: String;
+begin
+  if RegQueryStringValue(HKLM, NotepadKey, 'Debugger', Current) then
+    if Current = NotepadDebugger then
+    begin
+      if RegQueryStringValue(HKLM, 'Software\MigPad', 'NotepadBefore', Before) then
+        RegWriteStringValue(HKLM, NotepadKey, 'Debugger', Before)
+      else
+      begin
+        RegDeleteValue(HKLM, NotepadKey, 'Debugger');
+        RegDeleteKeyIfEmpty(HKLM, NotepadKey);
+      end;
+    end;
+  RegDeleteValue(HKLM, 'Software\MigPad', 'NotepadBefore');
+end;
+
+// Open in MigPad in the context menu of any file in Explorer.
+procedure SetExplorerVerb(Install: Boolean);
+var
+  Key, Exe: String;
+begin
+  Key := 'Software\Classes\*\shell\MigPad';
+  Exe := ExpandConstant('{app}') + '\migpad.exe';
+  if Install then
+  begin
+    RegWriteStringValue(Root, Key, '', CustomMessage('OpenInMigPad'));
+    RegWriteStringValue(Root, Key, 'Icon', '"' + Exe + '",0');
+    RegWriteStringValue(Root, Key + '\command', '', '"' + Exe + '" "%1"');
+  end
+  else
+    RegDeleteKeyIncludingSubkeys(Root, Key);
+end;
+
 // Writes the types when Install is true, takes them back otherwise.
 procedure SetTypes(Install: Boolean);
 var
@@ -161,7 +215,12 @@ begin
       RegWriteStringValue(Root, 'Software\MigPad\Capabilities\FileAssociations', Extension, 'MigPad.Text');
     end
     else
+    begin
       RegDeleteValue(Root, 'Software\Classes\' + Extension + '\OpenWithProgids', 'MigPad.Text');
+      // Keys made for MigPad alone: of types Windows did not know.
+      RegDeleteKeyIfEmpty(Root, 'Software\Classes\' + Extension + '\OpenWithProgids');
+      RegDeleteKeyIfEmpty(Root, 'Software\Classes\' + Extension);
+    end;
   end;
 end;
 
@@ -193,18 +252,34 @@ begin
   RegWriteExpandStringValue(Root, EnvironmentKey, 'Path', Copy(Paths, 2, Length(Paths) - 2));
 end;
 
+// The tasks, each way: installing again with a task unchecked takes it back.
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then
   begin
     SetTypes(True);
     if WizardIsTaskSelected('path') then
-      AddToPath(ExpandConstant('{app}'));
+      AddToPath(ExpandConstant('{app}'))
+    else
+      RemoveFromPath(ExpandConstant('{app}'));
+    SetExplorerVerb(WizardIsTaskSelected('explorer'));
+    if IsAdminInstallMode then
+      if WizardIsTaskSelected('notepad') then
+        ReplaceNotepad
+      else
+        RestoreNotepad;
   end;
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
+  // Before the registry of the installation is taken back: the keys of MigPad are empty then.
+  if CurUninstallStep = usUninstall then
+  begin
+    if IsAdminInstallMode then
+      RestoreNotepad;
+    SetExplorerVerb(False);
+  end;
   if CurUninstallStep = usPostUninstall then
   begin
     SetTypes(False);

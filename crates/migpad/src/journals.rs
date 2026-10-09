@@ -69,6 +69,13 @@ pub fn take(found: Option<DataDir>) -> Data {
     }
 }
 
+/// The folder of the data found for the program, without taking it: settings are read from there,
+/// and nothing is kept — no journals, no session. MigPad in place of Notepad runs so.
+pub fn without_folder(found: Option<DataDir>) -> Data {
+    let root = found.as_ref().map(|dir| dir.root().to_path_buf());
+    Data { dir: None, root, lock: None, another_copy: false }
+}
+
 /// Keeps the folder of the data this copy took for the program.
 pub fn init(data: Data, cx: &mut App) {
     cx.set_global(data);

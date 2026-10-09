@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Makes MigPad.app and MigPad.dmg in target/bundle from release builds: a universal one, for Apple
-# silicon and Intel, or with --native one for this Mac only, for checks.
+# silicon and Intel, or with --native one for this Mac only, for checks. --build-only builds and
+# stops; --no-build takes the builds made before — so that CI builds without the secrets of
+# signing, which no build script of a dependency is to see.
 #
 # Signs with the Developer ID of MACOS_SIGNING_IDENTITY and the hardened runtime, or ad hoc without
 # one. With a key of App Store Connect — APPLE_API_KEY_PATH (the .p8 file), APPLE_API_KEY_ID and
 # APPLE_API_ISSUER — notarizes the app and the disk image and staples their tickets to them. Puts
-# the licenses of the components, THIRD_PARTY_LICENSES (target/THIRD-PARTY-LICENSES.html by
+# the licenses of the components, THIRD_PARTY_LICENSES (target/THIRD-PARTY-LICENSES.txt by
 # default), in the bundle if there is such a file.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -14,14 +16,31 @@ version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
 bundle=target/bundle
 app=$bundle/MigPad.app
 
-if [[ ${1:-} == --native ]]; then
-    cargo build --release --locked -p migpad
+native=false build=true make=true
+for option in "$@"; do
+    case $option in
+        --native) native=true ;;
+        --build-only) make=false ;;
+        --no-build) build=false ;;
+        *) echo "unknown option $option" >&2; exit 2 ;;
+    esac
+done
+
+if $native; then
     binaries=(target/release/migpad)
+    if $build; then
+        cargo build --release --locked -p migpad
+    fi
 else
-    # GPUI draws with Metal for macOS 10.15.7 and later; Apple silicon starts at macOS 11.
-    MACOSX_DEPLOYMENT_TARGET=11.0 cargo build --release --locked -p migpad --target aarch64-apple-darwin
-    MACOSX_DEPLOYMENT_TARGET=10.15.7 cargo build --release --locked -p migpad --target x86_64-apple-darwin
     binaries=(target/aarch64-apple-darwin/release/migpad target/x86_64-apple-darwin/release/migpad)
+    if $build; then
+        # GPUI draws with Metal for macOS 10.15.7 and later; Apple silicon starts at macOS 11.
+        MACOSX_DEPLOYMENT_TARGET=11.0 cargo build --release --locked -p migpad --target aarch64-apple-darwin
+        MACOSX_DEPLOYMENT_TARGET=10.15.7 cargo build --release --locked -p migpad --target x86_64-apple-darwin
+    fi
+fi
+if ! $make; then
+    exit 0
 fi
 
 rm -rf "$bundle"
@@ -32,9 +51,9 @@ sed "s/@VERSION@/${version%%-*}/g" crates/migpad/resources/macos/Info.plist > "$
 plutil -lint -s "$app/Contents/Info.plist"
 printf 'APPL????' > "$app/Contents/PkgInfo"
 cp crates/migpad/resources/macos/MigPad.icns "$app/Contents/Resources/"
-licenses=${THIRD_PARTY_LICENSES:-target/THIRD-PARTY-LICENSES.html}
+licenses=${THIRD_PARTY_LICENSES:-target/THIRD-PARTY-LICENSES.txt}
 if [[ -f $licenses ]]; then
-    cp "$licenses" "$app/Contents/Resources/THIRD-PARTY-LICENSES.html"
+    cp "$licenses" "$app/Contents/Resources/THIRD-PARTY-LICENSES.txt"
 fi
 
 sign() {

@@ -14,8 +14,9 @@ use objc2_foundation::{NSBundle, NSError, NSString, NSURL};
 /// The identifier of the bundle, as its `Info.plist` has it.
 const BUNDLE: &str = "com.migpad.MigPad";
 
-/// The types MigPad becomes the program of. The last is that of the files of settings — `.ini`,
-/// `.conf`, `.toml` and others — that the `Info.plist` of MigPad declares.
+/// The types MigPad becomes the program of. Markdown, which macOS does not declare itself, and the
+/// last, of the files of settings — `.ini`, `.conf`, `.toml` and others — the `Info.plist` of MigPad
+/// declares too.
 const TYPES: [&str; 8] = [
     "public.plain-text",
     "com.apple.log",
@@ -36,27 +37,32 @@ pub fn available() -> bool {
     NSBundle::mainBundle().bundleIdentifier().is_some_and(|id| id.to_string() == BUNDLE)
 }
 
-/// Whether MigPad is the program of each of the types.
+/// Whether MigPad is the program of each of the types the system knows.
 pub fn is_default() -> bool {
     let workspace = NSWorkspace::sharedWorkspace();
-    TYPES.iter().all(|content| program_of(&workspace, content).as_deref() == Some(BUNDLE))
+    TYPES.iter().all(|content| match program_of(&workspace, content) {
+        Some(program) => program.as_deref() == Some(BUNDLE),
+        // A type no program declares now: no file has it.
+        None => true,
+    })
 }
 
-/// The bundle of the program of `content`.
-fn program_of(workspace: &NSWorkspace, content: &str) -> Option<String> {
+/// The bundle of the program of `content`, if one opens it; `None` for a type the system does not
+/// know.
+fn program_of(workspace: &NSWorkspace, content: &str) -> Option<Option<String>> {
     if workspace.respondsToSelector(sel!(URLForApplicationToOpenContentType:)) {
         let content = content_type(content)?;
         // SAFETY: the method of macOS 12 and later, which it answers, with a type of content.
         let url: Option<Retained<NSURL>> =
             unsafe { msg_send![workspace, URLForApplicationToOpenContentType: &*content] };
-        let url = url?;
-        NSBundle::bundleWithURL(&url)?.bundleIdentifier().map(|id| id.to_string())
+        let bundle = url.and_then(|url| NSBundle::bundleWithURL(&url)?.bundleIdentifier());
+        Some(bundle.map(|id| id.to_string()))
     } else {
         // SAFETY: LaunchServices before macOS 12; it gives the identifier with a reference to
         // release.
         let handler = unsafe { LSCopyDefaultRoleHandlerForContentType(&NSString::from_str(content), ALL_ROLES) };
         // SAFETY: the string it returned, owned now.
-        unsafe { Retained::from_raw(handler) }.map(|handler| handler.to_string())
+        Some(unsafe { Retained::from_raw(handler) }.map(|handler| handler.to_string()))
     }
 }
 

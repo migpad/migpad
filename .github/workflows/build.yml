@@ -30,11 +30,11 @@ jobs:
       - run: cargo install cargo-about --version 0.9.2 --features cli --locked
       # The sources of the crates of every platform, whose license files cargo-about reads.
       - run: cargo fetch --locked
-      - run: cargo about generate --workspace --locked --fail -o THIRD-PARTY-LICENSES.html script/licenses.hbs
+      - run: cargo about generate --workspace --locked --fail -o THIRD-PARTY-LICENSES.txt script/licenses.hbs
       - uses: actions/upload-artifact@v4
         with:
           name: third-party-licenses
-          path: THIRD-PARTY-LICENSES.html
+          path: THIRD-PARTY-LICENSES.txt
 
   macos:
     name: macOS
@@ -51,6 +51,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: release
+      # The builds come first, without the secrets: no build script of a dependency sees them.
+      - run: script/bundle-macos --build-only
       - uses: actions/download-artifact@v4
         with:
           name: third-party-licenses
@@ -62,6 +64,7 @@ jobs:
           MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
         run: |
+          set -euo pipefail
           keychain=$RUNNER_TEMP/signing.keychain-db
           password=$(openssl rand -base64 24)
           echo "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
@@ -72,11 +75,15 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain" > /dev/null
           security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
           rm "$RUNNER_TEMP/certificate.p12"
-          identity=$(security find-identity -v -p codesigning "$keychain" | grep -m 1 'Developer ID Application' | sed 's/.*"\(.*\)"/\1/')
+          identity=$(security find-identity -v -p codesigning "$keychain" | grep 'Developer ID Application' | head -n 1 | sed 's/.*"\(.*\)"/\1/' || true)
+          if [[ -z $identity ]]; then
+            echo "::error::The certificate has no valid Developer ID Application identity"
+            exit 1
+          fi
           echo "MACOS_SIGNING_IDENTITY=$identity" >> "$GITHUB_ENV"
           printf '%s\n' "$APPLE_API_KEY" > "$RUNNER_TEMP/api-key.p8"
           echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/api-key.p8" >> "$GITHUB_ENV"
-      - run: script/bundle-macos
+      - run: script/bundle-macos --no-build
         env:
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}

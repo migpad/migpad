@@ -5,7 +5,7 @@
 # Needs dpkg-deb and dpkg-shlibdeps (dpkg-dev), rpmbuild (rpm), and for the AppImage appimagetool
 # and the runtime of AppImages: APPIMAGETOOL and APPIMAGE_RUNTIME, the paths of the files of their
 # releases. MIGPAD_EXE is the build (target/release/migpad by default), THIRD_PARTY_LICENSES the
-# file of the licenses of the components (target/THIRD-PARTY-LICENSES.html by default), if there
+# file of the licenses of the components (target/THIRD-PARTY-LICENSES.txt by default), if there
 # is one.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -40,16 +40,16 @@ mkdir -p "$doc"
     echo "Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/"
     echo "Upstream-Name: MigPad"
     echo "Source: https://github.com/migpad/migpad"
-    echo "Comment: The licenses of the components MigPad is built from are in THIRD-PARTY-LICENSES.html."
+    echo "Comment: The licenses of the components MigPad is built from are in THIRD-PARTY-LICENSES.txt."
     echo
     echo "Files: *"
     echo "Copyright: 2026 Iaroslav Vorobev"
     echo "License: MIT"
     sed -e 's/^/ /' -e 's/^ $/ ./' LICENSE
 } > "$doc/copyright"
-licenses=${THIRD_PARTY_LICENSES:-target/THIRD-PARTY-LICENSES.html}
+licenses=${THIRD_PARTY_LICENSES:-target/THIRD-PARTY-LICENSES.txt}
 if [[ -f $licenses ]]; then
-    install -m644 "$licenses" "$doc/THIRD-PARTY-LICENSES.html"
+    install -m644 "$licenses" "$doc/THIRD-PARTY-LICENSES.txt"
 fi
 chmod -R u=rwX,go=rX "$root"
 

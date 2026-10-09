@@ -228,6 +228,9 @@ struct SettingsWindow {
     font_items: Vec<FontItem>,
     /// The language of the labels.
     language: Language,
+    /// Whether MigPad opens the texts, as the row of the program of texts tells; `None` without the
+    /// row, outside of a bundle.
+    default_app: Option<bool>,
     controls: Controls,
 }
 
@@ -241,8 +244,6 @@ struct Controls {
     tab_width_stepper: Retained<NSStepper>,
     tab_width_unit: Retained<NSTextField>,
     restore: Retained<NSButton>,
-    /// The button that makes MigPad the program of texts, and the note under it; only in a bundle.
-    default_app: Option<(Retained<NSButton>, Retained<NSTextField>)>,
 }
 
 /// Opens the window, or brings it forward.
@@ -340,18 +341,22 @@ impl SettingsWindow {
         let fonts = monospace_fonts(mtm);
         let font_items = font_items(&fonts, settings.font.as_deref());
         let language = Language::current();
-        let controls = build(&window, &target, &font_items, mtm);
-        SettingsWindow { window, target, fonts, font_items, language, controls }
+        let default_app = default_app_state();
+        let controls = build(&window, &target, &font_items, default_app, mtm);
+        SettingsWindow { window, target, fonts, font_items, language, default_app, controls }
     }
 
     /// Shows `settings` in the controls: in the language of the interface now — the controls are
     /// made anew in another one — and with the font of the settings in the list.
     fn show(&mut self, settings: &Settings, mtm: MainThreadMarker) {
         let font_items = font_items(&self.fonts, settings.font.as_deref());
-        if self.language != Language::current() || font_items != self.font_items {
+        let default_app = default_app_state();
+        // The controls are made anew, and the window fitted to them, when what they say changes.
+        if self.language != Language::current() || font_items != self.font_items || default_app != self.default_app {
             self.language = Language::current();
             self.font_items = font_items;
-            self.controls = build(&self.window, &self.target, &self.font_items, mtm);
+            self.default_app = default_app;
+            self.controls = build(&self.window, &self.target, &self.font_items, default_app, mtm);
         }
         let controls = &self.controls;
         let index = |position: Option<usize>| position.map_or(-1, |position| position as isize);
@@ -371,11 +376,6 @@ impl SettingsWindow {
         controls.tab_width_unit.setStringValue(&NSString::from_str(&unit));
         let restore = if settings.restore_session { NSControlStateValueOn } else { NSControlStateValueOff };
         controls.restore.setState(restore);
-        if let Some((button, note)) = &controls.default_app {
-            let done = default_app::is_default();
-            button.setEnabled(!done);
-            note.setStringValue(&NSString::from_str(default_app_strings(done)[2]));
-        }
     }
 }
 
@@ -414,9 +414,20 @@ fn monospace_fonts(mtm: MainThreadMarker) -> Vec<String> {
     fonts
 }
 
+/// Whether MigPad opens the texts, if it runs from its bundle.
+fn default_app_state() -> Option<bool> {
+    default_app::available().then(default_app::is_default)
+}
+
 /// Makes the controls of the window, in the language of the interface now, and fits the window to
-/// them.
-fn build(window: &NSWindow, target: &Target, font_items: &[FontItem], mtm: MainThreadMarker) -> Controls {
+/// them; with `default_app`, the row of the program of texts in that state.
+fn build(
+    window: &NSWindow,
+    target: &Target,
+    font_items: &[FontItem],
+    default_app: Option<bool>,
+    mtm: MainThreadMarker,
+) -> Controls {
     window.setTitle(&NSString::from_str(settings_window::title()));
     let label = |key: Key| NSTextField::labelWithString(&NSString::from_str(tr(key)), mtm);
     let popup = |items: &[String], action: Sel| {
@@ -500,8 +511,8 @@ fn build(window: &NSWindow, target: &Target, font_items: &[FontItem], mtm: MainT
     };
 
     // MigPad as the program of texts, if it runs from its bundle.
-    let default_app = default_app::available().then(|| {
-        let [_, make_default, types] = default_app_strings(false);
+    let default_app = default_app.map(|done| {
+        let [_, make_default, note] = default_app_strings(done);
         // SAFETY: the target answers the action, and lives as long as the window.
         let button = unsafe {
             NSButton::buttonWithTitle_target_action(
@@ -511,7 +522,8 @@ fn build(window: &NSWindow, target: &Target, font_items: &[FontItem], mtm: MainT
                 mtm,
             )
         };
-        let note = NSTextField::wrappingLabelWithString(&NSString::from_str(types), mtm);
+        button.setEnabled(!done);
+        let note = NSTextField::wrappingLabelWithString(&NSString::from_str(note), mtm);
         note.setFont(Some(&NSFont::systemFontOfSize(NSFont::smallSystemFontSize())));
         note.setTextColor(Some(&NSColor::secondaryLabelColor()));
         note.setPreferredMaxLayoutWidth(width + 60.);
@@ -579,7 +591,6 @@ fn build(window: &NSWindow, target: &Target, font_items: &[FontItem], mtm: MainT
         tab_width_stepper,
         tab_width_unit,
         restore,
-        default_app,
     }
 }
 

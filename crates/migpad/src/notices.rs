@@ -227,6 +227,11 @@ pub fn command_installed(path: &str) -> Notice {
     Notice::new(Severity::Info, fill(Key::NoticeCommandInstalled, &[("path", path)]))
 }
 
+/// MigPad runs from a disk image or a temporary copy: a link to it would lead nowhere.
+pub fn command_temporary() -> Notice {
+    Notice::new(Severity::Warning, tr(Key::NoticeCommandTemporary).to_owned())
+}
+
 /// The command `migpad` could not be made.
 pub fn command_failed(reason: &str) -> Notice {
     Notice::new(Severity::Error, fill(Key::NoticeCommandFailed, &[("reason", reason)]))

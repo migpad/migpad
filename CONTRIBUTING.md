@@ -80,7 +80,7 @@ mkdir -p /tmp/migpad-check && echo 'theme = "dark"' > /tmp/migpad-check/settings
 MIGPAD_DATA_DIR=/tmp/migpad-check cargo run -- notes.txt
 ```
 
-One MigPad runs for a folder of data: the copy that took it listens on a local channel — `migpad.sock` in the folder, a named pipe on Windows — and a next start with the same folder gives it its files (`notes.txt:120:15` with a place) and quits at once. A check that needs a copy of its own takes a folder of its own. A release build started from a terminal goes on in a process of its own and gives the terminal back; `MIGPAD_DETACHED=1` keeps it in the terminal.
+One MigPad runs for a folder of data: the copy that took it listens on a local channel — `migpad.sock` in the folder, or in the user's temporary folder where the folder cannot hold a socket (a memory stick with FAT), a named pipe on Windows — and a next start with the same folder gives it its files (`notes.txt:120:15` with a place) and quits at once. Started in place of Notepad on Windows (`migpad.exe --notepad` and the command line of Notepad), MigPad is a window of its own instead, as Notepad is: it gives its file to no other copy, keeps no journals and brings back no windows, and what started it waits until it closes. A check that needs a copy of its own takes a folder of its own. A release build started from a terminal goes on in a process of its own and gives the terminal back; `MIGPAD_DETACHED=1` keeps it in the terminal.
 
 Input fields — the single-line mode of the editor view — can be tried in an example window with two fields, as in a find bar:
 
@@ -96,7 +96,7 @@ The packages are made by scripts in `script/`, which CI runs (`.github/workflows
 - `script/bundle-windows.ps1 -Arch x64` — the installer, made by [Inno Setup](https://jrsoftware.org/isinfo.php) 6 from `crates/migpad/resources/windows/migpad.iss`, and the portable archive;
 - `script/bundle-linux` — the `.deb`, `.rpm` and AppImage for the architecture of the machine.
 
-The icon is `crates/migpad/resources/icon.svg`; after changing it, `swift script/icons.swift` makes its files for the three systems again. The licenses of the components MigPad is built from, `THIRD-PARTY-LICENSES.html`, go into every package: CI makes the file with [cargo-about](https://github.com/EmbarkStudios/cargo-about) from `about.toml` and `script/licenses.hbs`.
+The icon is `crates/migpad/resources/icon.svg`; after changing it, `swift script/icons.swift` makes its files for the three systems again. The licenses of the components MigPad is built from, `THIRD-PARTY-LICENSES.txt`, go into every package: CI makes the file with [cargo-about](https://github.com/EmbarkStudios/cargo-about) from `about.toml` and `script/licenses.hbs`.
 
 A release: a pull request sets the version in `Cargo.toml` and the changelog, made by [git-cliff](https://git-cliff.org/) (`git cliff --tag vX.Y.Z -o CHANGELOG.md`, configured in `cliff.toml`); once it is merged, the tag `vX.Y.Z` on it makes the packages and a draft release with them, which a maintainer publishes.
 

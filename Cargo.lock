@@ -3241,6 +3241,7 @@ dependencies = [
  "embed-resource",
  "gpui-pre",
  "gpui-pre-platform",
+ "libc",
  "migpad-core",
  "migpad-editor",
  "migpad-ui",

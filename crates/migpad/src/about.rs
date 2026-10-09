@@ -10,8 +10,9 @@ use gpui::App;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The site of MigPad.
 const SITE: &str = "https://migpad.com";
-/// The file of the licenses of the components MigPad is built from, which the packages carry.
-const THIRD_PARTY_LICENSES: &str = "THIRD-PARTY-LICENSES.html";
+/// The file of the licenses of the components MigPad is built from, which the packages carry: plain
+/// text, which MigPad opens itself — a browser of a sandbox, such as a snap, may not see the file.
+const THIRD_PARTY_LICENSES: &str = "THIRD-PARTY-LICENSES.txt";
 
 pub fn show(cx: &mut App) {
     let licenses = third_party_licenses();
@@ -30,7 +31,15 @@ pub fn show(cx: &mut App) {
 fn third_party_licenses() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
-    licenses_for(&exe, Path::is_file)
+    licenses_for(&exe, Path::is_file).map(without_verbatim)
+}
+
+/// A path of Windows without `\\?\`, which canonical paths start with there: as the path of a tab.
+fn without_verbatim(path: PathBuf) -> PathBuf {
+    match path.to_str().and_then(|text| text.strip_prefix(r"\\?\")) {
+        Some(rest) if !rest.starts_with("UNC") => PathBuf::from(rest),
+        _ => path,
+    }
 }
 
 fn licenses_for(exe: &Path, exists: impl Fn(&Path) -> bool) -> Option<PathBuf> {
@@ -125,9 +134,10 @@ mod own {
 
     use super::{SITE, VERSION};
     use crate::strings::{Key, fill, tr};
+    use crate::windows;
 
     /// A question over the active window, as the systems tell about a program; its second button
-    /// opens the licenses of the components.
+    /// opens the licenses of the components in a tab.
     pub fn show(licenses: Option<PathBuf>, cx: &mut App) {
         let Some(window) = cx.active_window() else { return };
         let detail = format!(
@@ -148,7 +158,12 @@ mod own {
         };
         cx.spawn(async move |cx| {
             if let (Ok(1), Some(licenses)) = (answer.await, licenses) {
-                cx.update(|cx| cx.open_with_system(&licenses));
+                cx.update(|cx| {
+                    if let Some(window) = windows::last_active(cx) {
+                        let _ =
+                            window.update(cx, |workspace, window, cx| workspace.open_paths(&[licenses], window, cx));
+                    }
+                });
             }
         })
         .detach();
@@ -162,12 +177,21 @@ mod tests {
     #[test]
     fn the_licenses_are_found_where_each_package_puts_them() {
         let found = |exe: &str, file: &str| licenses_for(Path::new(exe), |path| path == Path::new(file));
-        let bundle = "/Applications/MigPad.app/Contents/MacOS/../Resources/THIRD-PARTY-LICENSES.html";
+        let bundle = "/Applications/MigPad.app/Contents/MacOS/../Resources/THIRD-PARTY-LICENSES.txt";
         assert_eq!(found("/Applications/MigPad.app/Contents/MacOS/migpad", bundle), Some(PathBuf::from(bundle)));
-        let windows = "/Programs/MigPad/THIRD-PARTY-LICENSES.html";
+        let windows = "/Programs/MigPad/THIRD-PARTY-LICENSES.txt";
         assert_eq!(found("/Programs/MigPad/migpad.exe", windows), Some(PathBuf::from(windows)));
-        let linux = "/usr/bin/../share/doc/migpad/THIRD-PARTY-LICENSES.html";
+        let linux = "/usr/bin/../share/doc/migpad/THIRD-PARTY-LICENSES.txt";
         assert_eq!(found("/usr/bin/migpad", linux), Some(PathBuf::from(linux)));
         assert_eq!(found("/work/target/debug/migpad", linux), None);
+    }
+
+    #[test]
+    fn a_tab_has_no_verbatim_path_of_windows() {
+        let plain = without_verbatim(PathBuf::from(r"\\?\C:\Program Files\MigPad\THIRD-PARTY-LICENSES.txt"));
+        assert_eq!(plain, PathBuf::from(r"C:\Program Files\MigPad\THIRD-PARTY-LICENSES.txt"));
+        let share = PathBuf::from(r"\\?\UNC\server\share\x.txt");
+        assert_eq!(without_verbatim(share.clone()), share);
+        assert_eq!(without_verbatim(PathBuf::from("/usr/share/doc/x")), PathBuf::from("/usr/share/doc/x"));
     }
 }

@@ -68,9 +68,32 @@
 			</array>
 		</dict>
 	</array>
-	<!-- Files of settings that macOS knows no type for: plain text, as they are. -->
+	<!-- Types that macOS itself does not declare: Markdown, which only some programs do, and files
+	     of settings it knows no type for — plain text, as they are. -->
 	<key>UTImportedTypeDeclarations</key>
 	<array>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>net.daringfireball.markdown</string>
+			<key>UTTypeDescription</key>
+			<string>Markdown Document</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.plain-text</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>md</string>
+					<string>markdown</string>
+				</array>
+				<key>public.mime-type</key>
+				<array>
+					<string>text/markdown</string>
+				</array>
+			</dict>
+		</dict>
 		<dict>
 			<key>UTTypeIdentifier</key>
 			<string>com.migpad.configuration-text</string>
