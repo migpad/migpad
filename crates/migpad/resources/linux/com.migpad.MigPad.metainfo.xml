@@ -20,7 +20,6 @@
   <launchable type="desktop-id">com.migpad.MigPad.desktop</launchable>
   <url type="homepage">https://migpad.com</url>
   <url type="bugtracker">https://github.com/migpad/migpad/issues</url>
-  <url type="vcs-browser">https://github.com/migpad/migpad</url>
   <categories>
     <category>Utility</category>
     <category>TextEditor</category>
