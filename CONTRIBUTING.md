@@ -88,6 +88,18 @@ Input fields — the single-line mode of the editor view — can be tried in an 
 cargo run -p migpad-editor --example fields
 ```
 
+## Packages and releases
+
+The packages are made by scripts in `script/`, which CI runs (`.github/workflows/build.yml`, by hand or for a tag):
+
+- `script/bundle-macos` — `MigPad.app` and `MigPad.dmg`, universal for Apple silicon and Intel; `--native` builds for this Mac only, for a check. It signs ad hoc, or with a Developer ID and notarization when the variables it names are set;
+- `script/bundle-windows.ps1 -Arch x64` — the installer, made by [Inno Setup](https://jrsoftware.org/isinfo.php) 6 from `crates/migpad/resources/windows/migpad.iss`, and the portable archive;
+- `script/bundle-linux` — the `.deb`, `.rpm` and AppImage for the architecture of the machine.
+
+The icon is `crates/migpad/resources/icon.svg`; after changing it, `swift script/icons.swift` makes its files for the three systems again. The licenses of the components MigPad is built from, `THIRD-PARTY-LICENSES.html`, go into every package: CI makes the file with [cargo-about](https://github.com/EmbarkStudios/cargo-about) from `about.toml` and `script/licenses.hbs`.
+
+A release: a pull request sets the version in `Cargo.toml` and the changelog, made by [git-cliff](https://git-cliff.org/) (`git cliff --tag vX.Y.Z -o CHANGELOG.md`, configured in `cliff.toml`); once it is merged, the tag `vX.Y.Z` on it makes the packages and a draft release with them, which a maintainer publishes.
+
 ## Pull requests
 
 - Branch from `main` and name the branch `<type>/<topic>`, for example `feat/gap-buffer`.

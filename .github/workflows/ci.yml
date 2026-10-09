@@ -32,7 +32,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # MigPad ships for x64 and ARM64 on Windows and Linux.
+        os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, windows-11-arm, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -53,7 +54,7 @@ jobs:
       - name: Check that migpad.exe needs no Visual C++ runtime
         if: runner.os == 'Windows'
         run: |
-          $dumpbin = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -find 'VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe' | Select-Object -First 1
+          $dumpbin = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -find 'VC\Tools\MSVC\**\bin\Host*\*\dumpbin.exe' | Select-Object -First 1
           $dlls = & $dumpbin /nologo /dependents target\debug\migpad.exe
           $dlls
           if ($dlls -match 'vcruntime|api-ms-win-crt') { throw 'migpad.exe depends on the Visual C++ runtime' }
