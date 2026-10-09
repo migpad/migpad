@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- What software centers of Linux tell about MigPad: script/bundle-linux puts in the version and
+     the date in place of @VERSION@ and @DATE@. -->
+<component type="desktop-application">
+  <id>com.migpad.MigPad</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>MigPad</name>
+  <summary>A fast text editor</summary>
+  <summary xml:lang="ru">Быстрый текстовый редактор</summary>
+  <developer id="com.migpad">
+    <name>Iaroslav Vorobev</name>
+  </developer>
+  <description>
+    <p>MigPad is a small, fast text editor in the spirit of AkelPad. It starts at once, keeps large files responsive and is careful with text: Unicode and legacy encodings such as Windows-1251, KOI8-R and CP866, their detection, and LF, CRLF and CR line endings.</p>
+    <p>Nothing is lost: edits are saved continuously, so quitting asks nothing and brings back the windows, tabs and unsaved changes. Find and replace takes regular expressions. MigPad never goes online.</p>
+    <p xml:lang="ru">MigPad — маленький быстрый текстовый редактор в духе AkelPad. Он запускается мгновенно, не тормозит на больших файлах и бережно работает с текстом: Unicode и старые кодировки — Windows-1251, KOI8-R, CP866, их определение, переводы строк LF, CRLF и CR.</p>
+    <p xml:lang="ru">Ничего не теряется: правки сохраняются непрерывно, поэтому при выходе вопросов нет, а окна, вкладки и несохранённые правки возвращаются. Поиск и замена понимают регулярные выражения. MigPad не обращается в сеть.</p>
+  </description>
+  <launchable type="desktop-id">com.migpad.MigPad.desktop</launchable>
+  <url type="homepage">https://migpad.com</url>
+  <url type="bugtracker">https://github.com/migpad/migpad/issues</url>
+  <url type="vcs-browser">https://github.com/migpad/migpad</url>
+  <categories>
+    <category>Utility</category>
+    <category>TextEditor</category>
+  </categories>
+  <provides>
+    <binary>migpad</binary>
+  </provides>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="@VERSION@" date="@DATE@"/>
+  </releases>
+</component>
