@@ -67,7 +67,13 @@ On macOS, View ▸ Menu Bar in Window shows the menu bar that MigPad draws on Wi
 MIGPAD_MENU_BAR=1 cargo run -- notes.txt
 ```
 
-MigPad keeps its data — the settings, the journals of the documents, the session, the recent files — in `~/.migpad`, or in a folder `.migpad` next to the program if there is one (next to `MigPad.app` on macOS), which makes it portable. The settings are `settings.toml` there: the language, the theme, the font and its size, the width of a tab, the toggles of the View menu, whether the windows of the last time open again. MigPad writes the file as they change, keeping what was written by hand, and takes a change made by hand when one of its windows comes back to the front, or at once if the file was saved in MigPad. A debug build takes another folder of data from `MIGPAD_DATA_DIR`, so that a check starts from nothing — or from the settings put there — and leaves the data of every day alone:
+The settings window of macOS is a window of the system; the one MigPad draws on Windows and Linux opens on macOS in a debug build with `MIGPAD_OWN_SETTINGS=1`:
+
+```sh
+MIGPAD_OWN_SETTINGS=1 cargo run -- notes.txt
+```
+
+MigPad keeps its data — the settings, the journals of the documents, the session, the recent files — in `~/.migpad`, or in a folder `.migpad` next to the program if there is one (next to `MigPad.app` on macOS), which makes it portable. The settings are `settings.toml` there: the language, the theme, the font and its size, the width of a tab, the toggles of the View menu, whether the windows of the last time open again. MigPad writes the file as they change, keeping what was written by hand, and takes a change made by hand when one of its windows comes back to the front, or at once if the file was saved in MigPad. A translation put there, `locales/en.toml` or `locales/ru.toml`, takes the place of the strings it has as MigPad starts; its keys are those of `crates/migpad/locales/`. A debug build takes another folder of data from `MIGPAD_DATA_DIR`, so that a check starts from nothing — or from the settings put there — and leaves the data of every day alone:
 
 ```sh
 mkdir -p /tmp/migpad-check && echo 'theme = "dark"' > /tmp/migpad-check/settings.toml
