@@ -27,7 +27,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: licenses
-      - run: cargo install cargo-about --version 0.9.2 --locked
+      - run: cargo install cargo-about --version 0.9.2 --features cli --locked
       # The sources of the crates of every platform, whose license files cargo-about reads.
       - run: cargo fetch --locked
       - run: cargo about generate --workspace --locked --fail -o THIRD-PARTY-LICENSES.html script/licenses.hbs
