@@ -52,8 +52,9 @@ copy = "&Copy"
 paste = "&Paste"
 delete = "&Delete"
 select_all = "Select &All"
-upper_case = "Upper Ca&se"
-lower_case = "Lo&wer Case"
+case_menu = "C&hange Case"
+upper_case = "&Upper Case"
+lower_case = "&Lower Case"
 
 [transform]
 menu = "Transfor&m"

@@ -32,21 +32,17 @@ impl Module for EditModule {
         registry.add(Command::new("edit.delete", Key::EditDelete, Delete), menu(1));
         let select_all = Command::new("edit.select_all", Key::EditSelectAll, SelectAll).os_action(OsAction::SelectAll);
         registry.add(select_all, menu(1));
+        let has_selection = |workspace: &crate::workspace::Workspace, cx: &gpui::App| {
+            let editor = workspace.editor();
+            let sel = editor.read(cx).selection();
+            sel.anchor != sel.head || editor.read(cx).is_block_selection()
+        };
         let upper = Command::new("edit.upper_case", Key::EditUpperCase, UpperCase)
             .keys(by_os(&["cmd-shift-u"], &["ctrl-shift-u"], &["ctrl-shift-u"]))
-            .enabled(|workspace, cx| {
-                let editor = workspace.editor();
-                let sel = editor.read(cx).selection();
-                sel.anchor != sel.head || editor.read(cx).is_block_selection()
-            });
-        registry.add(upper, menu(2));
+            .enabled(has_selection);
         let lower = Command::new("edit.lower_case", Key::EditLowerCase, LowerCase)
             .keys(by_os(&["cmd-shift-l"], &["ctrl-shift-l"], &["ctrl-shift-l"]))
-            .enabled(|workspace, cx| {
-                let editor = workspace.editor();
-                let sel = editor.read(cx).selection();
-                sel.anchor != sel.head || editor.read(cx).is_block_selection()
-            });
-        registry.add(lower, menu(2));
+            .enabled(has_selection);
+        registry.add_group(Key::EditCaseMenu, vec![upper, lower], MenuId::Edit, 2);
     }
 }

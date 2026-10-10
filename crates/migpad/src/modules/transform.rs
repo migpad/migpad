@@ -37,8 +37,11 @@ impl Module for TransformModule {
 
     fn register(&self, registry: &mut Registry) {
         let has_selection = |workspace: &Workspace, cx: &gpui::App| {
-            let sel = workspace.editor().read(cx).selection();
-            sel.anchor != sel.head || workspace.editor().read(cx).is_block_selection()
+            let editor = workspace.editor().read(cx);
+            !editor.is_block_selection() && {
+                let sel = editor.selection();
+                sel.anchor != sel.head
+            }
         };
         let commands = vec![
             Command::new("transform.hex_encode", Key::TransformHexEncode, HexEncode).enabled(has_selection),
@@ -101,14 +104,16 @@ fn apply_transform(
 }
 
 fn hex_encode(bytes: &[u8]) -> Vec<u8> {
-    let s = String::from_utf8_lossy(bytes);
-    let hex: String = s.bytes().map(|b| format!("{b:02X}")).collect();
+    let hex: String = bytes.iter().map(|b| format!("{b:02X}")).collect();
     hex.into_bytes()
 }
 
 fn hex_decode(bytes: &[u8]) -> Result<Vec<u8>, &'static str> {
     let s = std::str::from_utf8(bytes).map_err(|_| "not valid UTF-8")?;
     let s = s.trim();
+    if !s.is_ascii() {
+        return Err("hex: non-hex characters");
+    }
     if s.len() % 2 != 0 {
         return Err("hex: odd number of digits");
     }
@@ -116,8 +121,7 @@ fn hex_decode(bytes: &[u8]) -> Result<Vec<u8>, &'static str> {
 }
 
 fn base64_encode(bytes: &[u8]) -> Vec<u8> {
-    let s = String::from_utf8_lossy(bytes);
-    base64::engine::general_purpose::STANDARD.encode(s.as_bytes()).into_bytes()
+    base64::engine::general_purpose::STANDARD.encode(bytes).into_bytes()
 }
 
 fn base64_decode(bytes: &[u8]) -> Result<Vec<u8>, &'static str> {
@@ -126,8 +130,7 @@ fn base64_decode(bytes: &[u8]) -> Result<Vec<u8>, &'static str> {
 }
 
 fn base58_encode(bytes: &[u8]) -> Vec<u8> {
-    let s = String::from_utf8_lossy(bytes);
-    bs58::encode(s.as_bytes()).into_string().into_bytes()
+    bs58::encode(bytes).into_string().into_bytes()
 }
 
 fn base58_decode(bytes: &[u8]) -> Result<Vec<u8>, &'static str> {
@@ -136,8 +139,7 @@ fn base58_decode(bytes: &[u8]) -> Result<Vec<u8>, &'static str> {
 }
 
 fn url_encode(bytes: &[u8]) -> Vec<u8> {
-    let s = String::from_utf8_lossy(bytes);
-    percent_encoding::utf8_percent_encode(&s, percent_encoding::NON_ALPHANUMERIC).to_string().into_bytes()
+    percent_encoding::percent_encode(bytes, percent_encoding::NON_ALPHANUMERIC).to_string().into_bytes()
 }
 
 fn url_decode(bytes: &[u8]) -> Result<Vec<u8>, &'static str> {
@@ -167,6 +169,9 @@ fn bip39_to_dig(bytes: &[u8]) -> Result<Vec<u8>, &'static str> {
 fn dig_to_bip39(bytes: &[u8]) -> Result<Vec<u8>, &'static str> {
     let s = std::str::from_utf8(bytes).map_err(|_| "not valid UTF-8")?;
     let s = s.trim();
+    if !s.is_ascii() {
+        return Err("dig: non-digit characters");
+    }
     if s.len() % 4 != 0 {
         return Err("dig: length must be a multiple of 4");
     }

@@ -41,8 +41,9 @@ copy = "С&копировать"
 paste = "Вст&авить"
 delete = "&Удалить"
 select_all = "Выбрать &все"
-upper_case = "В верхни&й регистр"
-lower_case = "В ни&жний регистр"
+case_menu = "Ре&гистр"
+upper_case = "В &верхний"
+lower_case = "В &нижний"
 
 [transform]
 menu = "Преобра&зовать"
