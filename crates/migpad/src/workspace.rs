@@ -21,7 +21,7 @@ use migpad_editor::{ContextMenuEvent, EditorView};
 use migpad_ui::notification::NotificationBar;
 use migpad_ui::{Button, ContextMenu, DraggedTab, ItemSpec, MenuBar, TabBar, TabInfo, theme};
 
-use crate::commands::{self, Registry, update_menus};
+use crate::commands::{self, Registry, refresh_menus};
 use crate::find::FindBar;
 use crate::go_to::{self, GoToBar};
 use crate::journals;
@@ -170,7 +170,7 @@ impl Workspace {
         // journals of a window that goes to the background reach the disk.
         let activation = cx.observe_window_activation(window, |workspace, window, cx| {
             if window.is_window_active() {
-                update_menus(Some(workspace), cx);
+                refresh_menus(cx);
                 session::activated(workspace.window_id, cx);
                 // Back in the window: other programs may have changed its files meanwhile, and the
                 // file of the settings.
@@ -473,7 +473,7 @@ impl Workspace {
             self.reveal_tab = true;
             window.focus(&self.editor().focus_handle(cx), cx);
             self.update_title(window, cx);
-            update_menus(Some(self), cx);
+            refresh_menus(cx);
             cx.notify();
             return;
         }
@@ -662,7 +662,7 @@ impl Workspace {
         if let Ok(Some(after)) = converted {
             editor.update(cx, |editor, cx| editor.select(after, window, cx));
         }
-        update_menus(Some(self), cx);
+        refresh_menus(cx);
     }
 
     /// Saves the document of the tab at `index` to its file in `format`, or in its own format; an
@@ -728,7 +728,7 @@ impl Workspace {
         match result {
             Ok(()) => {
                 // The check marks of the encodings follow the format saved.
-                update_menus(Some(self), cx);
+                refresh_menus(cx);
                 // An untitled document has a name now: its number is free for a new one; a file that
                 // was gone is there again.
                 if let Some(tab) = self.tabs.get_mut(index) {
@@ -863,7 +863,7 @@ impl Workspace {
         self.reveal_tab = true;
         window.focus(&self.editor().focus_handle(cx), cx);
         self.update_title(window, cx);
-        update_menus(Some(self), cx);
+        refresh_menus(cx);
         cx.notify();
     }
 
@@ -1753,7 +1753,7 @@ impl Workspace {
         self.title = title;
         if renamed {
             // The list of windows in the Window menu shows the new name.
-            update_menus(Some(self), cx);
+            refresh_menus(cx);
         }
     }
 
@@ -1785,7 +1785,7 @@ impl Workspace {
         let format = (active.entity_id(), active.read(cx).format);
         if active.entity_id() == document && self.menu_format != Some(format) && window.is_window_active() {
             self.menu_format = Some(format);
-            update_menus(Some(self), cx);
+            refresh_menus(cx);
         }
         cx.notify();
     }
