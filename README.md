@@ -2,7 +2,7 @@
 
 A fast cross-platform text editor for macOS, Linux and Windows, inspired by [AkelPad](https://akelpad.sourceforge.net/) (an independent project, not affiliated with it).
 
-> **Status:** early development: MigPad opens, edits, finds and replaces, saves files in any of 38 encodings, brings everything back after quitting and has its settings, but there is no release yet.
+> **Status:** 0.1, the first version: MigPad opens, edits, finds and replaces, saves files in any of 38 encodings, brings everything back after quitting and has its settings. What changed in each version is in [CHANGELOG.md](CHANGELOG.md).
 
 ## Goals
 
