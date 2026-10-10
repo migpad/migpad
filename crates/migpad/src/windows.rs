@@ -581,6 +581,19 @@ pub fn activate_open(path: &Path, cx: &mut App) -> bool {
 /// takes it with the options of a window, X11 as its class.
 pub const APP_ID: &str = "com.migpad.MigPad";
 
+/// The icon of the windows on Linux. Wayland finds it by [`APP_ID`] in the desktop file; X11 shows
+/// the one the window has, in its title bar and when the windows are switched.
+#[cfg(target_os = "linux")]
+pub fn icon() -> Option<std::sync::Arc<image::RgbaImage>> {
+    static ICON: std::sync::OnceLock<Option<std::sync::Arc<image::RgbaImage>>> = std::sync::OnceLock::new();
+    ICON.get_or_init(|| {
+        let png = include_bytes!("../resources/linux/icons/hicolor/64x64/apps/com.migpad.MigPad.png");
+        let icon = image::load_from_memory_with_format(png, image::ImageFormat::Png);
+        icon.map(|icon| std::sync::Arc::new(icon.into_rgba8())).ok()
+    })
+    .clone()
+}
+
 /// A new window: at `place` and on its screen, or down and to the right of the active one, or in
 /// the middle of the screen.
 fn window_options(place: Option<(WindowBounds, Option<DisplayId>)>, cx: &mut App) -> WindowOptions {
@@ -592,6 +605,8 @@ fn window_options(place: Option<(WindowBounds, Option<DisplayId>)>, cx: &mut App
             display_id,
             titlebar,
             app_id,
+            #[cfg(target_os = "linux")]
+            icon: icon(),
             ..Default::default()
         };
     }
@@ -609,5 +624,12 @@ fn window_options(place: Option<(WindowBounds, Option<DisplayId>)>, cx: &mut App
         })
         .unwrap_or_else(|| Bounds::centered(None, size, cx));
     let app_id = Some(APP_ID.to_owned());
-    WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), titlebar, app_id, ..Default::default() }
+    WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        titlebar,
+        app_id,
+        #[cfg(target_os = "linux")]
+        icon: icon(),
+        ..Default::default()
+    }
 }

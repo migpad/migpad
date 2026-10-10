@@ -34,6 +34,10 @@ windows-sys = { workspace = true, features = [
 # Whether the program runs from a disk that cannot be written: a disk image of macOS.
 libc.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# The icon of the windows on X11.
+image.workspace = true
+
 [target.'cfg(target_os = "macos")'.dependencies]
 block2.workspace = true
 objc2.workspace = true

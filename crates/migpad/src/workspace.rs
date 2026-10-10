@@ -1930,7 +1930,10 @@ impl Workspace {
             .iter()
             .map(|tab| {
                 let doc = tab.document.read(cx);
-                let tooltip = doc.path.as_ref().map(|path| match tab.missing {
+                // No path over a menu opened on the tab, where the pointer stays: Windows and Linux
+                // draw menus in the window, under the tooltips.
+                let path = doc.path.as_ref().filter(|_| self.context_menu.is_none());
+                let tooltip = path.map(|path| match tab.missing {
                     true => fill(Key::FileMissing, &[("path", &path.display().to_string())]),
                     false => path.display().to_string(),
                 });
