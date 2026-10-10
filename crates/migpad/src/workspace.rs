@@ -5,9 +5,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use gpui::{
-    App, AppContext, Context, DragMoveEvent, Entity, EntityId, ExternalPaths, FocusHandle, Focusable, MouseDownEvent,
-    MouseUpEvent, PathPromptOptions, Pixels, Point, PromptButton, PromptLevel, Render, ScrollHandle, SharedString,
-    Subscription, Task, Window, WindowHandle, WindowId, canvas, div, prelude::*, px, rgb,
+    App, AppContext, Bounds, Context, DragMoveEvent, Entity, EntityId, ExternalPaths, FocusHandle, Focusable,
+    MouseButton, MouseDownEvent, MouseUpEvent, PathPromptOptions, Pixels, Point, PromptButton, PromptLevel, Render,
+    ScrollHandle, SharedString, Subscription, Task, Window, WindowBounds, WindowHandle, WindowId, canvas, div, point,
+    prelude::*, px, rgb,
 };
 use migpad_core::document::{Document, Fingerprint, Format, OpenAs, Opened, open};
 use migpad_core::encoding::Encoding;
@@ -18,7 +19,7 @@ use migpad_core::state::session::{Rect, WindowMode, WindowState};
 use migpad_core::text::TextStore;
 use migpad_editor::{ContextMenuEvent, EditorView};
 use migpad_ui::notification::NotificationBar;
-use migpad_ui::{Button, ContextMenu, DraggedTab, ItemSpec, MenuBar, TabBar, TabInfo, theme};
+use migpad_ui::{Button, ContextMenu, DraggedTab, ItemSpec, MenuBar, TabBar, TabBounds, TabInfo, theme};
 
 use crate::commands::{self, Registry, update_menus};
 use crate::find::FindBar;
@@ -94,6 +95,8 @@ pub struct Workspace {
     menu_bar: Option<Entity<MenuBar>>,
     tabs: Tabs<Tab>,
     tab_scroll: ScrollHandle,
+    /// Where the tabs were drawn last: where a tab dropped from another window goes.
+    tab_bounds: TabBounds,
     /// Whether the bar of tabs is yet to scroll to the active tab.
     reveal_tab: bool,
     title: Title,
@@ -197,6 +200,7 @@ impl Workspace {
             menu_bar,
             tabs: Tabs::new(tab),
             tab_scroll: ScrollHandle::new(),
+            tab_bounds: TabBounds::default(),
             reveal_tab: true,
             title: Title::default(),
             revision: 0,
@@ -1383,6 +1387,42 @@ impl Workspace {
         }
     }
 
+    /// Where a tab dropped at `point` of the window goes among its tabs: between them over the bar,
+    /// after the last one elsewhere.
+    pub fn drop_index(&self, point: Point<Pixels>) -> usize {
+        migpad_ui::drop_position(&self.tab_bounds.borrow(), point).unwrap_or(self.tabs.len())
+    }
+
+    /// A tab let go of outside the window. On macOS the drag goes on in the window under the
+    /// pointer; on Windows and Linux the button comes back to this window, which finds that window
+    /// itself: the tab goes to its bar, or to a window of its own where no window of MigPad is. The
+    /// windows of Wayland do not know where they are: there it is always a window of its own.
+    fn tab_released_outside(&mut self, event: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if cfg!(target_os = "macos") || !cx.has_active_drag() {
+            return;
+        }
+        let Some(dragged) = migpad_ui::take_dragged_tab(cx) else { return };
+        if dragged.source_window() != self.window_id {
+            return;
+        }
+        let at = window.bounds().origin + event.position;
+        let target = (cx.compositor_name() != "Wayland").then(|| windows::workspace_at(at, self.window_id, cx));
+        if let Some((target, index)) = target.flatten() {
+            // Once this window is done with the event: the other one takes the tab from it.
+            cx.defer(move |cx| {
+                let _ = target.update(cx, |workspace, window, cx| workspace.receive_tab(&dragged, index, window, cx));
+            });
+        } else if self.tabs.len() > 1
+            && let Some(tab) = self.extract_tab_by_document(dragged.document_id(), window, cx)
+        {
+            // Where it was let go of, the pointer over the new tab.
+            let bounds = Bounds::new(at - point(px(60.), px(40.)), window.viewport_size());
+            cx.defer(move |cx| {
+                windows::open_window_with(vec![tab], Vec::new(), Some((WindowBounds::Windowed(bounds), None)), cx);
+            });
+        }
+    }
+
     /// Opens what closed `index`-th from the last — the last is 0 — again: a tab here, or a closed
     /// window as a window of its own.
     pub fn reopen_closed(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -1908,6 +1948,7 @@ impl Workspace {
             (workspace.clone(), workspace.clone(), workspace.clone(), workspace.clone(), workspace.clone(), workspace);
         let new_keys = keys::for_action(&NewTab, &self.editor().focus_handle(cx), window).map(SharedString::from);
         TabBar::new(cx.entity_id(), self.window_id, tabs, self.tabs.active_index(), self.tab_scroll.clone())
+            .tab_bounds(self.tab_bounds.clone())
             .close_label(tr(Key::FileCloseTab))
             .new_label(tr(Key::FileNew), new_keys)
             .on_select(move |index, window, cx| {
@@ -2067,7 +2108,8 @@ impl Render for Workspace {
             )
             .on_drop(move |dragged: &DraggedTab, window, cx| {
                 let _ = tab_tearoff.update(cx, |workspace, cx| workspace.tab_dropped_outside_bar(dragged, window, cx));
-            });
+            })
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::tab_released_outside));
         let root = handlers.iter().fold(root, |root, handler| handler(root, cx));
         let root = match self.menu_bar.clone() {
             // Mouse only on macOS, where Option types characters.

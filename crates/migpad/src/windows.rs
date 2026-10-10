@@ -198,6 +198,24 @@ pub fn document_windows(cx: &App) -> usize {
     cx.windows().iter().filter(|window| window.downcast::<Workspace>().is_some()).count()
 }
 
+/// The window of documents at `point` of the screen, other than `except`, and where a tab dropped
+/// there goes among its tabs. The front one where windows overlap, where the system tells their
+/// order.
+pub fn workspace_at(point: Point<Pixels>, except: WindowId, cx: &mut App) -> Option<(WindowHandle<Workspace>, usize)> {
+    let windows = cx.window_stack().unwrap_or_else(|| cx.windows());
+    windows
+        .into_iter()
+        .filter_map(|window| window.downcast::<Workspace>())
+        .filter(|w| w.window_id() != except)
+        .find_map(|handle| {
+            let index = handle.update(cx, |workspace, window, _| {
+                let bounds = window.bounds();
+                bounds.contains(&point).then(|| workspace.drop_index(point - bounds.origin))
+            });
+            Some((handle, index.ok()??))
+        })
+}
+
 /// The workspaces of the open windows, except one that is being updated now.
 pub fn workspaces(cx: &App) -> impl Iterator<Item = (WindowHandle<Workspace>, &Workspace)> {
     cx.windows().into_iter().filter_map(|window| {

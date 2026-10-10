@@ -4,11 +4,12 @@
 //! dragging moves it; when the tabs do not fit, they scroll, the wheel too, and the button of a new
 //! tab stays at the right edge.
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use gpui::{
-    App, AppContext, Context, EntityId, IntoElement, MouseButton, Pixels, Point, Render, RenderOnce, Role,
-    ScrollHandle, SharedString, Window, WindowId, div, prelude::*, px, rgb,
+    App, AppContext, Bounds, Context, EntityId, Global, IntoElement, MouseButton, Pixels, Point, Render, RenderOnce,
+    Role, ScrollHandle, SharedString, Window, WindowId, div, prelude::*, px, rgb,
 };
 
 use crate::theme::theme;
@@ -29,6 +30,31 @@ pub struct TabInfo {
 
 type Handler<T> = Rc<dyn Fn(T, &mut Window, &mut App)>;
 
+/// Where the tabs of a bar were drawn last, in the coordinates of its window.
+pub type TabBounds = Rc<RefCell<Vec<Bounds<Pixels>>>>;
+
+/// The tab being dragged, from the start of the drag: GPUI keeps it to itself.
+struct Dragging(Option<DraggedTab>);
+
+impl Global for Dragging {}
+
+/// The tab being dragged, if a drag of a tab started and was not taken yet: for a window that gets
+/// the button back outside of itself, where no other window sees the drop.
+pub fn take_dragged_tab(cx: &mut App) -> Option<DraggedTab> {
+    cx.try_global::<Dragging>()?;
+    cx.global_mut::<Dragging>().0.take()
+}
+
+/// Where a tab dropped at `point` of a window goes among the tabs drawn at `tabs`: before the
+/// first tab whose middle is right of it. `None` off the height of the bar.
+pub fn drop_position(tabs: &[Bounds<Pixels>], point: Point<Pixels>) -> Option<usize> {
+    let first = tabs.first()?;
+    if point.y < first.top() || point.y >= first.bottom() {
+        return None;
+    }
+    Some(tabs.iter().filter(|tab| tab.center().x < point.x).count())
+}
+
 /// The bar of the tabs of a window.
 #[derive(IntoElement)]
 pub struct TabBar {
@@ -47,6 +73,8 @@ pub struct TabBar {
     on_context_menu: Handler<(usize, Point<Pixels>)>,
     /// A tab dragged from another window, dropped at a position.
     on_receive: Handler<(DraggedTab, usize)>,
+    /// Kept up to date with where the tabs are drawn.
+    tab_bounds: Option<TabBounds>,
 }
 
 /// A tab being dragged to another place in the bar, or to another window.
@@ -90,7 +118,13 @@ impl TabBar {
             on_new: Rc::new(|_, _, _| {}),
             on_context_menu: Rc::new(|_, _, _| {}),
             on_receive: Rc::new(|_, _, _| {}),
+            tab_bounds: None,
         }
+    }
+
+    /// Keeps `bounds` up to date with where the tabs are drawn.
+    pub fn tab_bounds(self, bounds: TabBounds) -> Self {
+        TabBar { tab_bounds: Some(bounds), ..self }
     }
 
     /// The tooltip of the buttons that close tabs.
@@ -208,7 +242,10 @@ impl RenderOnce for TabBar {
                     cx.stop_propagation();
                 })
                 .on_mouse_up(MouseButton::Middle, move |_, window, cx| on_close_middle(i, window, cx))
-                .on_drag(dragged, |dragged, _, _, cx| cx.new(|_| dragged.clone()))
+                .on_drag(dragged, |dragged, _, _, cx| {
+                    cx.set_global(Dragging(Some(dragged.clone())));
+                    cx.new(|_| dragged.clone())
+                })
                 .drag_over::<DraggedTab>(move |style, _, _, _| style.bg(rgb(theme.pressed)))
                 .on_drop(move |dragged: &DraggedTab, window, cx| {
                     if dragged.owner == owner {
@@ -273,6 +310,9 @@ impl RenderOnce for TabBar {
             // The tabs give way to the button when they do not fit: it stays in sight.
             .child(
                 div()
+                    .when_some(self.tab_bounds, |tabs, kept| {
+                        tabs.on_children_prepainted(move |bounds, _, _| *kept.borrow_mut() = bounds)
+                    })
                     .id("tabs")
                     .flex()
                     .flex_shrink(1.)
@@ -320,5 +360,24 @@ impl Render for DraggedTab {
             .text_size(crate::text_size())
             .opacity(0.9)
             .child(self.title.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{point, size};
+
+    use super::*;
+
+    #[test]
+    fn a_tab_goes_before_the_first_tab_whose_middle_is_right_of_it() {
+        let tabs: Vec<_> =
+            [0., 100., 200.].iter().map(|&x| Bounds::new(point(px(x), px(25.)), size(px(100.), px(32.)))).collect();
+        assert_eq!(drop_position(&tabs, point(px(10.), px(40.))), Some(0));
+        assert_eq!(drop_position(&tabs, point(px(160.), px(40.))), Some(2));
+        assert_eq!(drop_position(&tabs, point(px(900.), px(30.))), Some(3));
+        assert_eq!(drop_position(&tabs, point(px(160.), px(10.))), None);
+        assert_eq!(drop_position(&tabs, point(px(160.), px(57.))), None);
+        assert_eq!(drop_position(&[], point(px(0.), px(0.))), None);
     }
 }
