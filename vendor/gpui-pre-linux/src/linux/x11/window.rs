@@ -277,7 +277,7 @@ pub struct X11WindowState {
     background_appearance: WindowBackgroundAppearance,
     maximized_vertical: bool,
     maximized_horizontal: bool,
-    hidden: bool,
+    pub(crate) hidden: bool,
     active: bool,
     /// Owned by the client's `WindowRef`, which combines the mapped state with
     /// `VisibilityNotify`; this is the last value it reported.
@@ -1308,6 +1308,20 @@ impl X11WindowStatePtr {
                 state.bounds.size = bounds.size;
             } else {
                 state.bounds = bounds;
+            }
+            // MigPad: where the window is on the screen, from the server. A real ConfigureNotify
+            // of a window the window manager has framed is relative to the frame, and a resize
+            // that moves the window (maximizing, tiling) comes without the synthetic one in
+            // coordinates of the root from window managers that follow ICCCM to the letter.
+            if let Ok(origin) = get_reply(
+                || "X11 TranslateCoordinates failed.",
+                self.xcb
+                    .translate_coordinates(self.x_window, state.x_root_window, 0, 0),
+            ) {
+                state.bounds.origin = Point {
+                    x: px(origin.dst_x as f32 / state.scale_factor),
+                    y: px(origin.dst_y as f32 / state.scale_factor),
+                };
             }
 
             let gpu_size = query_render_extent(&self.xcb, self.x_window)?;

@@ -19,7 +19,7 @@ use migpad_core::state::session::{Rect, WindowMode, WindowState};
 use migpad_core::text::TextStore;
 use migpad_editor::{ContextMenuEvent, EditorView};
 use migpad_ui::notification::NotificationBar;
-use migpad_ui::{Button, ContextMenu, DraggedTab, ItemSpec, MenuBar, TabBar, TabBounds, TabInfo, theme};
+use migpad_ui::{Button, ContextMenu, DraggedTab, ItemSpec, MenuBar, TabBar, TabInfo, theme};
 
 use crate::commands::{self, Registry, update_menus};
 use crate::find::FindBar;
@@ -95,8 +95,6 @@ pub struct Workspace {
     menu_bar: Option<Entity<MenuBar>>,
     tabs: Tabs<Tab>,
     tab_scroll: ScrollHandle,
-    /// Where the tabs were drawn last: where a tab dropped from another window goes.
-    tab_bounds: TabBounds,
     /// Whether the bar of tabs is yet to scroll to the active tab.
     reveal_tab: bool,
     title: Title,
@@ -200,7 +198,6 @@ impl Workspace {
             menu_bar,
             tabs: Tabs::new(tab),
             tab_scroll: ScrollHandle::new(),
-            tab_bounds: TabBounds::default(),
             reveal_tab: true,
             title: Title::default(),
             revision: 0,
@@ -1390,7 +1387,18 @@ impl Workspace {
     /// Where a tab dropped at `point` of the window goes among its tabs: between them over the bar,
     /// after the last one elsewhere.
     pub fn drop_index(&self, point: Point<Pixels>) -> usize {
-        migpad_ui::drop_position(&self.tab_bounds.borrow(), point).unwrap_or(self.tabs.len())
+        let offset = self.tab_scroll.offset();
+        let tabs: Vec<_> = (0..self.tabs.len())
+            .map_while(|index| self.tab_scroll.bounds_for_item(index))
+            .map(|tab| Bounds::new(tab.origin + offset, tab.size))
+            .collect();
+        migpad_ui::drop_position(&tabs, point).unwrap_or(self.tabs.len())
+    }
+
+    /// Whether the window can take a tab from another: not while it asks a question, which the
+    /// tab would take the keyboard from, and which would close the window with the tab.
+    pub fn takes_tabs(&self, window: &Window) -> bool {
+        !self.asking && !window.has_active_prompt()
     }
 
     /// A tab let go of outside the window. On macOS the drag goes on in the window under the
@@ -1398,7 +1406,9 @@ impl Workspace {
     /// itself: the tab goes to its bar, or to a window of its own where no window of MigPad is. The
     /// windows of Wayland do not know where they are: there it is always a window of its own.
     fn tab_released_outside(&mut self, event: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if cfg!(target_os = "macos") || !cx.has_active_drag() {
+        // Outside of the root, a release may still be in the window: over a menu or a question.
+        let inside = Bounds::new(Point::default(), window.viewport_size()).contains(&event.position);
+        if cfg!(target_os = "macos") || inside || !cx.has_active_drag() {
             return;
         }
         let Some(dragged) = migpad_ui::take_dragged_tab(cx) else { return };
@@ -1408,9 +1418,13 @@ impl Workspace {
         let at = window.bounds().origin + event.position;
         let target = (cx.compositor_name() != "Wayland").then(|| windows::workspace_at(at, self.window_id, cx));
         if let Some((target, index)) = target.flatten() {
-            // Once this window is done with the event: the other one takes the tab from it.
+            // Once this window is done with the event: the other one takes the tab from it, and the
+            // keyboard, which the button never went to.
             cx.defer(move |cx| {
-                let _ = target.update(cx, |workspace, window, cx| workspace.receive_tab(&dragged, index, window, cx));
+                let _ = target.update(cx, |workspace, window, cx| {
+                    workspace.receive_tab(&dragged, index, window, cx);
+                    window.activate_window();
+                });
             });
         } else if self.tabs.len() > 1
             && let Some(tab) = self.extract_tab_by_document(dragged.document_id(), window, cx)
@@ -1951,7 +1965,6 @@ impl Workspace {
             (workspace.clone(), workspace.clone(), workspace.clone(), workspace.clone(), workspace.clone(), workspace);
         let new_keys = keys::for_action(&NewTab, &self.editor().focus_handle(cx), window).map(SharedString::from);
         TabBar::new(cx.entity_id(), self.window_id, tabs, self.tabs.active_index(), self.tab_scroll.clone())
-            .tab_bounds(self.tab_bounds.clone())
             .close_label(tr(Key::FileCloseTab))
             .new_label(tr(Key::FileNew), new_keys)
             .on_select(move |index, window, cx| {

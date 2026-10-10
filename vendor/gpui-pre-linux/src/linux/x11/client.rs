@@ -1870,7 +1870,9 @@ impl LinuxClient for X11Client {
             .rev()
             .filter_map(|&win| state.windows.get(&win))
         {
-            if !window_ref.window.state.borrow().destroyed {
+            // MigPad: without minimized windows, which keep their place in the stack.
+            let state = window_ref.window.state.borrow();
+            if !state.destroyed && !state.hidden {
                 handles.push(window_ref.handle());
             }
         }

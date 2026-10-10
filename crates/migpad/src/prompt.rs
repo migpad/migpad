@@ -103,6 +103,11 @@ fn escape_button(buttons: &[PromptButton]) -> Option<usize> {
 
 impl Render for Prompt {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // A file opened in the window, or a tab moved to it, takes the keyboard for its text: the
+        // question takes it back until it is answered.
+        if !self.focus.is_focused(window) {
+            window.focus(&self.focus, cx);
+        }
         let theme = theme(cx);
         let width = WIDTH.min(f32::from(window.viewport_size().width) - 32.).max(200.);
         let shadow = BoxShadow {

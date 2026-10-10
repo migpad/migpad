@@ -4,7 +4,6 @@
 //! dragging moves it; when the tabs do not fit, they scroll, the wheel too, and the button of a new
 //! tab stays at the right edge.
 
-use std::cell::RefCell;
 use std::rc::Rc;
 
 use gpui::{
@@ -30,9 +29,6 @@ pub struct TabInfo {
 
 type Handler<T> = Rc<dyn Fn(T, &mut Window, &mut App)>;
 
-/// Where the tabs of a bar were drawn last, in the coordinates of its window.
-pub type TabBounds = Rc<RefCell<Vec<Bounds<Pixels>>>>;
-
 /// The tab being dragged, from the start of the drag: GPUI keeps it to itself.
 struct Dragging(Option<DraggedTab>);
 
@@ -45,8 +41,9 @@ pub fn take_dragged_tab(cx: &mut App) -> Option<DraggedTab> {
     cx.global_mut::<Dragging>().0.take()
 }
 
-/// Where a tab dropped at `point` of a window goes among the tabs drawn at `tabs`: before the
-/// first tab whose middle is right of it. `None` off the height of the bar.
+/// Where a tab dropped at `point` of a window goes among the tabs drawn at `tabs` — the bounds a
+/// [`ScrollHandle`] of the bar keeps, moved by its offset: before the first tab whose middle is
+/// right of it. `None` off the height of the bar.
 pub fn drop_position(tabs: &[Bounds<Pixels>], point: Point<Pixels>) -> Option<usize> {
     let first = tabs.first()?;
     if point.y < first.top() || point.y >= first.bottom() {
@@ -73,8 +70,6 @@ pub struct TabBar {
     on_context_menu: Handler<(usize, Point<Pixels>)>,
     /// A tab dragged from another window, dropped at a position.
     on_receive: Handler<(DraggedTab, usize)>,
-    /// Kept up to date with where the tabs are drawn.
-    tab_bounds: Option<TabBounds>,
 }
 
 /// A tab being dragged to another place in the bar, or to another window.
@@ -118,13 +113,7 @@ impl TabBar {
             on_new: Rc::new(|_, _, _| {}),
             on_context_menu: Rc::new(|_, _, _| {}),
             on_receive: Rc::new(|_, _, _| {}),
-            tab_bounds: None,
         }
-    }
-
-    /// Keeps `bounds` up to date with where the tabs are drawn.
-    pub fn tab_bounds(self, bounds: TabBounds) -> Self {
-        TabBar { tab_bounds: Some(bounds), ..self }
     }
 
     /// The tooltip of the buttons that close tabs.
@@ -244,7 +233,10 @@ impl RenderOnce for TabBar {
                 .on_mouse_up(MouseButton::Middle, move |_, window, cx| on_close_middle(i, window, cx))
                 .on_drag(dragged, |dragged, _, _, cx| {
                     cx.set_global(Dragging(Some(dragged.clone())));
-                    cx.new(|_| dragged.clone())
+                    let view = cx.new(|_| dragged.clone());
+                    // The drag ends with its view, wherever it is dropped: the tab is forgotten.
+                    cx.observe_release(&view, |_, cx| cx.set_global(Dragging(None))).detach();
+                    view
                 })
                 .drag_over::<DraggedTab>(move |style, _, _, _| style.bg(rgb(theme.pressed)))
                 .on_drop(move |dragged: &DraggedTab, window, cx| {
@@ -310,9 +302,6 @@ impl RenderOnce for TabBar {
             // The tabs give way to the button when they do not fit: it stays in sight.
             .child(
                 div()
-                    .when_some(self.tab_bounds, |tabs, kept| {
-                        tabs.on_children_prepainted(move |bounds, _, _| *kept.borrow_mut() = bounds)
-                    })
                     .id("tabs")
                     .flex()
                     .flex_shrink(1.)

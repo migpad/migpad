@@ -198,11 +198,11 @@ pub fn document_windows(cx: &App) -> usize {
     cx.windows().iter().filter(|window| window.downcast::<Workspace>().is_some()).count()
 }
 
-/// The window of documents at `point` of the screen, other than `except`, and where a tab dropped
-/// there goes among its tabs. The front one where windows overlap, where the system tells their
-/// order.
+/// The window of documents at `point` of the screen, other than `except`, that takes a tab there,
+/// and where the tab goes among its tabs. The front one where windows overlap, where the system
+/// tells their order.
 pub fn workspace_at(point: Point<Pixels>, except: WindowId, cx: &mut App) -> Option<(WindowHandle<Workspace>, usize)> {
-    let windows = cx.window_stack().unwrap_or_else(|| cx.windows());
+    let windows = cx.window_stack().filter(|stack| !stack.is_empty()).unwrap_or_else(|| cx.windows());
     windows
         .into_iter()
         .filter_map(|window| window.downcast::<Workspace>())
@@ -210,7 +210,8 @@ pub fn workspace_at(point: Point<Pixels>, except: WindowId, cx: &mut App) -> Opt
         .find_map(|handle| {
             let index = handle.update(cx, |workspace, window, _| {
                 let bounds = window.bounds();
-                bounds.contains(&point).then(|| workspace.drop_index(point - bounds.origin))
+                let over = bounds.contains(&point) && workspace.takes_tabs(window);
+                over.then(|| workspace.drop_index(point - bounds.origin))
             });
             Some((handle, index.ok()??))
         })
