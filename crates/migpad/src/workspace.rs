@@ -18,14 +18,14 @@ use migpad_core::state::session::{Rect, WindowMode, WindowState};
 use migpad_core::text::TextStore;
 use migpad_editor::{ContextMenuEvent, EditorView};
 use migpad_ui::notification::NotificationBar;
-use migpad_ui::{Button, ContextMenu, ItemSpec, MenuBar, TabBar, TabInfo, theme};
+use migpad_ui::{Button, ContextMenu, DraggedTab, ItemSpec, MenuBar, TabBar, TabInfo, theme};
 
 use crate::commands::{self, Registry, update_menus};
 use crate::find::FindBar;
 use crate::go_to::{self, GoToBar};
 use crate::journals;
 use crate::keys;
-use crate::modules::file::NewTab;
+use crate::modules::file::{CloseOtherTabs, CloseTabAt, CloseTabsToRight, CopyTabPath, NewTab, RevealTabFile};
 use crate::modules::format;
 use crate::notices::{self, Notice, NoticeAction, Topic};
 use crate::recent;
@@ -1138,6 +1138,251 @@ impl Workspace {
         windows::remember_window(tabs, self.tabs.active_index(), cx);
     }
 
+    /// Closes all tabs except the one at `keep`, asking about changes to save.
+    pub fn close_others(&mut self, keep: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if keep >= self.tabs.len() {
+            return;
+        }
+        let keep_id = self.tabs.get(keep).map(|tab| tab.document.entity_id());
+        let to_close: Vec<EntityId> =
+            self.tabs.iter().map(|tab| tab.document.entity_id()).filter(|id| Some(*id) != keep_id).collect();
+        self.close_batch(to_close, window, cx);
+    }
+
+    /// Closes all tabs to the right of the one at `after`, asking about changes to save.
+    pub fn close_to_right(&mut self, after: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if after >= self.tabs.len() {
+            return;
+        }
+        let to_close: Vec<EntityId> = self.tabs.iter().skip(after + 1).map(|tab| tab.document.entity_id()).collect();
+        self.close_batch(to_close, window, cx);
+    }
+
+    /// Closes the tabs whose documents are in `to_close`, asking about changes to save.
+    fn close_batch(&mut self, to_close: Vec<EntityId>, window: &mut Window, cx: &mut Context<Self>) {
+        if to_close.is_empty() {
+            return;
+        }
+        let mut changed: Vec<(EntityId, String)> = Vec::new();
+        for &id in &to_close {
+            if let Some(i) = self.tab_of(id)
+                && let Some(tab) = self.tabs.get(i)
+                && tab.has_changes(cx)
+            {
+                changed.push((id, Self::tab_title(tab, cx)));
+            }
+        }
+        for &id in to_close.iter().rev() {
+            if let Some(i) = self.tab_of(id)
+                && !self.tabs.get(i).is_some_and(|tab| tab.has_changes(cx))
+            {
+                self.close_tab_now(i, window, cx);
+            }
+        }
+        if changed.is_empty() {
+            return;
+        }
+        if self.asking {
+            return;
+        }
+        let (question, detail, save) = match changed.as_slice() {
+            [(id, title)] => {
+                if let Some(index) = self.tab_of(*id) {
+                    self.activate(index, window, cx);
+                }
+                let question = fill(Key::CloseQuestion, &[("file", title)]);
+                (question, tr(Key::CloseDetail).to_owned(), tr(Key::CloseSave))
+            }
+            _ => {
+                let files: Vec<String> =
+                    changed.iter().map(|(_, title)| fill(Key::CloseFile, &[("file", title)])).collect();
+                let detail = fill(Key::CloseWindowDetail, &[("files", &files.join(", "))]);
+                (tr(Key::CloseWindowQuestion).to_owned(), detail, tr(Key::CloseSaveAll))
+            }
+        };
+        let answer = self.ask_to_save(&question, &detail, save, window, cx);
+        cx.spawn_in(window, async move |workspace, cx| {
+            match answer.await {
+                SaveAnswer::Save => {
+                    for (document, _) in &changed {
+                        let save = workspace.update_in(cx, |workspace, window, cx| {
+                            if let Some(index) = workspace.tab_of(*document) {
+                                workspace.activate(index, window, cx);
+                            }
+                            workspace.save_document(*document, window, cx)
+                        });
+                        let Ok(save) = save else { return };
+                        if !save.await {
+                            return;
+                        }
+                    }
+                }
+                SaveAnswer::DontSave => {
+                    let _ = workspace.update(cx, |workspace, _| {
+                        for (document, _) in &changed {
+                            workspace.discard(*document);
+                        }
+                    });
+                }
+                SaveAnswer::Cancel => return,
+            }
+            let _ = workspace.update_in(cx, |workspace, window, cx| {
+                for (document, _) in &changed {
+                    if let Some(index) = workspace.tab_of(*document) {
+                        workspace.close_tab_now(index, window, cx);
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Copies the path of the file at tab `index` to the clipboard.
+    pub fn copy_tab_path(&self, index: usize, cx: &mut App) {
+        if let Some(tab) = self.tabs.get(index)
+            && let Some(path) = &tab.document.read(cx).path
+        {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(path.display().to_string()));
+        }
+    }
+
+    /// Opens the folder of the file at tab `index` in the file manager.
+    pub fn reveal_tab_file(&self, index: usize, cx: &App) {
+        if let Some(tab) = self.tabs.get(index)
+            && let Some(path) = &tab.document.read(cx).path
+        {
+            reveal_in_file_manager(path);
+        }
+    }
+
+    /// Opens the context menu of the tab at `index` by a right click at `position`.
+    pub fn open_tab_context_menu(
+        &mut self,
+        index: usize,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.tabs.get(index) else { return };
+        let has_path = tab.document.read(cx).path.is_some();
+        let has_others = self.tabs.len() > 1;
+        let has_right = index + 1 < self.tabs.len();
+        let reveal_key = if cfg!(target_os = "macos") {
+            Key::FileRevealMacos
+        } else if cfg!(target_os = "windows") {
+            Key::FileRevealWindows
+        } else {
+            Key::FileRevealLinux
+        };
+        let items = vec![
+            ItemSpec::Action {
+                label: tr(Key::FileCloseTab).into(),
+                mnemonic: mnemonic(Key::FileCloseTab),
+                keys: None,
+                checked: None,
+                enabled: true,
+                action: Box::new(CloseTabAt(index)),
+            },
+            ItemSpec::Action {
+                label: tr(Key::FileCloseOtherTabs).into(),
+                mnemonic: mnemonic(Key::FileCloseOtherTabs),
+                keys: None,
+                checked: None,
+                enabled: has_others,
+                action: Box::new(CloseOtherTabs(index)),
+            },
+            ItemSpec::Action {
+                label: tr(Key::FileCloseTabsToRight).into(),
+                mnemonic: mnemonic(Key::FileCloseTabsToRight),
+                keys: None,
+                checked: None,
+                enabled: has_right,
+                action: Box::new(CloseTabsToRight(index)),
+            },
+            ItemSpec::Separator,
+            ItemSpec::Action {
+                label: tr(Key::FileCopyPath).into(),
+                mnemonic: mnemonic(Key::FileCopyPath),
+                keys: None,
+                checked: None,
+                enabled: has_path,
+                action: Box::new(CopyTabPath(index)),
+            },
+            ItemSpec::Action {
+                label: tr(reveal_key).into(),
+                mnemonic: mnemonic(reveal_key),
+                keys: None,
+                checked: None,
+                enabled: has_path,
+                action: Box::new(RevealTabFile(index)),
+            },
+        ];
+        self.show_menu(items, position, false, None, window, cx);
+    }
+
+    /// Receives a tab dragged from another window, inserting it at `position`.
+    pub fn receive_tab(&mut self, dragged: &DraggedTab, position: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let source_window = dragged.source_window();
+        let document_id = dragged.document_id();
+        let source =
+            cx.windows().into_iter().filter_map(|w| w.downcast::<Workspace>()).find(|w| w.window_id() == source_window);
+        let Some(source) = source else { return };
+        let extracted =
+            source.update(cx, |workspace, window, cx| workspace.extract_tab_by_document(document_id, window, cx));
+        let Ok(Some(extracted)) = extracted else { return };
+        self.add_tab(extracted, window, cx);
+        let last = self.tabs.len() - 1;
+        let target = position.min(last);
+        if last != target {
+            self.move_tab(last, target, cx);
+        }
+    }
+
+    /// Takes a tab out of the window without remembering it as closed: it is being transferred to
+    /// another window. The last tab closes the window.
+    fn extract_tab_by_document(
+        &mut self,
+        document: EntityId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<ForTab> {
+        let index = self.tab_of(document)?;
+        let tab = self.tabs.get(index)?;
+        let doc = tab.document.clone();
+        let encoding_chosen = tab.encoding_chosen;
+        let selection = Some(tab.editor.read(cx).selection());
+        if self.tabs.len() == 1 {
+            window.remove_window();
+            return Some(ForTab { document: doc, loading: None, selection, notice: None, encoding_chosen });
+        }
+        let was_active = index == self.tabs.active_index();
+        self.tabs.remove(index);
+        if was_active {
+            let active = self.tabs.active_index();
+            self.activate(active, window, cx);
+        } else {
+            cx.notify();
+        }
+        Some(ForTab { document: doc, loading: None, selection, notice: None, encoding_chosen })
+    }
+
+    /// A tab dropped on the window outside the tab bar: if from this window, tear it off into a new
+    /// window; if from another, add it here.
+    fn tab_dropped_outside_bar(&mut self, dragged: &DraggedTab, window: &mut Window, cx: &mut Context<Self>) {
+        if dragged.source_window() == self.window_id {
+            if self.tabs.len() == 1 {
+                return;
+            }
+            if let Some(tab) = self.extract_tab_by_document(dragged.document_id(), window, cx) {
+                cx.defer(move |cx| {
+                    windows::open_window_with(vec![tab], Vec::new(), None, cx);
+                });
+            }
+        } else {
+            self.receive_tab(dragged, self.tabs.len(), window, cx);
+        }
+    }
+
     /// Opens what closed `index`-th from the last — the last is 0 — again: a tab here, or a closed
     /// window as a window of its own.
     pub fn reopen_closed(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -1650,6 +1895,7 @@ impl Workspace {
                     false => path.display().to_string(),
                 });
                 TabInfo {
+                    document: tab.document.entity_id(),
                     title: Self::tab_title(tab, cx).into(),
                     tooltip: tooltip.map(SharedString::from),
                     modified: doc.is_modified(),
@@ -1658,9 +1904,10 @@ impl Workspace {
             })
             .collect();
         let workspace = cx.entity().downgrade();
-        let (select, close, moved, new) = (workspace.clone(), workspace.clone(), workspace.clone(), workspace);
+        let (select, close, moved, new, context, receive) =
+            (workspace.clone(), workspace.clone(), workspace.clone(), workspace.clone(), workspace.clone(), workspace);
         let new_keys = keys::for_action(&NewTab, &self.editor().focus_handle(cx), window).map(SharedString::from);
-        TabBar::new(cx.entity_id(), tabs, self.tabs.active_index(), self.tab_scroll.clone())
+        TabBar::new(cx.entity_id(), self.window_id, tabs, self.tabs.active_index(), self.tab_scroll.clone())
             .close_label(tr(Key::FileCloseTab))
             .new_label(tr(Key::FileNew), new_keys)
             .on_select(move |index, window, cx| {
@@ -1674,6 +1921,14 @@ impl Workspace {
             })
             .on_new(move |(), window, cx| {
                 let _ = new.update(cx, |workspace, cx| workspace.new_tab(window, cx));
+            })
+            .on_context_menu(move |(index, position), window, cx| {
+                let _ = context.update(cx, |workspace, cx| {
+                    workspace.open_tab_context_menu(index, position, window, cx);
+                });
+            })
+            .on_receive(move |(dragged, position), window, cx| {
+                let _ = receive.update(cx, |workspace, cx| workspace.receive_tab(&dragged, position, window, cx));
             })
     }
 }
@@ -1797,6 +2052,7 @@ impl Render for Workspace {
             }
         }
         let handlers = cx.global::<Registry>().window_handlers();
+        let tab_tearoff = cx.weak_entity();
         let root = div()
             .key_context("Workspace")
             .relative()
@@ -1808,7 +2064,10 @@ impl Render for Workspace {
             .text_size(migpad_ui::text_size())
             .on_drag_move(
                 cx.listener(|workspace, event: &DragMoveEvent<ExternalPaths>, _, cx| workspace.drag_files(event, cx)),
-            );
+            )
+            .on_drop(move |dragged: &DraggedTab, window, cx| {
+                let _ = tab_tearoff.update(cx, |workspace, cx| workspace.tab_dropped_outside_bar(dragged, window, cx));
+            });
         let root = handlers.iter().fold(root, |root, handler| handler(root, cx));
         let root = match self.menu_bar.clone() {
             // Mouse only on macOS, where Option types characters.
@@ -1876,6 +2135,23 @@ impl Render for Workspace {
             .child(div().flex_1().min_h_0().child(self.editor().clone()))
             .child(status_bar)
             .child(drops)
+    }
+}
+
+fn reveal_in_file_manager(path: &Path) {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open").arg("-R").arg(path).spawn().ok();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer").arg(format!("/select,\"{}\"", path.display())).spawn().ok();
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        if let Some(parent) = path.parent() {
+            std::process::Command::new("xdg-open").arg(parent).spawn().ok();
+        }
     }
 }
 

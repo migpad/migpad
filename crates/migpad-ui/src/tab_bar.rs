@@ -7,8 +7,8 @@
 use std::rc::Rc;
 
 use gpui::{
-    App, AppContext, Context, EntityId, IntoElement, MouseButton, Render, RenderOnce, Role, ScrollHandle, SharedString,
-    Window, div, prelude::*, px, rgb,
+    App, AppContext, Context, EntityId, IntoElement, MouseButton, Pixels, Point, Render, RenderOnce, Role,
+    ScrollHandle, SharedString, Window, WindowId, div, prelude::*, px, rgb,
 };
 
 use crate::theme::theme;
@@ -16,6 +16,8 @@ use crate::tooltip::Tooltip;
 
 /// What a tab shows.
 pub struct TabInfo {
+    /// The document of the tab, to find it after a drag.
+    pub document: EntityId,
     pub title: SharedString,
     /// The path of the file, shown when the pointer rests on the tab.
     pub tooltip: Option<SharedString>,
@@ -30,8 +32,8 @@ type Handler<T> = Rc<dyn Fn(T, &mut Window, &mut App)>;
 /// The bar of the tabs of a window.
 #[derive(IntoElement)]
 pub struct TabBar {
-    /// The view the tabs are of: a tab dragged from another window does not drop here.
     owner: EntityId,
+    window: WindowId,
     tabs: Vec<TabInfo>,
     active: usize,
     scroll: ScrollHandle,
@@ -42,21 +44,41 @@ pub struct TabBar {
     on_close: Handler<usize>,
     on_move: Handler<(usize, usize)>,
     on_new: Handler<()>,
+    on_context_menu: Handler<(usize, Point<Pixels>)>,
+    /// A tab dragged from another window, dropped at a position.
+    on_receive: Handler<(DraggedTab, usize)>,
 }
 
-/// A tab being dragged to another place in the bar.
+/// A tab being dragged to another place in the bar, or to another window.
 #[derive(Clone)]
 pub struct DraggedTab {
     owner: EntityId,
+    window: WindowId,
+    document: EntityId,
     index: usize,
     title: SharedString,
 }
 
+impl DraggedTab {
+    pub fn source_window(&self) -> WindowId {
+        self.window
+    }
+
+    pub fn document_id(&self) -> EntityId {
+        self.document
+    }
+
+    pub fn source_index(&self) -> usize {
+        self.index
+    }
+}
+
 impl TabBar {
-    /// The tabs of `owner`, `active` shown; `scroll` keeps where the bar is scrolled to.
-    pub fn new(owner: EntityId, tabs: Vec<TabInfo>, active: usize, scroll: ScrollHandle) -> Self {
+    /// The tabs of `owner` in `window`, `active` shown; `scroll` keeps where the bar is scrolled to.
+    pub fn new(owner: EntityId, window: WindowId, tabs: Vec<TabInfo>, active: usize, scroll: ScrollHandle) -> Self {
         TabBar {
             owner,
+            window,
             tabs,
             active,
             scroll,
@@ -66,6 +88,8 @@ impl TabBar {
             on_close: Rc::new(|_, _, _| {}),
             on_move: Rc::new(|_, _, _| {}),
             on_new: Rc::new(|_, _, _| {}),
+            on_context_menu: Rc::new(|_, _, _| {}),
+            on_receive: Rc::new(|_, _, _| {}),
         }
     }
 
@@ -96,19 +120,31 @@ impl TabBar {
     pub fn on_new(self, handler: impl Fn((), &mut Window, &mut App) + 'static) -> Self {
         TabBar { on_new: Rc::new(handler), ..self }
     }
+
+    /// A right click on a tab: its index and the position of the pointer.
+    pub fn on_context_menu(self, handler: impl Fn((usize, Point<Pixels>), &mut Window, &mut App) + 'static) -> Self {
+        TabBar { on_context_menu: Rc::new(handler), ..self }
+    }
+
+    /// A tab dragged from another window, dropped at a position among the tabs.
+    pub fn on_receive(self, handler: impl Fn((DraggedTab, usize), &mut Window, &mut App) + 'static) -> Self {
+        TabBar { on_receive: Rc::new(handler), ..self }
+    }
 }
 
 impl RenderOnce for TabBar {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = theme(cx);
         let owner = self.owner;
+        let window = self.window;
         let count = self.tabs.len();
         let tabs = self.tabs.into_iter().enumerate().map(|(i, tab)| {
             let active = i == self.active;
             let group = SharedString::from(format!("tab-{i}"));
             let (on_select, on_close, on_close_middle, on_move) =
                 (self.on_select.clone(), self.on_close.clone(), self.on_close.clone(), self.on_move.clone());
-            let dragged = DraggedTab { owner, index: i, title: tab.title.clone() };
+            let (on_context_menu, on_receive) = (self.on_context_menu.clone(), self.on_receive.clone());
+            let dragged = DraggedTab { owner, window, document: tab.document, index: i, title: tab.title.clone() };
             // ● for changes to save; × on the active tab and under the pointer.
             let close = div()
                 .id(("close", i))
@@ -167,16 +203,18 @@ impl RenderOnce for TabBar {
                 .when(active, |tab| tab.bg(rgb(theme.tab_active)).text_color(rgb(theme.text)))
                 .when(!active, |tab| tab.text_color(rgb(theme.text_muted)).hover(|style| style.bg(rgb(theme.hover))))
                 .on_mouse_down(MouseButton::Left, move |_, window, cx| on_select(i, window, cx))
+                .on_mouse_down(MouseButton::Right, move |event, window, cx| {
+                    on_context_menu((i, event.position), window, cx);
+                    cx.stop_propagation();
+                })
                 .on_mouse_up(MouseButton::Middle, move |_, window, cx| on_close_middle(i, window, cx))
                 .on_drag(dragged, |dragged, _, _, cx| cx.new(|_| dragged.clone()))
-                .drag_over::<DraggedTab>(
-                    move |style, dragged, _, _| {
-                        if dragged.owner == owner { style.bg(rgb(theme.pressed)) } else { style }
-                    },
-                )
+                .drag_over::<DraggedTab>(move |style, _, _, _| style.bg(rgb(theme.pressed)))
                 .on_drop(move |dragged: &DraggedTab, window, cx| {
                     if dragged.owner == owner {
                         on_move((dragged.index, i), window, cx);
+                    } else {
+                        on_receive((dragged.clone(), i), window, cx);
                     }
                 })
                 .when_some(tab.tooltip, |tab, path| tab.tooltip(Tooltip::builder(path, None)))
@@ -196,7 +234,8 @@ impl RenderOnce for TabBar {
                 )
                 .child(close)
         });
-        let (on_move, on_new, on_plus) = (self.on_move.clone(), self.on_new.clone(), self.on_new.clone());
+        let (on_move, on_new, on_plus, on_receive_end) =
+            (self.on_move.clone(), self.on_new.clone(), self.on_new.clone(), self.on_receive.clone());
         // A plus of two thin lines, crisp at any scale.
         let line = || div().absolute().rounded(px(0.75)).bg(rgb(theme.text_muted));
         let glyph = div()
@@ -250,14 +289,12 @@ impl RenderOnce for TabBar {
                     .id("tab-bar-rest")
                     .flex_1()
                     .h_full()
-                    .drag_over::<DraggedTab>(
-                        move |style, dragged, _, _| {
-                            if dragged.owner == owner { style.bg(rgb(theme.pressed)) } else { style }
-                        },
-                    )
+                    .drag_over::<DraggedTab>(move |style, _, _, _| style.bg(rgb(theme.pressed)))
                     .on_drop(move |dragged: &DraggedTab, window, cx| {
                         if dragged.owner == owner {
                             on_move((dragged.index, count - 1), window, cx);
+                        } else {
+                            on_receive_end((dragged.clone(), count), window, cx);
                         }
                     })
                     .on_click(move |event, window, cx| {
