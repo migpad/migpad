@@ -46,7 +46,7 @@ upper_case = "В &верхний"
 lower_case = "В &нижний"
 
 [transform]
-menu = "Преобра&зовать"
+menu = "Преобразоват&ь"
 hex_encode = "&Hex — закодировать"
 hex_decode = "Hex — &раскодировать"
 base64_encode = "Base&64 — закодировать"
