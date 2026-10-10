@@ -33,6 +33,8 @@ A Cargo workspace of four crates in `crates/`; each depends only on the crates l
 - `migpad-ui` — interface elements: controls, theme, menus, notification bars;
 - `migpad` — the application: windows and tabs, commands, features.
 
+`vendor/` has copies of crates from crates.io with fixes MigPad needs, put in place of the published ones with `[patch.crates-io]` and kept out of the workspace: see `vendor/README.md`.
+
 ## Checks
 
 CI runs these on Linux, Windows and macOS. Run them before opening a pull request:
