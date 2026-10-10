@@ -1151,6 +1151,9 @@ impl Workspace {
 
     /// Closes all tabs to the right of the one at `after`, asking about changes to save.
     pub fn close_to_right(&mut self, after: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if after >= self.tabs.len() {
+            return;
+        }
         let to_close: Vec<EntityId> = self.tabs.iter().skip(after + 1).map(|tab| tab.document.entity_id()).collect();
         self.close_batch(to_close, window, cx);
     }
@@ -1320,11 +1323,12 @@ impl Workspace {
     /// Receives a tab dragged from another window, inserting it at `position`.
     pub fn receive_tab(&mut self, dragged: &DraggedTab, position: usize, window: &mut Window, cx: &mut Context<Self>) {
         let source_window = dragged.source_window();
-        let source_index = dragged.source_index();
+        let document_id = dragged.document_id();
         let source =
             cx.windows().into_iter().filter_map(|w| w.downcast::<Workspace>()).find(|w| w.window_id() == source_window);
         let Some(source) = source else { return };
-        let extracted = source.update(cx, |workspace, window, cx| workspace.extract_tab(source_index, window, cx));
+        let extracted =
+            source.update(cx, |workspace, window, cx| workspace.extract_tab_by_document(document_id, window, cx));
         let Ok(Some(extracted)) = extracted else { return };
         self.add_tab(extracted, window, cx);
         let last = self.tabs.len() - 1;
@@ -1336,14 +1340,20 @@ impl Workspace {
 
     /// Takes a tab out of the window without remembering it as closed: it is being transferred to
     /// another window. The last tab closes the window.
-    fn extract_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) -> Option<ForTab> {
+    fn extract_tab_by_document(
+        &mut self,
+        document: EntityId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<ForTab> {
+        let index = self.tab_of(document)?;
         let tab = self.tabs.get(index)?;
-        let document = tab.document.clone();
+        let doc = tab.document.clone();
         let encoding_chosen = tab.encoding_chosen;
         let selection = Some(tab.editor.read(cx).selection());
         if self.tabs.len() == 1 {
             window.remove_window();
-            return Some(ForTab { document, loading: None, selection, notice: None, encoding_chosen });
+            return Some(ForTab { document: doc, loading: None, selection, notice: None, encoding_chosen });
         }
         let was_active = index == self.tabs.active_index();
         self.tabs.remove(index);
@@ -1353,7 +1363,7 @@ impl Workspace {
         } else {
             cx.notify();
         }
-        Some(ForTab { document, loading: None, selection, notice: None, encoding_chosen })
+        Some(ForTab { document: doc, loading: None, selection, notice: None, encoding_chosen })
     }
 
     /// A tab dropped on the window outside the tab bar: if from this window, tear it off into a new
@@ -1363,7 +1373,7 @@ impl Workspace {
             if self.tabs.len() == 1 {
                 return;
             }
-            if let Some(tab) = self.extract_tab(dragged.source_index(), window, cx) {
+            if let Some(tab) = self.extract_tab_by_document(dragged.document_id(), window, cx) {
                 cx.defer(move |cx| {
                     windows::open_window_with(vec![tab], Vec::new(), None, cx);
                 });
@@ -1885,6 +1895,7 @@ impl Workspace {
                     false => path.display().to_string(),
                 });
                 TabInfo {
+                    document: tab.document.entity_id(),
                     title: Self::tab_title(tab, cx).into(),
                     tooltip: tooltip.map(SharedString::from),
                     modified: doc.is_modified(),
@@ -2134,7 +2145,7 @@ fn reveal_in_file_manager(path: &Path) {
     }
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("explorer").arg(format!("/select,{}", path.display())).spawn().ok();
+        std::process::Command::new("explorer").arg(format!("/select,\"{}\"", path.display())).spawn().ok();
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {

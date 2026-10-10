@@ -16,6 +16,8 @@ use crate::tooltip::Tooltip;
 
 /// What a tab shows.
 pub struct TabInfo {
+    /// The document of the tab, to find it after a drag.
+    pub document: EntityId,
     pub title: SharedString,
     /// The path of the file, shown when the pointer rests on the tab.
     pub tooltip: Option<SharedString>,
@@ -52,6 +54,7 @@ pub struct TabBar {
 pub struct DraggedTab {
     owner: EntityId,
     window: WindowId,
+    document: EntityId,
     index: usize,
     title: SharedString,
 }
@@ -59,6 +62,10 @@ pub struct DraggedTab {
 impl DraggedTab {
     pub fn source_window(&self) -> WindowId {
         self.window
+    }
+
+    pub fn document_id(&self) -> EntityId {
+        self.document
     }
 
     pub fn source_index(&self) -> usize {
@@ -137,7 +144,7 @@ impl RenderOnce for TabBar {
             let (on_select, on_close, on_close_middle, on_move) =
                 (self.on_select.clone(), self.on_close.clone(), self.on_close.clone(), self.on_move.clone());
             let (on_context_menu, on_receive) = (self.on_context_menu.clone(), self.on_receive.clone());
-            let dragged = DraggedTab { owner, window, index: i, title: tab.title.clone() };
+            let dragged = DraggedTab { owner, window, document: tab.document, index: i, title: tab.title.clone() };
             // ● for changes to save; × on the active tab and under the pointer.
             let close = div()
                 .id(("close", i))
