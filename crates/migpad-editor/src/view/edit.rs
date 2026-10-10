@@ -353,9 +353,10 @@ impl EditorView {
         if paste_lines.is_empty() {
             return;
         }
-        let (_, _, edits) = {
+        let edits = {
             let doc = self.document.read(cx);
             let (txt, lns) = (doc.text(), doc.lines());
+            let line_ending = doc.format.line_ending.as_bytes();
             let head = self.selection.head.min(txt.len());
             let head_line = lns.line_of(head);
             let (head_range, _) = lns.line_range(txt, head_line);
@@ -364,16 +365,21 @@ impl EditorView {
             let mut shift: isize = 0;
             for (i, &paste_line) in paste_lines.iter().enumerate() {
                 let line = head_line + i;
-                if line >= lns.count() {
-                    break;
+                if line < lns.count() {
+                    let (range, _) = lns.line_range(txt, line);
+                    let pos = self.columns.char_at(txt, &range, col).0;
+                    let adj = (pos as isize + shift) as usize;
+                    edits.push((adj..adj, paste_line.as_bytes().to_vec()));
+                    shift += paste_line.len() as isize;
+                } else {
+                    let end = (txt.len() as isize + shift) as usize;
+                    let mut bytes = Vec::from(line_ending);
+                    bytes.extend_from_slice(paste_line.as_bytes());
+                    shift += bytes.len() as isize;
+                    edits.push((end..end, bytes));
                 }
-                let (range, _) = lns.line_range(txt, line);
-                let pos = self.columns.char_at(txt, &range, col).0;
-                let adj = (pos as isize + shift) as usize;
-                edits.push((adj..adj, paste_line.as_bytes().to_vec()));
-                shift += paste_line.len() as isize;
             }
-            (head_line, col, edits)
+            edits
         };
         if edits.is_empty() {
             return;
