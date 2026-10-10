@@ -30,6 +30,20 @@ impl EditorView {
         self.document.read(cx).is_preview()
     }
 
+    /// Replaces the current stream selection with `text`, keeping the selection over the result.
+    pub fn replace_selection(
+        &mut self,
+        text: &[u8],
+        kind: EditKind,
+        after: Selection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let range = self.selected_range();
+        self.clear_block();
+        self.replace(range, text, kind, after, window, cx);
+    }
+
     /// Replaces `range` with `text` as an edit of `kind`, and puts the selection at `after` in the
     /// text that results. Returns whether the text changed: a preview takes no edits.
     pub(super) fn replace(
@@ -185,6 +199,84 @@ impl EditorView {
         self.copy(cx);
         let after = Selection::caret(range.start);
         self.replace(range, b"", EditKind::Other, after, window, cx);
+    }
+
+    /// Changes the case of the selected text: `upper` for uppercase, `false` for lowercase.
+    /// Does nothing without a selection or on a read-only document.
+    pub(crate) fn change_case(&mut self, upper: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only(cx) {
+            return;
+        }
+        if self.block_columns.is_some() {
+            self.change_case_block(upper, window, cx);
+            return;
+        }
+        let range = self.selected_range();
+        if range.is_empty() {
+            return;
+        }
+        let bytes = self.document.read(cx).text().to_vec(range.clone());
+        let text = String::from_utf8_lossy(&bytes);
+        let changed: String = if upper { text.to_uppercase() } else { text.to_lowercase() };
+        let after = Selection { anchor: range.start, head: range.start + changed.len() };
+        self.replace(range, changed.as_bytes(), EditKind::Other, after, window, cx);
+    }
+
+    fn change_case_block(&mut self, upper: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let (anchor_line, head_line) = {
+            let doc = self.document.read(cx);
+            let (txt, lns) = (doc.text(), doc.lines());
+            (lns.line_of(self.selection.anchor.min(txt.len())), lns.line_of(self.selection.head.min(txt.len())))
+        };
+        let ranges = self.block_line_ranges(cx);
+        let text = self.document.read(cx).text();
+        let mut edits: Vec<(Range<usize>, Vec<u8>)> = Vec::new();
+        let mut shift: isize = 0;
+        for range in &ranges {
+            if range.is_empty() {
+                continue;
+            }
+            let bytes = text.to_vec(range.clone());
+            let s = String::from_utf8_lossy(&bytes);
+            let changed: String = if upper { s.to_uppercase() } else { s.to_lowercase() };
+            let start = (range.start as isize + shift) as usize;
+            let end = (range.end as isize + shift) as usize;
+            shift += changed.len() as isize - range.len() as isize;
+            edits.push((start..end, changed.into_bytes()));
+        }
+        if edits.is_empty() {
+            return;
+        }
+        let before = self.selection;
+        let last = edits.last().unwrap();
+        let after_pos = last.0.start + last.1.len();
+        let after = Selection::caret(after_pos);
+        let edit_refs: Vec<(Range<usize>, &[u8])> = edits.iter().map(|(r, b)| (r.clone(), b.as_slice())).collect();
+        let edited = self.document.update(cx, |doc, cx| {
+            let ok = doc.edit(&edit_refs, before, after, EditKind::Other, Instant::now()).is_ok();
+            if ok {
+                cx.notify();
+            }
+            ok
+        });
+        if edited {
+            self.version = self.document.read(cx).version();
+            self.text_changed();
+            let doc = self.document.read(cx);
+            let (txt, lns) = (doc.text(), doc.lines());
+            let al = anchor_line.min(lns.count() - 1);
+            let hl = head_line.min(lns.count() - 1);
+            let (ar, _) = lns.line_range(txt, al.min(hl));
+            let (anchor_col, head_col) = self.block_columns.unwrap();
+            let left = anchor_col.min(head_col);
+            let right = anchor_col.max(head_col);
+            let anchor_pos = self.columns.char_at(txt, &ar, left).0;
+            let (hr, _) = lns.line_range(txt, al.max(hl));
+            let head_pos = self.columns.char_at(txt, &hr, right).0;
+            self.selection = Selection { anchor: anchor_pos, head: head_pos };
+            self.goal_x = None;
+            self.caret_moved(window, cx);
+        }
     }
 
     /// Pastes the text of the clipboard over the selection, with the line breaks of the document;

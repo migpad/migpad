@@ -653,6 +653,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bs58"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf88ba1141d185c399bee5288d850d63b8369520c1eafc32a0430b5b6c287bf4"
+dependencies = [
+ "tinyvec",
+]
+
+[[package]]
 name = "built"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3237,7 +3246,9 @@ dependencies = [
 name = "migpad"
 version = "0.1.1-dev"
 dependencies = [
+ "base64",
  "block2 0.6.2",
+ "bs58",
  "embed-resource",
  "gpui-pre",
  "gpui-pre-platform",
@@ -3248,6 +3259,7 @@ dependencies = [
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
+ "percent-encoding",
  "sys-locale",
  "toml_edit 0.25.15+spec-1.1.0",
  "windows-sys 0.61.2",

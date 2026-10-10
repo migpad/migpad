@@ -75,6 +75,8 @@ actions!(
         Copy,
         Cut,
         Paste,
+        UpperCase,
+        LowerCase,
         ShowContextMenu
     ]
 );
@@ -92,6 +94,8 @@ pub(crate) fn on_edits(div: Div, cx: &mut Context<EditorView>) -> Div {
         .on_action(cx.listener(|view, _: &Copy, _, cx| view.copy(cx)))
         .on_action(cx.listener(|view, _: &Cut, window, cx| view.cut(window, cx)))
         .on_action(cx.listener(|view, _: &Paste, window, cx| view.paste(window, cx)))
+        .on_action(cx.listener(|view, _: &UpperCase, window, cx| view.change_case(true, window, cx)))
+        .on_action(cx.listener(|view, _: &LowerCase, window, cx| view.change_case(false, window, cx)))
         .on_action(cx.listener(|view, _: &ShowContextMenu, _, cx| view.context_menu_at_caret(cx)))
 }
 
