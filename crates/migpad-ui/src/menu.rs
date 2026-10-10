@@ -4,11 +4,25 @@
 //! opens it, so does a click, the right arrow and Enter; the left arrow and Esc close it.
 
 use gpui::{
-    Action, AnyElement, BoxShadow, Context, HighlightStyle, Keystroke, Role, SharedString, Stateful, StyledText,
-    Toggled, UnderlineStyle, anchored, deferred, div, point, prelude::*, px, rgb, rgba,
+    Action, AnyElement, BoxShadow, Context, HighlightStyle, Keystroke, Pixels, Role, SharedString, Stateful,
+    StyledText, Toggled, UnderlineStyle, anchored, deferred, div, point, prelude::*, px, rgb, rgba,
 };
 
 use crate::theme::theme;
+
+/// The height of an item of a menu.
+const ITEM_HEIGHT: f32 = 24.;
+/// The line between groups of items, and the space over and under it.
+const SEPARATOR: f32 = 1.;
+const SEPARATOR_SPACE: f32 = 4.;
+/// The space over the first item and under the last one.
+const PADDING: f32 = 4.;
+
+/// How tall a menu of `items` and `separators` is, its border with it.
+pub fn menu_height(items: usize, separators: usize) -> Pixels {
+    let separator = SEPARATOR + SEPARATOR_SPACE * 2.;
+    px(items as f32 * ITEM_HEIGHT + separators as f32 * separator + PADDING * 2. + 2.)
+}
 
 /// An item of a menu, as the application describes it each time the menu is drawn.
 pub enum ItemSpec {
@@ -353,7 +367,8 @@ pub(crate) fn panel<H: MenuHost>(
         .map(|(i, item)| {
             let (label_text, mnemonic, enabled, keys, checked, submenu) = match item {
                 ItemSpec::Separator => {
-                    return div().h(px(1.)).mx(px(8.)).my(px(4.)).bg(rgb(theme.border)).into_any_element();
+                    let line = div().h(px(SEPARATOR)).mx(px(8.)).my(px(SEPARATOR_SPACE)).bg(rgb(theme.border));
+                    return line.into_any_element();
                 }
                 ItemSpec::Action { label, mnemonic, keys, checked, enabled, .. } => {
                     (label, mnemonic, enabled, keys, checked, None)
@@ -387,7 +402,7 @@ pub(crate) fn panel<H: MenuHost>(
                 .relative()
                 .flex()
                 .items_center()
-                .h(px(24.))
+                .h(px(ITEM_HEIGHT))
                 .mx(px(4.))
                 .pr(px(10.))
                 .rounded(px(4.))
@@ -426,7 +441,7 @@ pub(crate) fn panel<H: MenuHost>(
         .role(Role::Menu)
         .aria_label(title)
         .min_w(px(220.))
-        .py(px(4.))
+        .py(px(PADDING))
         .bg(rgb(theme.menu))
         .border_1()
         .border_color(rgb(theme.border))
@@ -441,6 +456,13 @@ pub(crate) fn panel<H: MenuHost>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_menu_is_as_tall_as_its_items_and_separators() {
+        // The Edit menu: 16 items in 5 groups, drawn 430 pixels tall.
+        assert_eq!(menu_height(16, 4), px(430.));
+        assert_eq!(menu_height(1, 0), px(34.));
+    }
 
     const A: Item = Item::Choice { enabled: true, mnemonic: Some('a') };
     const B: Item = Item::Choice { enabled: true, mnemonic: Some('b') };

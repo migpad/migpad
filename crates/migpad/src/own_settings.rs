@@ -93,6 +93,8 @@ pub fn show(cx: &mut App) {
         is_resizable: false,
         is_minimizable: false,
         app_id: Some(windows::APP_ID.to_owned()),
+        #[cfg(target_os = "linux")]
+        icon: windows::icon(),
         ..Default::default()
     };
     let opened = cx.open_window(options, |window, cx| {

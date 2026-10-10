@@ -17,7 +17,7 @@ use migpad_core::state::TabState;
 use migpad_core::state::closed::ClosedState;
 use migpad_core::state::recent::RecentFile;
 
-use crate::commands::{refresh_menus, update_menus};
+use crate::commands::{Registry, refresh_menus, update_menus};
 use crate::journals;
 use crate::notices::{self, Notice};
 use crate::recent;
@@ -31,6 +31,8 @@ use crate::workspace::Workspace;
 const WINDOW_SIZE: (f32, f32) = (1000., 700.);
 /// How far a new window is from the active one: down and to the right, as a cascade.
 const CASCADE: f32 = 26.;
+/// The width under which the bars of a window would not fit.
+const MIN_WIDTH: f32 = 360.;
 
 /// A tab closed lately, to open again.
 pub struct ClosedTab {
@@ -196,6 +198,25 @@ pub fn open_documents(cx: &App) -> Vec<Entity<Document>> {
 /// [`workspaces`] leaves out: the settings window is not one.
 pub fn document_windows(cx: &App) -> usize {
     cx.windows().iter().filter(|window| window.downcast::<Workspace>().is_some()).count()
+}
+
+/// The window of documents at `point` of the screen, other than `except`, that takes a tab there,
+/// and where the tab goes among its tabs. The front one where windows overlap, where the system
+/// tells their order.
+pub fn workspace_at(point: Point<Pixels>, except: WindowId, cx: &mut App) -> Option<(WindowHandle<Workspace>, usize)> {
+    let windows = cx.window_stack().filter(|stack| !stack.is_empty()).unwrap_or_else(|| cx.windows());
+    windows
+        .into_iter()
+        .filter_map(|window| window.downcast::<Workspace>())
+        .filter(|w| w.window_id() != except)
+        .find_map(|handle| {
+            let index = handle.update(cx, |workspace, window, _| {
+                let bounds = window.bounds();
+                let over = bounds.contains(&point) && workspace.takes_tabs(window);
+                over.then(|| workspace.drop_index(point - bounds.origin))
+            });
+            Some((handle, index.ok()??))
+        })
 }
 
 /// The workspaces of the open windows, except one that is being updated now.
@@ -563,6 +584,27 @@ pub fn activate_open(path: &Path, cx: &mut App) -> bool {
 /// takes it with the options of a window, X11 as its class.
 pub const APP_ID: &str = "com.migpad.MigPad";
 
+/// The icon of the windows on Linux. Wayland finds it by [`APP_ID`] in the desktop file; X11 shows
+/// the one the window has, in its title bar and when the windows are switched.
+#[cfg(target_os = "linux")]
+pub fn icon() -> Option<std::sync::Arc<image::RgbaImage>> {
+    static ICON: std::sync::OnceLock<Option<std::sync::Arc<image::RgbaImage>>> = std::sync::OnceLock::new();
+    ICON.get_or_init(|| {
+        let png = include_bytes!("../resources/linux/icons/hicolor/64x64/apps/com.migpad.MigPad.png");
+        let icon = image::load_from_memory_with_format(png, image::ImageFormat::Png);
+        icon.map(|icon| std::sync::Arc::new(icon.into_rgba8())).ok()
+    })
+    .clone()
+}
+
+/// The smallest a window of documents gets on Windows and Linux: as wide as the bars need, as tall
+/// as the menu bar and the tallest of its menus, which are drawn in the window. On macOS the menus
+/// are those of the system.
+fn min_size(cx: &App) -> Option<gpui::Size<Pixels>> {
+    let height = px(migpad_ui::menu_bar::HEIGHT) + cx.global::<Registry>().tallest_menu();
+    (!cfg!(target_os = "macos")).then(|| size(px(MIN_WIDTH), height))
+}
+
 /// A new window: at `place` and on its screen, or down and to the right of the active one, or in
 /// the middle of the screen.
 fn window_options(place: Option<(WindowBounds, Option<DisplayId>)>, cx: &mut App) -> WindowOptions {
@@ -574,6 +616,9 @@ fn window_options(place: Option<(WindowBounds, Option<DisplayId>)>, cx: &mut App
             display_id,
             titlebar,
             app_id,
+            window_min_size: min_size(cx),
+            #[cfg(target_os = "linux")]
+            icon: icon(),
             ..Default::default()
         };
     }
@@ -591,5 +636,13 @@ fn window_options(place: Option<(WindowBounds, Option<DisplayId>)>, cx: &mut App
         })
         .unwrap_or_else(|| Bounds::centered(None, size, cx));
     let app_id = Some(APP_ID.to_owned());
-    WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), titlebar, app_id, ..Default::default() }
+    WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        titlebar,
+        app_id,
+        window_min_size: min_size(cx),
+        #[cfg(target_os = "linux")]
+        icon: icon(),
+        ..Default::default()
+    }
 }

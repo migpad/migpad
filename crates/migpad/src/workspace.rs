@@ -5,9 +5,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use gpui::{
-    App, AppContext, Context, DragMoveEvent, Entity, EntityId, ExternalPaths, FocusHandle, Focusable, MouseDownEvent,
-    MouseUpEvent, PathPromptOptions, Pixels, Point, PromptButton, PromptLevel, Render, ScrollHandle, SharedString,
-    Subscription, Task, Window, WindowHandle, WindowId, canvas, div, prelude::*, px, rgb,
+    App, AppContext, Bounds, Context, DragMoveEvent, Entity, EntityId, ExternalPaths, FocusHandle, Focusable,
+    MouseButton, MouseDownEvent, MouseUpEvent, PathPromptOptions, Pixels, Point, PromptButton, PromptLevel, Render,
+    ScrollHandle, SharedString, Subscription, Task, Window, WindowBounds, WindowHandle, WindowId, canvas, div, point,
+    prelude::*, px, rgb,
 };
 use migpad_core::document::{Document, Fingerprint, Format, OpenAs, Opened, open};
 use migpad_core::encoding::Encoding;
@@ -1383,6 +1384,59 @@ impl Workspace {
         }
     }
 
+    /// Where a tab dropped at `point` of the window goes among its tabs: between them over the bar,
+    /// after the last one elsewhere.
+    pub fn drop_index(&self, point: Point<Pixels>) -> usize {
+        let offset = self.tab_scroll.offset();
+        let tabs: Vec<_> = (0..self.tabs.len())
+            .map_while(|index| self.tab_scroll.bounds_for_item(index))
+            .map(|tab| Bounds::new(tab.origin + offset, tab.size))
+            .collect();
+        migpad_ui::drop_position(&tabs, point).unwrap_or(self.tabs.len())
+    }
+
+    /// Whether the window can take a tab from another: not while it asks a question, which the
+    /// tab would take the keyboard from, and which would close the window with the tab.
+    pub fn takes_tabs(&self, window: &Window) -> bool {
+        !self.asking && !window.has_active_prompt()
+    }
+
+    /// A tab let go of outside the window. On macOS the drag goes on in the window under the
+    /// pointer; on Windows and Linux the button comes back to this window, which finds that window
+    /// itself: the tab goes to its bar, or to a window of its own where no window of MigPad is. The
+    /// windows of Wayland do not know where they are: there it is always a window of its own.
+    fn tab_released_outside(&mut self, event: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // Outside of the root, a release may still be in the window: over a menu or a question.
+        let inside = Bounds::new(Point::default(), window.viewport_size()).contains(&event.position);
+        if cfg!(target_os = "macos") || inside || !cx.has_active_drag() {
+            return;
+        }
+        let Some(dragged) = migpad_ui::take_dragged_tab(cx) else { return };
+        if dragged.source_window() != self.window_id {
+            return;
+        }
+        let at = window.bounds().origin + event.position;
+        let target = (cx.compositor_name() != "Wayland").then(|| windows::workspace_at(at, self.window_id, cx));
+        if let Some((target, index)) = target.flatten() {
+            // Once this window is done with the event: the other one takes the tab from it, and the
+            // keyboard, which the button never went to.
+            cx.defer(move |cx| {
+                let _ = target.update(cx, |workspace, window, cx| {
+                    workspace.receive_tab(&dragged, index, window, cx);
+                    window.activate_window();
+                });
+            });
+        } else if self.tabs.len() > 1
+            && let Some(tab) = self.extract_tab_by_document(dragged.document_id(), window, cx)
+        {
+            // Where it was let go of, the pointer over the new tab.
+            let bounds = Bounds::new(at - point(px(60.), px(40.)), window.viewport_size());
+            cx.defer(move |cx| {
+                windows::open_window_with(vec![tab], Vec::new(), Some((WindowBounds::Windowed(bounds), None)), cx);
+            });
+        }
+    }
+
     /// Opens what closed `index`-th from the last — the last is 0 — again: a tab here, or a closed
     /// window as a window of its own.
     pub fn reopen_closed(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -1890,7 +1944,10 @@ impl Workspace {
             .iter()
             .map(|tab| {
                 let doc = tab.document.read(cx);
-                let tooltip = doc.path.as_ref().map(|path| match tab.missing {
+                // No path over a menu opened on the tab, where the pointer stays: Windows and Linux
+                // draw menus in the window, under the tooltips.
+                let path = doc.path.as_ref().filter(|_| self.context_menu.is_none());
+                let tooltip = path.map(|path| match tab.missing {
                     true => fill(Key::FileMissing, &[("path", &path.display().to_string())]),
                     false => path.display().to_string(),
                 });
@@ -2067,7 +2124,8 @@ impl Render for Workspace {
             )
             .on_drop(move |dragged: &DraggedTab, window, cx| {
                 let _ = tab_tearoff.update(cx, |workspace, cx| workspace.tab_dropped_outside_bar(dragged, window, cx));
-            });
+            })
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::tab_released_outside));
         let root = handlers.iter().fold(root, |root, handler| handler(root, cx));
         let root = match self.menu_bar.clone() {
             // Mouse only on macOS, where Option types characters.

@@ -1,5 +1,7 @@
 [workspace]
 members = ["crates/*"]
+# Copies of crates with fixes of MigPad: see vendor/README.md.
+exclude = ["vendor"]
 resolver = "3"
 
 [workspace.package]
@@ -25,6 +27,8 @@ chardetng = "1.0"
 # Windows: the resources of migpad.exe, at build time; GPUI has this version too.
 embed-resource = "3.0"
 encoding_rs = "0.8.42"
+# Linux: the icon of the windows, which X11 takes from the window; GPUI has this version too.
+image = { version = "0.25", default-features = false, features = ["png"] }
 libc = "0.2"
 memchr = "2.8"
 # macOS: the context menus of the system, the appearance of what it draws, the settings window, the About panel,
@@ -80,6 +84,10 @@ sys-locale = "0.3"
 # the program keeps between starts.
 toml_edit = { version = "0.25", default-features = false, features = ["parse"] }
 windows-sys = "0.61"
+
+# GPUI on Linux with a fix of MigPad: see vendor/README.md.
+[patch.crates-io]
+gpui-pre-linux = { path = "vendor/gpui-pre-linux" }
 
 [profile.release]
 lto = "thin"

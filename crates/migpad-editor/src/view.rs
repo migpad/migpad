@@ -405,10 +405,12 @@ impl EditorView {
     }
 
     /// Shows the caret and starts its blinking over, if the view has focus in an active window;
-    /// stops the blinking otherwise.
+    /// stops the blinking otherwise. Without a GPU — a virtual machine, a remote desktop — the
+    /// processor draws the whole window for each blink, a third of a core: the caret stays shown.
     fn restart_blink(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.caret_on = true;
-        let blinking = self.focus.is_focused(window) && window.is_window_active();
+        let software = window.gpu_specs().is_some_and(|specs| specs.is_software_emulated);
+        let blinking = self.focus.is_focused(window) && window.is_window_active() && !software;
         self.blink = blinking.then(|| {
             cx.spawn(async move |view, cx| {
                 loop {

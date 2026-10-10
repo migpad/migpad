@@ -2152,8 +2152,6 @@ dependencies = [
 [[package]]
 name = "gpui-pre-linux"
 version = "0.3.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0aac7022e347409454777701082201742710052813964a1e25160f7e22c965ad"
 dependencies = [
  "accesskit",
  "accesskit_unix",
@@ -3252,6 +3250,7 @@ dependencies = [
  "embed-resource",
  "gpui-pre",
  "gpui-pre-platform",
+ "image",
  "libc",
  "migpad-core",
  "migpad-editor",

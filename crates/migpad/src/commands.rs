@@ -8,7 +8,8 @@ use std::rc::Rc;
 
 use gpui::{
     Action, App, Context, Div, DummyKeyboardMapper, FocusHandle, Focusable, Global, InteractiveElement, KeyBinding,
-    KeyBindingContextPredicate, Menu, MenuItem, NoAction, OsAction, SharedString, SystemMenuType, Window, WindowId,
+    KeyBindingContextPredicate, Menu, MenuItem, NoAction, OsAction, Pixels, SharedString, SystemMenuType, Window,
+    WindowId,
 };
 
 use migpad_ui::menu_bar::{ItemSpec, MenuSpec};
@@ -295,6 +296,29 @@ impl Registry {
                 |focus| window.is_action_available_in(action, focus),
             );
         handled && command.enabled.is_none_or(|enabled| enabled(workspace, cx))
+    }
+
+    /// How tall the tallest menu of the bar MigPad draws is: the windows are not made lower than the
+    /// bar and it, as the menus are drawn in the window and one taller than the space under the
+    /// bar would cover the bar and still be cut. The lists in submenus — recent files, encodings
+    /// — move up to fit, over their menu.
+    pub fn tallest_menu(&self) -> Pixels {
+        let height = |id: MenuId| {
+            let mut placements: Vec<&Placement> = self
+                .placements
+                .iter()
+                .filter(|placement| {
+                    placement.menu == id && !matches!(placement.entry, Entry::Services | Entry::Windows)
+                })
+                .collect();
+            placements.sort_by_key(|placement| placement.group);
+            let separators = placements.windows(2).filter(|pair| pair[0].group != pair[1].group).count();
+            migpad_ui::menu_height(placements.len(), separators)
+        };
+        MenuId::ALL
+            .into_iter()
+            .map(height)
+            .fold(Pixels::ZERO, |tallest, menu| if menu > tallest { menu } else { tallest })
     }
 
     /// The menus of the bar MigPad draws, for the window of `workspace`: those of macOS, without the
