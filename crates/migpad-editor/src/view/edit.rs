@@ -137,6 +137,7 @@ impl EditorView {
     /// Undoes the last step, or redoes the last undone one, and restores the selection it had.
     fn step_history(&mut self, undo: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.end_composition(cx);
+        self.block_columns = None;
         let selection = self.document.update(cx, |doc, cx| {
             let selection = if undo { doc.undo() } else { doc.redo() };
             if selection.is_some() {
@@ -198,6 +199,8 @@ impl EditorView {
         }
         if self.block_columns.is_some() {
             self.delete_block(window, cx);
+            self.block_columns = None;
+            self.selection = Selection::caret(self.selection.head);
         }
         let bytes = if self.single_line {
             one_line(&text).into_owned().into_bytes()
@@ -215,6 +218,13 @@ impl EditorView {
             return;
         }
         let text = self.accepted(text);
+        let (anchor_col, head_col) = self.block_columns.unwrap();
+        let left_col = anchor_col.min(head_col);
+        let (anchor_line, head_line) = {
+            let doc = self.document.read(cx);
+            let (txt, lns) = (doc.text(), doc.lines());
+            (lns.line_of(self.selection.anchor.min(txt.len())), lns.line_of(self.selection.head.min(txt.len())))
+        };
         let ranges = self.block_line_ranges(cx);
         if ranges.is_empty() {
             return;
@@ -243,21 +253,17 @@ impl EditorView {
         if edited {
             self.version = self.document.read(cx).version();
             self.text_changed();
-            self.selection = after;
-            // Keep block selection as zero-width at the new column.
-            let (anchor_col, head_col) = self.block_columns.unwrap();
-            let left = anchor_col.min(head_col);
-            let new_col = left + column_width(text_bytes, self.columns.tab_width(), left);
+            let new_col = left_col + column_width(text_bytes, self.columns.tab_width(), left_col);
             self.block_columns = Some((new_col, new_col));
-            // Recompute anchor position for the new column.
             let doc = self.document.read(cx);
             let (txt, lns) = (doc.text(), doc.lines());
-            let al = lns.line_of(before.anchor.min(txt.len()));
-            let hl = lns.line_of(after_pos.min(txt.len()));
-            let anchor_line = al.min(hl);
-            let (ar, _) = lns.line_range(txt, anchor_line);
+            let al = anchor_line.min(lns.count() - 1);
+            let hl = head_line.min(lns.count() - 1);
+            let (ar, _) = lns.line_range(txt, al.min(hl));
             let anchor_pos = self.columns.char_at(txt, &ar, new_col).0;
-            self.selection = Selection { anchor: anchor_pos, head: after_pos };
+            let (hr, _) = lns.line_range(txt, al.max(hl));
+            let head_pos = self.columns.char_at(txt, &hr, new_col).0;
+            self.selection = Selection { anchor: anchor_pos, head: head_pos };
             self.goal_x = None;
             self.caret_moved(window, cx);
         }
@@ -268,6 +274,13 @@ impl EditorView {
         if self.read_only(cx) {
             return;
         }
+        let (anchor_col, head_col) = self.block_columns.unwrap();
+        let left = anchor_col.min(head_col);
+        let (anchor_line, head_line) = {
+            let doc = self.document.read(cx);
+            let (txt, lns) = (doc.text(), doc.lines());
+            (lns.line_of(self.selection.anchor.min(txt.len())), lns.line_of(self.selection.head.min(txt.len())))
+        };
         let ranges = self.block_line_ranges(cx);
         let has_content = ranges.iter().any(|r| !r.is_empty());
         if !has_content {
@@ -287,8 +300,7 @@ impl EditorView {
             return;
         }
         let before = self.selection;
-        let after_pos = edits[0].0.start;
-        let after = Selection::caret(after_pos);
+        let after = Selection::caret(edits[0].0.start);
         let edited = self.document.update(cx, |doc, cx| {
             let ok = doc.edit(&edits, before, after, EditKind::Other, Instant::now()).is_ok();
             if ok {
@@ -299,20 +311,14 @@ impl EditorView {
         if edited {
             self.version = self.document.read(cx).version();
             self.text_changed();
-            self.selection = after;
-            // Collapse to zero-width block at the left column.
-            let (anchor_col, head_col) = self.block_columns.unwrap();
-            let left = anchor_col.min(head_col);
             self.block_columns = Some((left, left));
-            // Recompute positions for the new column.
             let doc = self.document.read(cx);
             let (txt, lns) = (doc.text(), doc.lines());
-            let al = lns.line_of(before.anchor.min(txt.len()));
-            let hl = lns.line_of(before.head.min(txt.len()));
-            let (start_line, end_line) = (al.min(hl), al.max(hl));
-            let (ar, _) = lns.line_range(txt, start_line);
+            let al = anchor_line.min(lns.count() - 1);
+            let hl = head_line.min(lns.count() - 1);
+            let (ar, _) = lns.line_range(txt, al.min(hl));
             let anchor_pos = self.columns.char_at(txt, &ar, left).0;
-            let (hr, _) = lns.line_range(txt, end_line.min(lns.count() - 1));
+            let (hr, _) = lns.line_range(txt, al.max(hl));
             let head_pos = self.columns.char_at(txt, &hr, left).0;
             self.selection = Selection { anchor: anchor_pos, head: head_pos };
             self.goal_x = None;
