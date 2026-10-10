@@ -343,17 +343,33 @@ impl EditorView {
         cx.write_to_clipboard(item);
     }
 
-    /// Pastes block text as a column at the caret position.
+    /// Pastes block text as a column at the caret position, or replacing a block selection.
     fn paste_block(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         if self.read_only(cx) {
             return;
         }
-        // Delete any existing block selection first.
-        if self.block_columns.is_some() {
-            let (ac, hc) = self.block_columns.unwrap();
+        // Where to insert: the top-left of the block selection, or the caret.
+        let insert_line;
+        let insert_col;
+        if let Some((ac, hc)) = self.block_columns {
+            insert_col = ac.min(hc);
+            let (al, hl) = {
+                let doc = self.document.read(cx);
+                let (txt, lns) = (doc.text(), doc.lines());
+                (lns.line_of(self.selection.anchor.min(txt.len())), lns.line_of(self.selection.head.min(txt.len())))
+            };
+            insert_line = al.min(hl);
             if ac != hc {
                 self.delete_block(window, cx);
             }
+            self.block_columns = None;
+        } else {
+            let doc = self.document.read(cx);
+            let (txt, lns) = (doc.text(), doc.lines());
+            let head = self.selection.head.min(txt.len());
+            insert_line = lns.line_of(head);
+            let (head_range, _) = lns.line_range(txt, insert_line);
+            insert_col = self.columns.column_of(txt, &head_range, head);
         }
         let paste_lines: Vec<&str> = text.lines().collect();
         if paste_lines.is_empty() {
@@ -363,10 +379,8 @@ impl EditorView {
             let doc = self.document.read(cx);
             let (txt, lns) = (doc.text(), doc.lines());
             let line_ending = doc.format.line_ending.as_bytes();
-            let head = self.selection.head.min(txt.len());
-            let head_line = lns.line_of(head);
-            let (head_range, _) = lns.line_range(txt, head_line);
-            let col = self.columns.column_of(txt, &head_range, head);
+            let head_line = insert_line;
+            let col = insert_col;
             let mut edits: Vec<(Range<usize>, Vec<u8>)> = Vec::new();
             let mut shift: isize = 0;
             for (i, &paste_line) in paste_lines.iter().enumerate() {
