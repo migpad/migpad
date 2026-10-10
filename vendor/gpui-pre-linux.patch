@@ -1,0 +1,19 @@
+--- a/src/linux/x11/window.rs
++++ b/src/linux/x11/window.rs
+@@ -478,10 +478,14 @@
+ 
+         let visual_set = find_visuals(xcb, x_screen_index);
+ 
+-        let visual = match visual_set.transparent {
++        // MigPad: an opaque visual first. Its windows are opaque and the window manager decorates
++        // them, and the software Vulkan of Mesa before 24.2 (lavapipe), on an X server without
++        // DRI3 (xrdp, VNC), puts its frames into windows of depth 24 only: a window of depth 32
++        // stays empty.
++        let visual = match visual_set.opaque.or(visual_set.transparent) {
+             Some(visual) => visual,
+             None => {
+-                log::warn!("Unable to find a transparent visual",);
++                log::warn!("Unable to find an opaque or a transparent visual",);
+                 visual_set.inherit
+             }
+         };
