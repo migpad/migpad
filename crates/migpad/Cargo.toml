@@ -7,11 +7,14 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+base64.workspace = true
+bs58.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
 migpad-core.workspace = true
 migpad-editor.workspace = true
 migpad-ui.workspace = true
+percent-encoding.workspace = true
 sys-locale.workspace = true
 # The translations the user puts in the folder of the data.
 toml_edit.workspace = true

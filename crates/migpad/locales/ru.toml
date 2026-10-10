@@ -41,6 +41,21 @@ copy = "С&копировать"
 paste = "Вст&авить"
 delete = "&Удалить"
 select_all = "Выбрать &все"
+upper_case = "В верхни&й регистр"
+lower_case = "В ни&жний регистр"
+
+[transform]
+menu = "Преобра&зовать"
+hex_encode = "&Hex — закодировать"
+hex_decode = "Hex — &раскодировать"
+base64_encode = "Base&64 — закодировать"
+base64_decode = "Base64 — р&аскодировать"
+base58_encode = "Base&58 — закодировать"
+base58_decode = "Base58 — ра&скодировать"
+url_encode = "&URL — закодировать"
+url_decode = "URL — рас&кодировать"
+bip39_to_dig = "BIP-39 → di&g"
+dig_to_bip39 = "dig → &BIP-39"
 
 [find]
 menu = "&Найти"

@@ -4,9 +4,9 @@
 //! of the text has them too.
 
 use gpui::OsAction;
-use migpad_editor::actions::{Copy, Cut, Delete, Paste, Redo, SelectAll, Undo};
+use migpad_editor::actions::{Copy, Cut, Delete, LowerCase, Paste, Redo, SelectAll, Undo, UpperCase};
 
-use crate::commands::{Command, MenuId, Module, Registry};
+use crate::commands::{Command, MenuId, Module, Registry, by_os};
 use crate::strings::Key;
 
 pub struct EditModule;
@@ -32,5 +32,21 @@ impl Module for EditModule {
         registry.add(Command::new("edit.delete", Key::EditDelete, Delete), menu(1));
         let select_all = Command::new("edit.select_all", Key::EditSelectAll, SelectAll).os_action(OsAction::SelectAll);
         registry.add(select_all, menu(1));
+        let upper = Command::new("edit.upper_case", Key::EditUpperCase, UpperCase)
+            .keys(by_os(&["cmd-shift-u"], &["ctrl-shift-u"], &["ctrl-shift-u"]))
+            .enabled(|workspace, cx| {
+                let editor = workspace.editor();
+                let sel = editor.read(cx).selection();
+                sel.anchor != sel.head || editor.read(cx).is_block_selection()
+            });
+        registry.add(upper, menu(2));
+        let lower = Command::new("edit.lower_case", Key::EditLowerCase, LowerCase)
+            .keys(by_os(&["cmd-shift-l"], &["ctrl-shift-l"], &["ctrl-shift-l"]))
+            .enabled(|workspace, cx| {
+                let editor = workspace.editor();
+                let sel = editor.read(cx).selection();
+                sel.anchor != sel.head || editor.read(cx).is_block_selection()
+            });
+        registry.add(lower, menu(2));
     }
 }

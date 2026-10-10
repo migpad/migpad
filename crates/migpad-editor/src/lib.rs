@@ -21,7 +21,7 @@ pub use view::{ContextMenuEvent, EditorView};
 
 /// The editing actions that the application puts into its menus.
 pub mod actions {
-    pub use crate::keymap::{Copy, Cut, Delete, Paste, Redo, SelectAll, Undo};
+    pub use crate::keymap::{Copy, Cut, Delete, LowerCase, Paste, Redo, SelectAll, Undo, UpperCase};
 }
 
 /// Binds the keys of the editor; called once when the application starts.

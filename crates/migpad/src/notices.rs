@@ -34,7 +34,7 @@ pub struct SaveTarget {
 }
 
 impl Notice {
-    fn new(severity: Severity, message: String) -> Self {
+    pub fn new(severity: Severity, message: String) -> Self {
         Notice { severity, message, topic: None, actions: Vec::new(), target: None }
     }
 }

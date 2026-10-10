@@ -52,6 +52,21 @@ copy = "&Copy"
 paste = "&Paste"
 delete = "&Delete"
 select_all = "Select &All"
+upper_case = "Upper Ca&se"
+lower_case = "Lo&wer Case"
+
+[transform]
+menu = "Transfor&m"
+hex_encode = "&Hex Encode"
+hex_decode = "Hex &Decode"
+base64_encode = "Base&64 Encode"
+base64_decode = "Base64 D&ecode"
+base58_encode = "Base&58 Encode"
+base58_decode = "Base58 De&code"
+url_encode = "&URL Encode"
+url_decode = "UR&L Decode"
+bip39_to_dig = "BIP-39 → di&g"
+dig_to_bip39 = "dig → &BIP-39"
 
 [find]
 # The submenu of the Edit menu on macOS.
