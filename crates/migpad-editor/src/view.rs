@@ -110,6 +110,10 @@ pub struct EditorView {
     blink: Option<Task<()>>,
     /// What an empty input field shows, faint: what it is for.
     placeholder: Option<SharedString>,
+    /// Block (column) selection: the display columns of the anchor and head. When set, the
+    /// selection is a rectangle from `selection.anchor`'s line to `selection.head`'s line between
+    /// these columns.
+    block_columns: Option<(usize, usize)>,
     /// Whether the selection shows as if the view had the focus, while its window is active: a
     /// find bar works on it.
     emphasized: bool,
@@ -164,6 +168,7 @@ impl EditorView {
             caret_at_row_end: false,
             geometry: Geometry::default(),
             selection: Selection::default(),
+            block_columns: None,
             marked: None,
             goal_x: None,
             drag: None,
@@ -196,6 +201,7 @@ impl EditorView {
         let doc = self.document.read(cx);
         let snap = |pos| movement::snap(doc.text(), doc.lines(), pos);
         self.selection = Selection { anchor: snap(selection.anchor), head: snap(selection.head) };
+        self.block_columns = None;
         self.goal_x = None;
         self.caret_at_row_end = false;
         self.seal_undo_step(cx);
@@ -314,6 +320,7 @@ impl EditorView {
         if doc.version() != self.version {
             self.version = doc.version();
             self.marked = None;
+            self.block_columns = None;
         }
         let snap = |pos| movement::snap(doc.text(), doc.lines(), pos);
         self.selection = Selection { anchor: snap(self.selection.anchor), head: snap(self.selection.head) };
@@ -323,6 +330,47 @@ impl EditorView {
     fn selected_range(&self) -> Range<usize> {
         let Selection { anchor, head } = self.selection;
         anchor.min(head)..anchor.max(head)
+    }
+
+    /// Whether the selection is a block (column) selection.
+    pub fn is_block_selection(&self) -> bool {
+        self.block_columns.is_some()
+    }
+
+    /// Block selection dimensions: (line_count, left_col, right_col), if in block mode.
+    pub fn block_dimensions(&self, cx: &App) -> Option<(usize, usize, usize)> {
+        let (anchor_col, head_col) = self.block_columns?;
+        let doc = self.document.read(cx);
+        let (text, lines) = (doc.text(), doc.lines());
+        let al = lines.line_of(self.selection.anchor.min(text.len()));
+        let hl = lines.line_of(self.selection.head.min(text.len()));
+        Some((al.abs_diff(hl) + 1, anchor_col.min(head_col), anchor_col.max(head_col)))
+    }
+
+    /// The byte ranges on each line of a block selection, from top to bottom. Each range spans
+    /// from `left_col` to `right_col` on that line. Lines shorter than `left_col` get an empty
+    /// range at their end.
+    fn block_line_ranges(&self, cx: &App) -> Vec<Range<usize>> {
+        let (anchor_col, head_col) = self.block_columns.expect("block mode");
+        let (left_col, right_col) = (anchor_col.min(head_col), anchor_col.max(head_col));
+        let doc = self.document.read(cx);
+        let (text, lines) = (doc.text(), doc.lines());
+        let al = lines.line_of(self.selection.anchor.min(text.len()));
+        let hl = lines.line_of(self.selection.head.min(text.len()));
+        let (start, end) = (al.min(hl), al.max(hl));
+        let mut ranges = Vec::with_capacity(end - start + 1);
+        for line in start..=end {
+            let (line_range, _) = lines.line_range(text, line);
+            let left = self.columns.char_at(text, &line_range, left_col).0;
+            let right = self.columns.char_at(text, &line_range, right_col).0;
+            ranges.push(left..right);
+        }
+        ranges
+    }
+
+    /// Clears block selection mode.
+    fn clear_block(&mut self) {
+        self.block_columns = None;
     }
 
     /// Ends the undo step being typed: the next edit starts a new one.
@@ -475,6 +523,11 @@ impl EditorView {
         // An input field without the keyboard shows no selection, as the fields of the systems do.
         let (start, end) =
             if self.single_line && !active { (head, head) } else { (anchor.min(head), anchor.max(head)) };
+        let block_sel = self.block_columns.map(|(ac, hc)| {
+            let al = lines.line_of(anchor.min(text.len()));
+            let hl = lines.line_of(head.min(text.len()));
+            (al.min(hl), al.max(hl), ac.min(hc), ac.max(hc), hc)
+        });
         let metrics = &self.metrics;
         // Room for the caret at either end of the text of an input field.
         let clip = if self.single_line {
@@ -501,6 +554,7 @@ impl EditorView {
             guides: Vec::new(),
             labels: Vec::new(),
             placeholder: None,
+            block_carets: Vec::new(),
             hitbox: None,
             view_hitbox: None,
         };
@@ -542,28 +596,54 @@ impl EditorView {
                 );
                 layout.labels.push((shaped, point(x, y), background));
             }
-            if start < end && start <= row.shown.end && end > row.shown.start {
-                let from = row.x_of(start.max(row.shown.start));
-                let to = if end > row.range.end && last {
-                    row.x_of(row.range.end) + char_width * 0.5
-                } else {
-                    row.x_of(end.min(row.shown.end))
-                };
-                if to > from {
-                    let selected = Bounds::from_corners(point(screen_x(from), y), point(screen_x(to), y + line_height));
-                    layout.selection.push(selected);
+            if let Some((start_line, end_line, left_col, right_col, head_col)) = block_sel {
+                if at.line >= start_line && at.line <= end_line && first {
+                    let (line_range, _) = lines.line_range(text, at.line);
+                    if left_col < right_col {
+                        let left_byte = self.columns.char_at(text, &line_range, left_col).0;
+                        let right_byte = self.columns.char_at(text, &line_range, right_col).0;
+                        let from = row.x_of(left_byte.max(row.shown.start));
+                        let to = row.x_of(right_byte.min(row.shown.end));
+                        if to > from {
+                            let r =
+                                Bounds::from_corners(point(screen_x(from), y), point(screen_x(to), y + line_height));
+                            layout.selection.push(r);
+                        }
+                    }
+                    let head_byte = self.columns.char_at(text, &line_range, head_col).0;
+                    let x = screen_x(row.x_of(head_byte)).round() - px(CARET_WIDTH / 2.);
+                    let caret = Bounds::new(point(x, y), size(px(CARET_WIDTH), line_height));
+                    if at.line == lines.line_of(head.min(text.len())) {
+                        layout.geometry.caret = Some(caret);
+                    }
+                    if active && self.caret_on {
+                        layout.block_carets.push(caret);
+                    }
                 }
-            }
-            // At a wrap the caret is at the start of the lower row, or at the end of the upper one.
-            let on_row = (row.shown.start..=row.shown.end).contains(&head)
-                && !(head == row.shown.end && !last && !self.caret_at_row_end)
-                && !(head == row.shown.start && !first && self.caret_at_row_end);
-            if on_row {
-                let x = screen_x(row.x_of(head)).round() - px(CARET_WIDTH / 2.);
-                let caret = Bounds::new(point(x, y), size(px(CARET_WIDTH), line_height));
-                layout.geometry.caret = Some(caret);
-                if active && self.caret_on {
-                    layout.caret = Some(caret);
+            } else {
+                if start < end && start <= row.shown.end && end > row.shown.start {
+                    let from = row.x_of(start.max(row.shown.start));
+                    let to = if end > row.range.end && last {
+                        row.x_of(row.range.end) + char_width * 0.5
+                    } else {
+                        row.x_of(end.min(row.shown.end))
+                    };
+                    if to > from {
+                        let r = Bounds::from_corners(point(screen_x(from), y), point(screen_x(to), y + line_height));
+                        layout.selection.push(r);
+                    }
+                }
+                // At a wrap the caret is at the start of the lower row, or at the end of the upper one.
+                let on_row = (row.shown.start..=row.shown.end).contains(&head)
+                    && !(head == row.shown.end && !last && !self.caret_at_row_end)
+                    && !(head == row.shown.start && !first && self.caret_at_row_end);
+                if on_row {
+                    let x = screen_x(row.x_of(head)).round() - px(CARET_WIDTH / 2.);
+                    let caret = Bounds::new(point(x, y), size(px(CARET_WIDTH), line_height));
+                    layout.geometry.caret = Some(caret);
+                    if active && self.caret_on {
+                        layout.caret = Some(caret);
+                    }
                 }
             }
             layout.lines.push((row.shaped, point(screen_x(row.x), y)));

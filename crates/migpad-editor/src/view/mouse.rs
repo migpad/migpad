@@ -20,6 +20,8 @@ pub(super) enum Drag {
     /// Selects by characters, words or lines to where the mouse is; `origin` stays selected: the
     /// anchor, or the word or line clicked first.
     Select { unit: Unit, origin: Range<usize>, mouse: Point<Pixels> },
+    /// Block (column) selection: the anchor column, and the mouse position.
+    Block { anchor_col: usize, mouse: Point<Pixels> },
     /// Moves the scrollbar thumb, held `grab` pixels below its top.
     Thumb { grab: f64 },
 }
@@ -50,6 +52,25 @@ impl EditorView {
             self.scrollbar_down(event.position, cx);
             return;
         }
+        // Alt+click (Option on macOS) in the text area starts a block (column) selection.
+        if event.modifiers.alt && !self.single_line && !self.geometry.gutter.contains(&event.position) {
+            let (at, x) = self.hit(event.position, cx);
+            let doc = self.document.read(cx);
+            let (text, lines) = (doc.text(), doc.lines());
+            let row = self.screen_row(text, lines, at, window);
+            let pos = row.boundary_at(x);
+            let (line_range, _) = lines.line_range(text, at.line);
+            let col = self.columns.column_of(text, &line_range, pos);
+            self.selection = Selection { anchor: pos, head: pos };
+            self.block_columns = Some((col, col));
+            self.drag = Some(Drag::Block { anchor_col: col, mouse: event.position });
+            self.goal_x = None;
+            self.caret_at_row_end = false;
+            self.restart_blink(window, cx);
+            window.invalidate_character_coordinates();
+            return;
+        }
+        self.clear_block();
         let in_gutter = self.geometry.gutter.contains(&event.position);
         let (at, x) = self.hit(event.position, cx);
         let doc = self.document.read(cx);
@@ -118,6 +139,11 @@ impl EditorView {
                 self.select_to_mouse(window, cx);
                 self.update_autoscroll(window, cx);
             }
+            Some(Drag::Block { ref mut mouse, .. }) => {
+                *mouse = event.position;
+                self.select_block_to_mouse(window, cx);
+                self.update_autoscroll(window, cx);
+            }
             None => {}
         }
     }
@@ -160,10 +186,28 @@ impl EditorView {
         cx.notify();
     }
 
+    /// Extends the block selection being dragged to the mouse.
+    fn select_block_to_mouse(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let Some(Drag::Block { anchor_col, mouse }) = self.drag.clone() else { return };
+        let (at, x) = self.hit(mouse, cx);
+        let doc = self.document.read(cx);
+        let (text, lines) = (doc.text(), doc.lines());
+        let row = self.screen_row(text, lines, at, window);
+        let pos = row.boundary_at(x);
+        let (line_range, _) = lines.line_range(text, at.line);
+        let col = self.columns.column_of(text, &line_range, pos);
+        self.selection.head = pos;
+        self.block_columns = Some((anchor_col, col));
+        cx.notify();
+    }
+
     /// How far the mouse dragging a selection is past the edges of the text, in pixels: negative
     /// to the left and above. An input field, one line high, only scrolls sideways.
     fn overshoot(&self) -> (f64, f64) {
-        let Some(Drag::Select { mouse, .. }) = self.drag else { return (0.0, 0.0) };
+        let mouse = match self.drag {
+            Some(Drag::Select { mouse, .. }) | Some(Drag::Block { mouse, .. }) => mouse,
+            _ => return (0.0, 0.0),
+        };
         let area = self.geometry.text_area;
         let past = |at: Pixels, low: Pixels, high: Pixels| {
             f64::from(if at < low {
@@ -209,7 +253,11 @@ impl EditorView {
             let max_x = self.max_scroll_x().max(self.scroll_x);
             self.scroll_x = (self.scroll_x + (dx / 4.0).clamp(-40.0, 40.0)).clamp(0.0, max_x);
         }
-        self.select_to_mouse(window, cx);
+        if matches!(self.drag, Some(Drag::Block { .. })) {
+            self.select_block_to_mouse(window, cx);
+        } else {
+            self.select_to_mouse(window, cx);
+        }
         true
     }
 

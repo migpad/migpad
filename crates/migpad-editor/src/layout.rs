@@ -221,6 +221,8 @@ pub(crate) struct Layout {
     pub placeholder: Option<(ShapedLine, Point<Pixels>)>,
     /// The text area, for the I-beam mouse cursor; the element adds it.
     pub hitbox: Option<Hitbox>,
+    /// Block selection: carets at each line of the block.
+    pub block_carets: Vec<Bounds<Pixels>>,
     /// The whole view, for presses and the wheel; the element adds it.
     pub view_hitbox: Option<Hitbox>,
 }
