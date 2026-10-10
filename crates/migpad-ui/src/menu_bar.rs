@@ -18,7 +18,7 @@ use crate::menu::{self, Item, Levels, MenuHost, Step, menu_key, mnemonic_char, t
 use crate::theme::theme;
 
 /// The height of the bar.
-const HEIGHT: f32 = 24.;
+pub const HEIGHT: f32 = 24.;
 
 /// A menu of the bar, as the application describes it each time it is drawn.
 pub struct MenuSpec {

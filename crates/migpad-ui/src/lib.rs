@@ -20,7 +20,7 @@ pub use button::Button;
 pub use checkbox::Checkbox;
 pub use context_menu::ContextMenu;
 pub use dropdown::Dropdown;
-pub use menu::{ItemSpec, action_at};
+pub use menu::{ItemSpec, action_at, menu_height};
 pub use menu_bar::MenuBar;
 pub use status_bar::StatusBar;
 pub use tab_bar::{DraggedTab, TabBar, TabInfo, drop_position, take_dragged_tab};

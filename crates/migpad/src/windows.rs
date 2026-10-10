@@ -17,7 +17,7 @@ use migpad_core::state::TabState;
 use migpad_core::state::closed::ClosedState;
 use migpad_core::state::recent::RecentFile;
 
-use crate::commands::{refresh_menus, update_menus};
+use crate::commands::{Registry, refresh_menus, update_menus};
 use crate::journals;
 use crate::notices::{self, Notice};
 use crate::recent;
@@ -31,6 +31,8 @@ use crate::workspace::Workspace;
 const WINDOW_SIZE: (f32, f32) = (1000., 700.);
 /// How far a new window is from the active one: down and to the right, as a cascade.
 const CASCADE: f32 = 26.;
+/// The width under which the bars of a window would not fit.
+const MIN_WIDTH: f32 = 360.;
 
 /// A tab closed lately, to open again.
 pub struct ClosedTab {
@@ -595,6 +597,14 @@ pub fn icon() -> Option<std::sync::Arc<image::RgbaImage>> {
     .clone()
 }
 
+/// The smallest a window of documents gets on Windows and Linux: as wide as the bars need, as tall
+/// as the menu bar and the tallest of its menus, which are drawn in the window. On macOS the menus
+/// are those of the system.
+fn min_size(cx: &App) -> Option<gpui::Size<Pixels>> {
+    let height = px(migpad_ui::menu_bar::HEIGHT) + cx.global::<Registry>().tallest_menu();
+    (!cfg!(target_os = "macos")).then(|| size(px(MIN_WIDTH), height))
+}
+
 /// A new window: at `place` and on its screen, or down and to the right of the active one, or in
 /// the middle of the screen.
 fn window_options(place: Option<(WindowBounds, Option<DisplayId>)>, cx: &mut App) -> WindowOptions {
@@ -606,6 +616,7 @@ fn window_options(place: Option<(WindowBounds, Option<DisplayId>)>, cx: &mut App
             display_id,
             titlebar,
             app_id,
+            window_min_size: min_size(cx),
             #[cfg(target_os = "linux")]
             icon: icon(),
             ..Default::default()
@@ -629,6 +640,7 @@ fn window_options(place: Option<(WindowBounds, Option<DisplayId>)>, cx: &mut App
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         titlebar,
         app_id,
+        window_min_size: min_size(cx),
         #[cfg(target_os = "linux")]
         icon: icon(),
         ..Default::default()
