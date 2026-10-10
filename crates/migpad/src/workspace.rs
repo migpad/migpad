@@ -1597,7 +1597,8 @@ impl Workspace {
     }
 
     fn status_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> migpad_ui::StatusBar {
-        let selection = self.selection_chars(cx);
+        let block_dims = self.tabs.active().editor.read(cx).block_dimensions(cx);
+        let selection = if block_dims.is_some() { None } else { self.selection_chars(cx) };
         let tab = self.tabs.active();
         let caret = tab.editor.read(cx).caret_position(cx);
         if caret.1.is_none() {
@@ -1613,7 +1614,7 @@ impl Workspace {
                 let _ = line_ending.update(cx, |workspace, cx| workspace.open_line_ending_menu(position, window, cx));
             }),
         };
-        status::status_bar(tab.document.read(cx), caret, selection, tab.loading.as_ref(), Some(menus))
+        status::status_bar(tab.document.read(cx), caret, selection, block_dims, tab.loading.as_ref(), Some(menus))
     }
 
     /// The menu of the encoding in the status bar: Reopen with Encoding and Save with Encoding.

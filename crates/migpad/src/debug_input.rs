@@ -95,6 +95,25 @@ pub fn play(window: WindowHandle<Workspace>, cx: &mut App) {
     .detach();
 }
 
+fn parse_mouse_modifiers(step: &str) -> (Modifiers, &str) {
+    let mouse_kinds = ["click:", "press:", "move:", "release:"];
+    let is_mouse = |s: &str| mouse_kinds.iter().any(|k| s.starts_with(k));
+    let mut modifiers = Modifiers::none();
+    let mut rest = step;
+    loop {
+        if let Some(tail) = rest.strip_prefix("shift-").filter(|t| is_mouse(t)) {
+            modifiers.shift = true;
+            rest = tail;
+        } else if let Some(tail) = rest.strip_prefix("alt-").filter(|t| is_mouse(t)) {
+            modifiers.alt = true;
+            rest = tail;
+        } else {
+            break;
+        }
+    }
+    (modifiers, rest)
+}
+
 fn parse(step: &str) -> Option<Step> {
     if let Some(ms) = step.strip_prefix("wait:") {
         return ms.parse().ok().map(|ms| Step::Wait(Duration::from_millis(ms)));
@@ -111,10 +130,7 @@ fn parse(step: &str) -> Option<Step> {
     if let Some(name) = step.strip_prefix("action:") {
         return Some(Step::Action(name.to_owned()));
     }
-    let (modifiers, mouse) = match step.strip_prefix("shift-") {
-        Some(rest) if rest.starts_with("click:") || rest.starts_with("press:") => (Modifiers::shift(), rest),
-        _ => (Modifiers::none(), step),
-    };
+    let (modifiers, mouse) = parse_mouse_modifiers(step);
     let Some((kind, args)) = mouse.split_once(':') else { return Keystroke::parse(step).ok().map(Step::Key) };
     let numbers = args.split(',').map(|n| n.parse::<f32>().ok()).collect::<Option<Vec<_>>>()?;
     let at = point(px(*numbers.first()?), px(*numbers.get(1)?));

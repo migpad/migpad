@@ -59,6 +59,10 @@ actions!(
     editor,
     [
         SelectAll,
+        BlockSelectUp,
+        BlockSelectDown,
+        BlockSelectLeft,
+        BlockSelectRight,
         Backspace,
         Delete,
         DeleteWordLeft,
@@ -96,6 +100,10 @@ pub(crate) fn on_edits(div: Div, cx: &mut Context<EditorView>) -> Div {
 pub(crate) fn on_document_actions(div: Div, cx: &mut Context<EditorView>) -> Div {
     div.on_action(cx.listener(|view, _: &Newline, window, cx| view.newline(window, cx)))
         .on_action(cx.listener(|view, _: &Tab, window, cx| view.type_text("\t", window, cx)))
+        .on_action(cx.listener(|view, _: &BlockSelectUp, window, cx| view.block_move(Motion::Up, window, cx)))
+        .on_action(cx.listener(|view, _: &BlockSelectDown, window, cx| view.block_move(Motion::Down, window, cx)))
+        .on_action(cx.listener(|view, _: &BlockSelectLeft, window, cx| view.block_move(Motion::Left, window, cx)))
+        .on_action(cx.listener(|view, _: &BlockSelectRight, window, cx| view.block_move(Motion::Right, window, cx)))
 }
 
 /// `keys` move the caret; with Shift they select.
@@ -156,6 +164,11 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-x", Cut, context),
         KeyBinding::new("secondary-v", Paste, context),
     ]);
+    let document = Some(DOCUMENT);
+    bindings.extend([
+        KeyBinding::new("alt-shift-up", BlockSelectUp, document),
+        KeyBinding::new("alt-shift-down", BlockSelectDown, document),
+    ]);
     if cfg!(target_os = "macos") {
         bindings.extend([
             KeyBinding::new("alt-backspace", DeleteWordLeft, context),
@@ -167,6 +180,8 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         ]);
     } else {
         bindings.extend([
+            KeyBinding::new("alt-shift-left", BlockSelectLeft, document),
+            KeyBinding::new("alt-shift-right", BlockSelectRight, document),
             KeyBinding::new("ctrl-backspace", DeleteWordLeft, context),
             KeyBinding::new("ctrl-delete", DeleteWordRight, context),
             KeyBinding::new("ctrl-y", Redo, context),
@@ -207,8 +222,16 @@ mod tests {
             let action = binding.action().name();
             let predicate = binding.predicate().expect("editor keys have a context");
             assert!(predicate.eval(&document), "{action} in a document");
-            let left = ["editor::Newline", "editor::Tab"].contains(&action);
-            assert_eq!(predicate.eval(&field), !left, "{action} in an input field");
+            let document_only = [
+                "editor::Newline",
+                "editor::Tab",
+                "editor::BlockSelectUp",
+                "editor::BlockSelectDown",
+                "editor::BlockSelectLeft",
+                "editor::BlockSelectRight",
+            ]
+            .contains(&action);
+            assert_eq!(predicate.eval(&field), !document_only, "{action} in an input field");
         }
     }
 }

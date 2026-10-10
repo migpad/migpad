@@ -105,6 +105,9 @@ impl Element for EditorElement {
             if let Some(caret) = layout.caret {
                 window.paint_quad(fill(caret, rgb(colors.caret)));
             }
+            for &caret in &layout.block_carets {
+                window.paint_quad(fill(caret, rgb(colors.caret)));
+            }
         });
         // The number of a row scrolled half out of view stays in the gutter, off the bars around.
         window.with_content_mask(Some(ContentMask { bounds: geometry.gutter }), |window| {

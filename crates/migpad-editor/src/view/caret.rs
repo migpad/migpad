@@ -31,6 +31,11 @@ const MARGIN: f64 = 4.0;
 impl EditorView {
     /// Moves the caret; with `select`, the selection follows it from its anchor.
     pub(crate) fn move_caret(&mut self, motion: Motion, select: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if select && self.block_columns.is_some() {
+            self.block_move(motion, window, cx);
+            return;
+        }
+        self.clear_block();
         let page = self.page_lines;
         if let Motion::PageUp | Motion::PageDown = motion {
             // The text scrolls by a page, and the caret moves by as many rows.
@@ -97,10 +102,60 @@ impl EditorView {
         self.caret_moved(window, cx);
     }
 
+    /// Starts or extends a block (column) selection in the direction of `motion`.
+    pub(crate) fn block_move(&mut self, motion: Motion, window: &mut Window, cx: &mut Context<Self>) {
+        let doc = self.document.read(cx);
+        let (text, lines) = (doc.text(), doc.lines());
+        let head = self.selection.head;
+        let head_line = lines.line_of(head);
+        let (head_range, _) = lines.line_range(text, head_line);
+        let head_col =
+            if let Some((_, hc)) = self.block_columns { hc } else { self.columns.column_of(text, &head_range, head) };
+
+        if self.block_columns.is_none() {
+            self.block_columns = Some((head_col, head_col));
+        }
+        let (anchor_col, _) = self.block_columns.unwrap();
+
+        let (new_head, new_col) = match motion {
+            Motion::Up => {
+                let target = head_line.saturating_sub(1);
+                let (range, _) = lines.line_range(text, target);
+                let pos = self.columns.char_at(text, &range, head_col).0;
+                (pos, head_col)
+            }
+            Motion::Down => {
+                let target = (head_line + 1).min(lines.count() - 1);
+                let (range, _) = lines.line_range(text, target);
+                let pos = self.columns.char_at(text, &range, head_col).0;
+                (pos, head_col)
+            }
+            Motion::Left => {
+                let new_col = head_col.saturating_sub(1);
+                let pos = self.columns.char_at(text, &head_range, new_col).0;
+                (pos, new_col)
+            }
+            Motion::Right => {
+                let new_col = head_col + 1;
+                let pos = self.columns.char_at(text, &head_range, new_col).0;
+                (pos, new_col)
+            }
+            _ => return,
+        };
+
+        self.selection.head = new_head;
+        self.block_columns = Some((anchor_col, new_col));
+        self.goal_x = None;
+        self.caret_at_row_end = false;
+        self.seal_undo_step(cx);
+        self.caret_moved(window, cx);
+    }
+
     /// Selects the whole text: the owner of an input field may do so when it takes the focus.
     pub fn select_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let len = self.document.read(cx).text().len();
         self.selection = Selection { anchor: 0, head: len };
+        self.block_columns = None;
         self.goal_x = None;
         self.caret_at_row_end = false;
         self.seal_undo_step(cx);
