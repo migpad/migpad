@@ -23,6 +23,7 @@ mod native_menu;
 mod native_settings;
 mod notices;
 mod own_settings;
+mod prompt;
 mod recent;
 mod session;
 mod settings;
@@ -120,6 +121,7 @@ fn main() {
         recent::init(cx);
         migpad_editor::init(cx);
         own_settings::init(cx);
+        prompt::init(cx);
         commands::init(&modules::all(), cx);
         commands::update_menus(None, cx);
         cx.on_window_closed(|cx, closed| {
