@@ -2,6 +2,18 @@
 
 What changed in each version of MigPad. MigPad follows [Semantic Versioning](https://semver.org/).
 
+## [0.1.1] — 2026-10-10
+
+### Features
+
+- Block (column) selection ([#26](https://github.com/migpad/migpad/pull/26))
+- Case change and selection transforms ([#27](https://github.com/migpad/migpad/pull/27))
+- Tab context menu and cross-window tab drag ([#28](https://github.com/migpad/migpad/pull/28))
+
+### Fixes
+
+- Windows without a GPU, own questions, tabs between windows ([#29](https://github.com/migpad/migpad/pull/29))
+
 ## [0.1.0] — 2026-10-10
 
 ### Features
