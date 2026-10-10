@@ -27,6 +27,8 @@ reopen_closed = "Reopen Closed &Tab"
 save = "&Save"
 save_as = "Save &As…"
 close_tab = "&Close Tab"
+close_other_tabs = "Close &Other Tabs"
+close_tabs_to_right = "Close Tabs to the &Right"
 close_window = "Close Win&dow"
 untitled = "Untitled"
 # The button of the dialog that opens files.
@@ -40,6 +42,10 @@ no_closed = "Nothing Closed Lately"
 recent_label = "{name} — {folder}"
 # A closed window in the menu, by the names of its tabs.
 closed_window = "Window: {tabs}"
+copy_path = "Cop&y Path"
+reveal_macos = "Show in &Finder"
+reveal_windows = "Show in File E&xplorer"
+reveal_linux = "Show in File &Manager"
 # The tooltip of a tab whose file another program removed.
 missing = "{path} — not on disk any more"
 

@@ -23,6 +23,31 @@ pub struct OpenRecent(pub PathBuf);
 #[action(namespace = file, no_json)]
 pub struct ReopenClosedAt(pub usize);
 
+/// Closes the tab at the given index: the context menu of a tab.
+#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[action(namespace = file, no_json)]
+pub struct CloseTabAt(pub usize);
+
+/// Closes all tabs except the one at the given index.
+#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[action(namespace = file, no_json)]
+pub struct CloseOtherTabs(pub usize);
+
+/// Closes all tabs to the right of the one at the given index.
+#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[action(namespace = file, no_json)]
+pub struct CloseTabsToRight(pub usize);
+
+/// Copies the path of the file at the given tab index.
+#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[action(namespace = file, no_json)]
+pub struct CopyTabPath(pub usize);
+
+/// Opens the folder of the file at the given tab index in the file manager.
+#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[action(namespace = file, no_json)]
+pub struct RevealTabFile(pub usize);
+
 pub struct FileModule;
 
 impl Module for FileModule {
@@ -95,6 +120,21 @@ impl Module for FileModule {
         registry.on_window_action(|workspace, _: &CloseTab, window, cx| {
             let active = workspace.active_tab();
             workspace.close_tab(active, window, cx);
+        });
+        registry.on_window_action(|workspace, action: &CloseTabAt, window, cx| {
+            workspace.close_tab(action.0, window, cx);
+        });
+        registry.on_window_action(|workspace, action: &CloseOtherTabs, window, cx| {
+            workspace.close_others(action.0, window, cx);
+        });
+        registry.on_window_action(|workspace, action: &CloseTabsToRight, window, cx| {
+            workspace.close_to_right(action.0, window, cx);
+        });
+        registry.on_window_action(|workspace, action: &CopyTabPath, _, cx| {
+            workspace.copy_tab_path(action.0, cx);
+        });
+        registry.on_window_action(|workspace, action: &RevealTabFile, _, cx| {
+            workspace.reveal_tab_file(action.0, cx);
         });
         registry.on_window_action(|workspace, _: &CloseWindow, window, cx| workspace.close_window(window, cx));
         // Without a window — on macOS, where MigPad stays open without them — and for a new window
