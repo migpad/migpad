@@ -87,9 +87,10 @@ sys-locale = "0.3"
 toml_edit = { version = "0.25", default-features = false, features = ["parse"] }
 windows-sys = "0.61"
 
-# GPUI on Linux with a fix of MigPad: see vendor/README.md.
+# GPUI on Linux and Windows with fixes of MigPad: see vendor/README.md.
 [patch.crates-io]
 gpui-pre-linux = { path = "vendor/gpui-pre-linux" }
+gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
 
 [profile.release]
 lto = "thin"
