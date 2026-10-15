@@ -21,6 +21,8 @@ mod modules;
 mod native_menu;
 #[cfg(target_os = "macos")]
 mod native_settings;
+#[cfg(target_os = "macos")]
+mod native_window;
 mod notices;
 mod own_settings;
 mod prompt;

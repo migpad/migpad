@@ -7,8 +7,8 @@ use std::rc::Rc;
 use std::sync::atomic::Ordering;
 
 use gpui::{
-    App, AppContext, Bounds, DisplayId, Entity, Focusable, Global, Pixels, Point, TitlebarOptions, WindowBounds,
-    WindowHandle, WindowId, WindowOptions, point, px, size,
+    App, AppContext, Bounds, DisplayId, Entity, Focusable, Global, Pixels, Point, TitlebarOptions, Window,
+    WindowBounds, WindowHandle, WindowId, WindowOptions, point, px, size,
 };
 use migpad_core::document::{Document, DocumentId, OpenAs, OpenError, Opened, open};
 use migpad_core::encoding::Encoding;
@@ -200,10 +200,48 @@ pub fn document_windows(cx: &App) -> usize {
     cx.windows().iter().filter(|window| window.downcast::<Workspace>().is_some()).count()
 }
 
-/// The window of documents at `point` of the screen, other than `except`, that takes a tab there,
-/// and where the tab goes among its tabs. The front one where windows overlap, where the system
-/// tells their order.
-pub fn workspace_at(point: Point<Pixels>, except: WindowId, cx: &mut App) -> Option<(WindowHandle<Workspace>, usize)> {
+/// Where a tab let go of outside its window goes: into a window of documents, at a place among its
+/// tabs, or into a window of its own, opened on the screen at a point.
+pub enum TabDrop {
+    Into(WindowHandle<Workspace>, usize),
+    Apart(Point<Pixels>),
+}
+
+/// Where a tab let go of at `position` of `window`, outside of it, goes: into the window of
+/// documents under the pointer that takes it there, or apart where no window of MigPad is. The
+/// windows of Wayland do not know where they are: there it always goes apart, under the window.
+pub fn tab_drop(position: Point<Pixels>, window: &Window, cx: &mut App) -> TabDrop {
+    let except = window.window_handle().window_id();
+    #[cfg(target_os = "macos")]
+    let (into, at) = {
+        let into = workspace_where(except, cx, crate::native_window::pointer_in);
+        (into, crate::native_window::pointer_on_screens(cx).unwrap_or(window.bounds().origin + position))
+    };
+    #[cfg(not(target_os = "macos"))]
+    let (into, at) = {
+        let at = window.bounds().origin + position;
+        let into = (cx.compositor_name() != "Wayland").then(|| {
+            workspace_where(except, cx, |window| {
+                let bounds = window.bounds();
+                bounds.contains(&at).then(|| at - bounds.origin)
+            })
+        });
+        (into.flatten(), at)
+    };
+    match into {
+        Some((handle, index)) => TabDrop::Into(handle, index),
+        None => TabDrop::Apart(at),
+    }
+}
+
+/// The first window of documents, other than `except`, that `locate` finds the pointer in — the
+/// front one where windows overlap, where the system tells their order — and that takes a tab there;
+/// and where the tab goes among its tabs.
+fn workspace_where(
+    except: WindowId,
+    cx: &mut App,
+    locate: impl Fn(&Window) -> Option<Point<Pixels>>,
+) -> Option<(WindowHandle<Workspace>, usize)> {
     let windows = cx.window_stack().filter(|stack| !stack.is_empty()).unwrap_or_else(|| cx.windows());
     windows
         .into_iter()
@@ -211,9 +249,8 @@ pub fn workspace_at(point: Point<Pixels>, except: WindowId, cx: &mut App) -> Opt
         .filter(|w| w.window_id() != except)
         .find_map(|handle| {
             let index = handle.update(cx, |workspace, window, _| {
-                let bounds = window.bounds();
-                let over = bounds.contains(&point) && workspace.takes_tabs(window);
-                over.then(|| workspace.drop_index(point - bounds.origin))
+                let at = locate(window)?;
+                workspace.takes_tabs(window).then(|| workspace.drop_index(at))
             });
             Some((handle, index.ok()??))
         })

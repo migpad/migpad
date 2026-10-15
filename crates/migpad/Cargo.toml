@@ -43,6 +43,8 @@ block2.workspace = true
 objc2.workspace = true
 objc2-app-kit.workspace = true
 objc2-foundation.workspace = true
+# The window of AppKit of a window of GPUI: which one a tab dragged out of its window is over.
+raw-window-handle.workspace = true
 
 [build-dependencies]
 toml_edit.workspace = true

@@ -36,7 +36,7 @@ use crate::status::{self, COUNT_STEP, Loading, SelectionCount, count_chars};
 use crate::strings::{Key, fill, mnemonic, tr};
 use crate::tabs::Tabs;
 use crate::view_options;
-use crate::windows::{self, Closed, ClosedTab, ForTab, Opening, Reopening};
+use crate::windows::{self, Closed, ClosedTab, ForTab, Opening, Reopening, TabDrop};
 
 /// The dialog of the system that opens files: several at once.
 pub fn open_options() -> PathPromptOptions {
@@ -1401,39 +1401,40 @@ impl Workspace {
         !self.asking && !window.has_active_prompt()
     }
 
-    /// A tab let go of outside the window. On macOS the drag goes on in the window under the
-    /// pointer; on Windows and Linux the button comes back to this window, which finds that window
-    /// itself: the tab goes to its bar, or to a window of its own where no window of MigPad is. The
-    /// windows of Wayland do not know where they are: there it is always a window of its own.
+    /// A tab let go of outside the window. The button comes back to this window wherever it is let
+    /// go of — AppKit, X11 and Windows give it to the window it was pressed in — which finds the
+    /// window under the pointer itself: the tab goes to its bar, or to a window of its own where no
+    /// window of MigPad is.
     fn tab_released_outside(&mut self, event: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
         // Outside of the root, a release may still be in the window: over a menu or a question.
         let inside = Bounds::new(Point::default(), window.viewport_size()).contains(&event.position);
-        if cfg!(target_os = "macos") || inside || !cx.has_active_drag() {
+        if inside || !cx.has_active_drag() {
             return;
         }
         let Some(dragged) = migpad_ui::take_dragged_tab(cx) else { return };
         if dragged.source_window() != self.window_id {
             return;
         }
-        let at = window.bounds().origin + event.position;
-        let target = (cx.compositor_name() != "Wayland").then(|| windows::workspace_at(at, self.window_id, cx));
-        if let Some((target, index)) = target.flatten() {
-            // Once this window is done with the event: the other one takes the tab from it, and the
-            // keyboard, which the button never went to.
-            cx.defer(move |cx| {
-                let _ = target.update(cx, |workspace, window, cx| {
-                    workspace.receive_tab(&dragged, index, window, cx);
-                    window.activate_window();
+        match windows::tab_drop(event.position, window, cx) {
+            TabDrop::Into(target, index) => {
+                // Once this window is done with the event: the other one takes the tab from it, and
+                // the keyboard, which the button never went to.
+                cx.defer(move |cx| {
+                    let _ = target.update(cx, |workspace, window, cx| {
+                        workspace.receive_tab(&dragged, index, window, cx);
+                        window.activate_window();
+                    });
                 });
-            });
-        } else if self.tabs.len() > 1
-            && let Some(tab) = self.extract_tab_by_document(dragged.document_id(), window, cx)
-        {
-            // Where it was let go of, the pointer over the new tab.
-            let bounds = Bounds::new(at - point(px(60.), px(40.)), window.viewport_size());
-            cx.defer(move |cx| {
-                windows::open_window_with(vec![tab], Vec::new(), Some((WindowBounds::Windowed(bounds), None)), cx);
-            });
+            }
+            TabDrop::Apart(at) if self.tabs.len() > 1 => {
+                let Some(tab) = self.extract_tab_by_document(dragged.document_id(), window, cx) else { return };
+                // Where it was let go of, the pointer over the new tab.
+                let bounds = Bounds::new(at - point(px(60.), px(40.)), window.viewport_size());
+                cx.defer(move |cx| {
+                    windows::open_window_with(vec![tab], Vec::new(), Some((WindowBounds::Windowed(bounds), None)), cx);
+                });
+            }
+            TabDrop::Apart(_) => {}
         }
     }
 
