@@ -1061,10 +1061,10 @@ impl Workspace {
     /// Closes the window; its tabs go among the closed ones. Changes to save are asked about
     /// first, in one question for all the documents that have them ([ADR 0020]).
     pub fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // The last window on Windows and Linux: closing it is quitting, which keeps the window for
-        // the next start, as its button does — once this window is done with the action. The
-        // settings window does not count: it closes with the program.
-        if !cfg!(target_os = "macos") && windows::document_windows(cx) == 1 {
+        // The last window: closing it is quitting, which keeps the window for the next start, as
+        // its button does — once this window is done with the action. The settings window does
+        // not count: it closes with the program.
+        if windows::document_windows(cx) == 1 {
             cx.defer(session::quit);
             return;
         }

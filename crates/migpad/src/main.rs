@@ -100,13 +100,6 @@ fn main() {
     }
 
     let application = gpui_platform::application();
-    // A click on MigPad in the Dock while it has no windows opens one, as on macOS it stays open
-    // without them.
-    application.on_reopen(|cx| {
-        if windows::document_windows(cx) == 0 {
-            windows::open_window(&[], cx);
-        }
-    });
     // Files from Finder and the Dock, as MigPad starts and while it runs.
     let urls = inbox.clone();
     application.on_open_urls(move |list| urls.push(Request { files: instance::files_of_urls(&list) }));
@@ -126,9 +119,10 @@ fn main() {
         commands::update_menus(None, cx);
         cx.on_window_closed(|cx, closed| {
             session::window_closed(closed, cx);
-            // On macOS MigPad stays open without windows, as applications there do; elsewhere it
-            // quits with its last window of documents, the settings window with it.
-            if windows::document_windows(cx) == 0 && !cfg!(target_os = "macos") {
+            // MigPad quits with its last window of documents, the settings window with it — on
+            // macOS too, where applications often stay open without windows: everything comes
+            // back at the next start.
+            if windows::document_windows(cx) == 0 {
                 cx.quit();
             }
             // The menus show the check marks of the active window, which may not have changed.

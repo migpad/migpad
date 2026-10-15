@@ -468,14 +468,14 @@ pub fn open_window_with(
     window
         .update(cx, |_, window, cx| {
             // The button of the window closes it as Close Window does, asking about changes to
-            // save first — but the last window on Windows and Linux, which is quitting: then
-            // nothing is asked, the journals stay, and the window comes back at the next start
-            // with everything in it ([ADR 0020]).
+            // save first — but the last window, which is quitting: then nothing is asked, the
+            // journals stay, and the window comes back at the next start with everything in it
+            // ([ADR 0020]).
             window.on_window_should_close(cx, |window, cx| {
                 let Some(Some(workspace)) = window.root::<Workspace>() else { return true };
                 // Quitting goes on once this window is done with the question whether to close. The
                 // settings window does not count: it closes with the program.
-                if !cfg!(target_os = "macos") && document_windows(cx) == 1 {
+                if document_windows(cx) == 1 {
                     cx.defer(session::quit);
                     return false;
                 }
