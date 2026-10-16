@@ -6,6 +6,7 @@
 pub mod mermaid;
 
 use std::ops::Range;
+use std::path::{Path, PathBuf};
 
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
@@ -436,6 +437,66 @@ impl Builder {
     }
 }
 
+/// The file of an image, by its URL as written in a document in `folder`: a path relative to the
+/// folder or an absolute one, or a `file:` URL, percent escapes decoded. `None` for an image
+/// anywhere else — on the network, in the URL itself — which is not loaded.
+pub fn image_file(url: &str, folder: Option<&Path>) -> Option<PathBuf> {
+    let url = url.trim();
+    let path = match url.strip_prefix("file://") {
+        Some(rest) => {
+            let rest = rest.strip_prefix("localhost").unwrap_or(rest);
+            // file:///C:/a.png on Windows.
+            let rest = match rest.as_bytes() {
+                [b'/', drive, b':', ..] if cfg!(windows) && drive.is_ascii_alphabetic() => &rest[1..],
+                _ => rest,
+            };
+            decode_percent(rest)?
+        }
+        None if has_scheme(url) => return None,
+        // What follows `?` or `#` is not of the file: `logo.png?raw=true`.
+        None => decode_percent(url.split(['?', '#']).next()?)?,
+    };
+    if path.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(path);
+    if path.is_absolute() { Some(path) } else { Some(folder?.join(path)) }
+}
+
+/// Whether `url` starts with a scheme, as `https:` or `data:` do; a drive letter, as in `C:\`, is
+/// not one.
+fn has_scheme(url: &str) -> bool {
+    match url.find(':') {
+        Some(at) if at > 1 => {
+            let scheme = &url[..at];
+            scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+                && scheme.chars().all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
+        }
+        _ => false,
+    }
+}
+
+/// `text` with its percent escapes decoded; `None` if they make no UTF-8.
+fn decode_percent(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |at: usize| bytes.get(at).and_then(|byte| (*byte as char).to_digit(16));
+        match (bytes[i], hex(i + 1), hex(i + 2)) {
+            (b'%', Some(high), Some(low)) => {
+                decoded.push((high * 16 + low) as u8);
+                i += 3;
+            }
+            (byte, ..) => {
+                decoded.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
+
 fn heading_level(level: HeadingLevel) -> u8 {
     match level {
         HeadingLevel::H1 => 1,
@@ -602,6 +663,27 @@ mod tests {
                 Block::Paragraph(vec![Inline::Image { url: "/abs.svg".to_owned(), alt: String::new() }]),
             ]
         );
+    }
+
+    #[test]
+    fn images_come_from_files_only() {
+        let folder = Path::new(if cfg!(windows) { r"C:\docs" } else { "/docs" });
+        let file = |url| image_file(url, Some(folder));
+        assert_eq!(file("img/a.png"), Some(folder.join("img/a.png")));
+        assert_eq!(file("./my%20logo.png?raw=true#top"), Some(folder.join("./my logo.png")));
+        assert_eq!(file("%D0%BB%D0%BE%D0%B3%D0%BE.png"), Some(folder.join("лого.png")));
+        assert_eq!(image_file("a.png", None), None);
+        for url in ["https://example.com/a.png", "http://a/b.png", "data:image/png;base64,AAAA", "mailto:a@b", ""] {
+            assert_eq!(file(url), None, "{url}");
+        }
+        if cfg!(windows) {
+            assert_eq!(file(r"D:\pics\a.png"), Some(PathBuf::from(r"D:\pics\a.png")));
+            assert_eq!(file("file:///D:/pics/a%20b.png"), Some(PathBuf::from("D:/pics/a b.png")));
+        } else {
+            assert_eq!(file("/pics/a.png"), Some(PathBuf::from("/pics/a.png")));
+            assert_eq!(file("file:///pics/a%20b.png"), Some(PathBuf::from("/pics/a b.png")));
+            assert_eq!(file("file://localhost/pics/a.png"), Some(PathBuf::from("/pics/a.png")));
+        }
     }
 
     #[test]

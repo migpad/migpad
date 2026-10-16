@@ -1,18 +1,31 @@
 //! Mermaid diagrams as SVG for the Markdown preview, drawn by merman — Mermaid.js rewritten in
-//! Rust — in its light theme or its dark one. Labels are SVG text: the SVG of GPUI (resvg) does
-//! not draw HTML, which Mermaid puts in `foreignObject`. Mindmaps have no labels of another kind:
-//! theirs become SVG text here.
+//! Rust — in its light theme or its dark one. The SVG is made for resvg, which GPUI draws SVG
+//! with: labels are SVG text, not the HTML Mermaid puts in `foreignObject`, which resvg does not
+//! draw, and the SVG reads no files.
 
 use std::sync::LazyLock;
 
+use merman::svg::SvgPipeline;
 use merman::{Engine, MermaidConfig, OperationControl, RenderOutput, RenderRequest, Renderer, SvgRequest};
 use serde_json::json;
 
 static LIGHT: LazyLock<Renderer> = LazyLock::new(|| renderer("default"));
 static DARK: LazyLock<Renderer> = LazyLock::new(|| renderer("dark"));
 
+/// The font of Mermaid, which merman measures text for. Its own name for it, "trebuchet ms", resvg
+/// does not find: it takes names of fonts as they are written.
+const FONT: &str = "\"Trebuchet MS\", Verdana, Arial, sans-serif";
+
 fn renderer(theme: &str) -> Renderer {
-    let config = json!({ "theme": theme, "htmlLabels": false, "flowchart": { "htmlLabels": false } });
+    // SVG text where Mermaid can lay it out so; the labels it lays out only as HTML — those of
+    // mindmaps — the pipeline of resvg makes SVG text.
+    let config = json!({
+        "theme": theme,
+        "fontFamily": FONT,
+        "themeVariables": { "fontFamily": FONT },
+        "htmlLabels": false,
+        "flowchart": { "htmlLabels": false },
+    });
     Renderer::new().with_engine(Engine::new().with_site_config(MermaidConfig::from_value(config)))
 }
 
@@ -20,103 +33,46 @@ fn renderer(theme: &str) -> Renderer {
 /// source.
 pub fn render(source: &str, dark: bool) -> Result<String, String> {
     let renderer = if dark { &*DARK } else { &*LIGHT };
-    let request = RenderRequest::svg(source, OperationControl::new(), SvgRequest::default());
-    match renderer.render(request) {
-        Ok(RenderOutput::Svg(Some(svg))) => Ok(html_labels_to_text(svg.svg())),
+    let svg = SvgRequest { pipeline: Some(SvgPipeline::resvg_safe()), ..SvgRequest::default() };
+    match renderer.render(RenderRequest::svg(source, OperationControl::new(), svg)) {
+        Ok(RenderOutput::Svg(Some(svg))) => Ok(widen(svg.svg(), MARGIN)),
         Ok(_) => Err("no Mermaid diagram".to_owned()),
         Err(error) => Err(error.to_string()),
     }
 }
 
-/// `svg` with its HTML labels — `foreignObject` — made SVG text in the middle of where they were;
-/// empty ones go. Those in a `switch` stay: SVG text is beside them, and it is drawn instead.
-fn html_labels_to_text(svg: &str) -> String {
-    const OPEN: &str = "<foreignObject";
-    const CLOSE: &str = "</foreignObject>";
-    let mut out = String::with_capacity(svg.len());
-    let mut rest = svg;
-    let mut done = 0;
-    while let Some(at) = rest.find(OPEN) {
-        let start = done + at;
-        let Some(end) = svg[start..].find(CLOSE).map(|end| start + end + CLOSE.len()) else { break };
-        out.push_str(&svg[done..start]);
-        let label = &svg[start..end];
-        if in_switch(&svg[..start]) {
-            out.push_str(label);
-        } else {
-            out.push_str(&label_as_text(label));
-        }
-        done = end;
-        rest = &svg[done..];
-    }
-    out.push_str(&svg[done..]);
-    out
-}
+/// Room around a diagram: labels of some diagrams reach past the box merman gives them, as those of
+/// the relations of ER diagrams do, and text in a font other than that of Mermaid is wider.
+const MARGIN: f64 = 16.0;
 
-/// Whether a `switch` is open at the end of `before`.
-fn in_switch(before: &str) -> bool {
-    match (before.rfind("<switch"), before.rfind("</switch>")) {
-        (Some(open), Some(close)) => open > close,
-        (Some(_), None) => true,
-        (None, _) => false,
+/// `svg` with `margin` more room on each side: its view box and its width grow.
+fn widen(svg: &str, margin: f64) -> String {
+    let Some(tag_end) = svg.find('>') else { return svg.to_owned() };
+    let tag = &svg[..tag_end];
+    let Some(start) = tag.find(" viewBox=\"").map(|at| at + " viewBox=\"".len()) else { return svg.to_owned() };
+    let Some(len) = tag[start..].find('"') else { return svg.to_owned() };
+    let numbers: Vec<f64> = tag[start..start + len].split_whitespace().filter_map(|n| n.parse().ok()).collect();
+    let [x, y, width, height] = numbers[..] else { return svg.to_owned() };
+    let view_box = format!("{} {} {} {}", x - margin, y - margin, width + 2.0 * margin, height + 2.0 * margin);
+    let mut tag = format!("{}{view_box}{}", &tag[..start], &tag[start + len..]);
+    let max_width = format!("max-width:{width}px");
+    if tag.contains(&max_width) {
+        tag = tag.replace(&max_width, &format!("max-width:{}px", width + 2.0 * margin));
     }
-}
-
-/// An HTML label as SVG text: its lines, centred in the box of the label.
-fn label_as_text(label: &str) -> String {
-    let tag_end = label.find('>').unwrap_or(label.len());
-    let tag = &label[..tag_end];
-    let number = |name: &str| attribute(tag, name).and_then(|value| value.parse::<f64>().ok()).unwrap_or(0.0);
-    let lines = label_lines(&label[(tag_end + 1).min(label.len())..]);
-    if lines.is_empty() {
-        return String::new();
-    }
-    let (x, y) = (number("x") + number("width") / 2.0, number("y") + number("height") / 2.0);
-    // The middle of the lines in the middle of the box: 0.35em lowers a line to its middle; in
-    // hundredths, which print as they are.
-    let first = (35 - 60 * (lines.len() as i64 - 1)) as f64 / 100.0;
-    let mut text = format!(r#"<text x="{x}" y="{y}" text-anchor="middle">"#);
-    for (i, line) in lines.iter().enumerate() {
-        let dy = if i == 0 { first } else { 1.2 };
-        text.push_str(&format!(r#"<tspan x="{x}" dy="{dy}em">{line}</tspan>"#));
-    }
-    text.push_str("</text>");
-    text
-}
-
-/// The value of the attribute `name` of the tag `tag`.
-fn attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
-    let at = tag.find(&format!(" {name}=\""))? + name.len() + 3;
-    let len = tag[at..].find('"')?;
-    Some(&tag[at..at + len])
-}
-
-/// The lines of text of an HTML label, without its tags: line breaks and paragraphs end lines.
-fn label_lines(html: &str) -> Vec<String> {
-    let mut lines = Vec::new();
-    let mut line = String::new();
-    let mut rest = html;
-    while let Some(at) = rest.find('<') {
-        line.push_str(&rest[..at]);
-        let end = rest[at..].find('>').map_or(rest.len(), |end| at + end + 1);
-        let tag = rest[at..end].to_ascii_lowercase();
-        if tag.starts_with("<br") || tag.starts_with("</p") || tag.starts_with("</div") {
-            lines.push(std::mem::take(&mut line));
-        }
-        rest = &rest[end..];
-    }
-    line.push_str(rest);
-    lines.push(line);
-    lines
-        .into_iter()
-        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" ").replace("&nbsp;", "&#160;"))
-        .filter(|line| !line.is_empty())
-        .collect()
+    format!("{tag}{}", &svg[tag_end..])
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagrams_get_room_around_them() {
+        let svg = r#"<svg id="m" style="max-width:148.5px" viewBox="-8 -8 148.5 455"><g/></svg>"#;
+        assert_eq!(widen(svg, 16.0), r#"<svg id="m" style="max-width:180.5px" viewBox="-24 -24 180.5 487"><g/></svg>"#);
+        // Without a view box, as it is.
+        assert_eq!(widen("<svg><g/></svg>", 16.0), "<svg><g/></svg>");
+    }
 
     #[test]
     fn diagrams_of_each_kind_are_drawn_with_their_labels() {
@@ -137,13 +93,13 @@ mod tests {
             for dark in [false, true] {
                 let svg = render(source, dark).unwrap_or_else(|error| panic!("diagram {i}: {error}"));
                 assert!(svg.starts_with("<svg"), "diagram {i}");
-                // Every label the SVG of GPUI cannot draw is beside SVG text, in a switch.
-                assert_eq!(svg.matches("<foreignObject").count(), svg.matches("<switch").count(), "diagram {i}");
+                // No label is HTML, which resvg does not draw.
+                assert!(!svg.contains("<foreignObject"), "diagram {i}");
             }
         }
         let mindmap = render(diagrams[9], false).unwrap();
-        assert!(mindmap.contains(">Вкладки</tspan>"));
-        assert!(mindmap.contains(">MigPad</tspan>"));
+        assert!(mindmap.contains("Вкладки"));
+        assert!(mindmap.contains("MigPad"));
     }
 
     #[test]
@@ -152,22 +108,5 @@ mod tests {
         assert!(error.contains(']'), "{error}");
         assert!(render("not a diagram", false).is_err());
         assert!(render("", false).is_err());
-    }
-
-    #[test]
-    fn labels_become_text_in_the_middle_of_their_box() {
-        let svg = r#"<g><foreignObject x="10" width="100" height="24"><div><span><p>Один &amp; два</p></span></div></foreignObject><foreignObject width="0" height="0"><div><span></span></div></foreignObject></g>"#;
-        assert_eq!(
-            html_labels_to_text(svg),
-            r#"<g><text x="60" y="12" text-anchor="middle"><tspan x="60" dy="0.35em">Один &amp; два</tspan></text></g>"#
-        );
-        let lines = r#"<foreignObject width="40" height="40"><div>first<br/>second</div></foreignObject>"#;
-        assert_eq!(
-            html_labels_to_text(lines),
-            r#"<text x="20" y="20" text-anchor="middle"><tspan x="20" dy="-0.25em">first</tspan><tspan x="20" dy="1.2em">second</tspan></text>"#
-        );
-        let switch =
-            r#"<switch><foreignObject width="9" height="9"><div>x</div></foreignObject><text>x</text></switch>"#;
-        assert_eq!(html_labels_to_text(switch), switch);
     }
 }
