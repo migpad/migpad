@@ -3584,6 +3584,7 @@ name = "migpad-ui"
 version = "0.1.2-dev"
 dependencies = [
  "gpui-pre",
+ "migpad-core",
  "migpad-editor",
 ]
 
