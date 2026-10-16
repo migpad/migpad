@@ -7,8 +7,8 @@
 use std::rc::Rc;
 
 use gpui::{
-    App, AppContext, Bounds, Context, EntityId, Global, IntoElement, MouseButton, Pixels, Point, Render, RenderOnce,
-    Role, ScrollHandle, SharedString, Window, WindowId, div, prelude::*, px, rgb,
+    AnyElement, App, AppContext, Bounds, Context, EntityId, Global, IntoElement, MouseButton, Pixels, Point, Render,
+    RenderOnce, Role, ScrollHandle, SharedString, Window, WindowId, div, prelude::*, px, rgb,
 };
 
 use crate::theme::theme;
@@ -102,6 +102,8 @@ pub struct TabBar {
     on_context_menu: Handler<(usize, Point<Pixels>)>,
     /// A tab dragged from another window, dropped at a position.
     on_receive: Handler<(DraggedTab, usize)>,
+    /// What shows at the right end of the bar: how the active tab shows its document.
+    trailing: Option<AnyElement>,
 }
 
 /// A tab being dragged to another place in the bar, or to another window.
@@ -149,7 +151,13 @@ impl TabBar {
             on_new: Rc::new(|_, _, _| {}),
             on_context_menu: Rc::new(|_, _, _| {}),
             on_receive: Rc::new(|_, _, _| {}),
+            trailing: None,
         }
+    }
+
+    /// What shows at the right end of the bar.
+    pub fn trailing(self, element: impl IntoElement) -> Self {
+        TabBar { trailing: Some(element.into_any_element()), ..self }
     }
 
     /// The tooltip of the buttons that close tabs.
@@ -425,6 +433,7 @@ impl RenderOnce for TabBar {
                         }
                     }),
             )
+            .children(self.trailing)
     }
 }
 

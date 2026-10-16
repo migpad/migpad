@@ -14,10 +14,11 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use gpui::{
-    AnyElement, App, ClipboardItem, Context, FocusHandle, Focusable, FontStyle, FontWeight, HighlightStyle, Hsla,
-    Image, ImageFormat, ImageSource, IntoElement, KeyBinding, ListAlignment, ListState, MouseButton, MouseDownEvent,
-    MouseMoveEvent, Pixels, Point, Render, SharedString, StrikethroughStyle, StyledImage, StyledText, Task, TextLayout,
-    UnderlineStyle, Window, canvas, div, img, list, prelude::*, px, relative, rgb,
+    AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, FocusHandle, Focusable, FontStyle, FontWeight,
+    HighlightStyle, Hsla, Image, ImageFormat, ImageSource, IntoElement, KeyBinding, ListAlignment, ListState,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PinchEvent, Pixels, Point, Render, ScrollHandle,
+    ScrollWheelEvent, SharedString, Size, StrikethroughStyle, StyledImage, StyledText, Task, TextLayout,
+    UnderlineStyle, Window, canvas, div, fill, img, list, point, prelude::*, px, relative, rgb, size,
 };
 use migpad_core::markdown::{self, Align, Block, Inline, Item, Style, Text, mermaid};
 use migpad_editor::actions::{Copy, SelectAll};
@@ -27,15 +28,20 @@ use crate::theme::{Appearance, Theme, theme};
 
 const CONTEXT: &str = "MarkdownPreview";
 
-/// The widest the text of the page gets: lines longer than that are hard to read.
-const PAGE_WIDTH: f32 = 860.;
-
 /// The most lines of a block of code the page lays out: a log pasted whole would take seconds a
 /// frame. Copying takes it whole.
 const CODE_LINES: usize = 2000;
 
 /// The largest file an image is read from.
 const PICTURE_SIZE: u64 = 32 << 20;
+
+/// How many times a diagram is enlarged at most over its width on the page.
+const MAX_ZOOM: f32 = 8.;
+
+/// The width of the scroll bar of the page, as the editor has it; and the height of those of the
+/// areas that scroll sideways.
+const BAR: f32 = 12.;
+const AREA_BAR: f32 = 10.;
 
 /// The keys of the preview: copying, selecting all.
 pub fn init(cx: &mut App) {
@@ -58,7 +64,8 @@ struct Place {
 /// A diagram, by its source and theme.
 enum Diagram {
     Drawing,
-    Drawn(Arc<Image>),
+    /// The image, and its size at 100%.
+    Drawn(Arc<Image>, Size<f32>),
     /// What is wrong with its source.
     Failed(SharedString),
 }
@@ -93,7 +100,25 @@ pub struct MarkdownPreview {
     focused: bool,
     /// The segments painted in the last frame, where the mouse can find them.
     layouts: Rc<RefCell<Vec<(usize, TextLayout)>>>,
+    /// The areas that scroll sideways — wide tables, enlarged diagrams — by their block and their
+    /// number in it; and the next of the block being laid out.
+    areas: HashMap<(usize, usize), ScrollHandle>,
+    area: (usize, usize),
+    /// How many times each diagram is enlarged over its width on the page, by its source.
+    zooms: HashMap<String, f32>,
+    /// The width the page gives each diagram, by its source, as the last frame laid it out; and
+    /// where the diagrams were painted, which a press does not select text over.
+    diagram_widths: Rc<RefCell<HashMap<String, Pixels>>>,
+    diagram_bounds: Rc<RefCell<HashMap<String, Bounds<Pixels>>>>,
+    /// A scroll bar being dragged.
+    dragging: Option<Drag>,
     reading: Option<Task<()>>,
+}
+
+/// A scroll bar being dragged, and where its thumb was taken.
+enum Drag {
+    Page { grab: Pixels },
+    Area { handle: ScrollHandle, grab: Pixels },
 }
 
 impl MarkdownPreview {
@@ -101,7 +126,8 @@ impl MarkdownPreview {
     pub fn new(diagram_error: SharedString, cx: &mut Context<Self>) -> Self {
         MarkdownPreview {
             focus: cx.focus_handle(),
-            list: ListState::new(0, ListAlignment::Top, px(600.)),
+            // Every block measured: the thumb of the scroll bar is as long as the page is.
+            list: ListState::new(0, ListAlignment::Top, px(600.)).measure_all(),
             blocks: Rc::new(Vec::new()),
             starts: Vec::new(),
             segments: Vec::new(),
@@ -113,6 +139,12 @@ impl MarkdownPreview {
             selecting: false,
             focused: false,
             layouts: Rc::default(),
+            areas: HashMap::new(),
+            area: (0, 0),
+            zooms: HashMap::new(),
+            diagram_widths: Rc::default(),
+            diagram_bounds: Rc::default(),
+            dragging: None,
             reading: None,
         }
     }
@@ -146,6 +178,8 @@ impl MarkdownPreview {
                 (preview.blocks, preview.starts, preview.segments) = (Rc::new(blocks), starts, segments);
                 if !same {
                     preview.selection = None;
+                    // The areas are numbered by their blocks, which are others now.
+                    preview.areas.clear();
                 }
                 // What was painted was of the text before: the mouse finds nothing until the next frame.
                 preview.layouts.borrow_mut().clear();
@@ -166,7 +200,7 @@ impl MarkdownPreview {
         let mut gone = Vec::new();
         self.diagrams.retain(|(source, _), diagram| {
             let keep = sources.contains(&source.as_str());
-            if let (false, Diagram::Drawn(image)) = (keep, &diagram) {
+            if let (false, Diagram::Drawn(image, _)) = (keep, &diagram) {
                 gone.push(image.clone());
             }
             keep
@@ -276,6 +310,10 @@ impl MarkdownPreview {
 
     fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
+        // A press on a diagram is for enlarging it, not for selecting text.
+        if self.diagram_bounds.borrow().values().any(|bounds| bounds.contains(&event.position)) {
+            return;
+        }
         let place = self.place_at(event.position);
         self.selection = match (event.modifiers.shift, self.selection, place) {
             (true, Some((anchor, _)), Some(place)) => Some((anchor, place)),
@@ -287,6 +325,14 @@ impl MarkdownPreview {
     }
 
     fn mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.dragging.is_some() {
+            if event.pressed_button == Some(MouseButton::Left) {
+                self.drag_to(event.position, cx);
+            } else {
+                self.end_drag();
+            }
+            return;
+        }
         if !self.selecting || event.pressed_button != Some(MouseButton::Left) {
             self.selecting = false;
             return;
@@ -297,25 +343,167 @@ impl MarkdownPreview {
         }
     }
 
+    fn mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
+        self.selecting = false;
+        self.end_drag();
+    }
+
+    fn end_drag(&mut self) {
+        if let Some(Drag::Page { .. }) = self.dragging.take() {
+            self.list.scrollbar_drag_ended();
+        }
+    }
+
+    /// A press on the scroll bar of the page: on the thumb it takes it, elsewhere the thumb comes
+    /// there.
+    fn page_bar_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        cx.stop_propagation();
+        let viewport = self.list.viewport_bounds();
+        let Some((top, height)) = page_thumb(&self.list, viewport.size.height) else { return };
+        let y = event.position.y - viewport.top();
+        let grab = if y >= top && y <= top + height { y - top } else { height / 2. };
+        self.list.scrollbar_drag_started();
+        self.dragging = Some(Drag::Page { grab });
+        self.drag_to(event.position, cx);
+    }
+
+    /// A press on the scroll bar of an area, as on that of the page.
+    fn area_bar_down(&mut self, handle: &ScrollHandle, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        let viewport = handle.bounds();
+        let Some((left, width)) = area_thumb(handle, viewport.size.width) else { return };
+        cx.stop_propagation();
+        let x = event.position.x - viewport.left();
+        let grab = if x >= left && x <= left + width { x - left } else { width / 2. };
+        self.dragging = Some(Drag::Area { handle: handle.clone(), grab });
+        self.drag_to(event.position, cx);
+    }
+
+    /// The thumb being dragged goes to `position`, and what it scrolls with it.
+    fn drag_to(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let fraction =
+            |at: Pixels, free: Pixels| if free > px(0.) { (f32::from(at) / f32::from(free)).clamp(0., 1.) } else { 0. };
+        match &self.dragging {
+            Some(Drag::Page { grab }) => {
+                let viewport = self.list.viewport_bounds();
+                let Some((_, height)) = page_thumb(&self.list, viewport.size.height) else { return };
+                let max = self.list.max_offset_for_scrollbar().y;
+                let part = fraction(position.y - viewport.top() - *grab, viewport.size.height - height);
+                self.list.set_offset_from_scrollbar(point(px(0.), -(max * part)));
+            }
+            Some(Drag::Area { handle, grab }) => {
+                let viewport = handle.bounds();
+                let Some((_, width)) = area_thumb(handle, viewport.size.width) else { return };
+                let max = handle.max_offset().x;
+                let part = fraction(position.x - viewport.left() - *grab, viewport.size.width - width);
+                handle.set_offset(point(-(max * part), handle.offset().y));
+            }
+            None => return,
+        }
+        cx.notify();
+    }
+
+    /// The diagram `source` enlarged `factor` times more, or less — not under the width the page
+    /// gives it — the point under `position` staying where it is.
+    fn zoom(
+        &mut self,
+        source: &str,
+        factor: f32,
+        position: Point<Pixels>,
+        handle: &ScrollHandle,
+        cx: &mut Context<Self>,
+    ) {
+        let old = self.zooms.get(source).copied().unwrap_or(1.);
+        let new = (old * factor).clamp(1., MAX_ZOOM);
+        if (new - old).abs() < 0.001 {
+            return;
+        }
+        self.zooms.insert(source.to_owned(), new);
+        let ratio = new / old;
+        let (viewport, offset) = (handle.bounds(), handle.offset());
+        let x = position.x - viewport.left();
+        handle.set_offset(point((x - (x - offset.x) * ratio).min(px(0.)), offset.y));
+        // The diagram grows down as well: the page scrolls by what grows above the point.
+        let top = self.diagram_bounds.borrow().get(source).map(|bounds| bounds.top());
+        if let Some(top) = top {
+            self.list.scroll_by((position.y - top).max(px(0.)) * (ratio - 1.));
+        }
+        cx.notify();
+    }
+
+    /// The diagram `source` at the width the page gives it again.
+    fn unzoom(&mut self, source: &str, handle: &ScrollHandle, cx: &mut Context<Self>) {
+        if self.zooms.remove(source).is_some() {
+            handle.set_offset(point(px(0.), handle.offset().y));
+            cx.notify();
+        }
+    }
+
+    /// `content` in an area that scrolls sideways when it is wider than the page, with a scroll bar
+    /// then, its thumb over the bottom edge; centred if `center`.
+    fn area(&mut self, content: AnyElement, center: bool, cx: &mut Context<Self>) -> (AnyElement, ScrollHandle) {
+        let theme = theme(cx);
+        let key = self.area;
+        self.area.1 += 1;
+        let handle = self.areas.entry(key).or_default().clone();
+        // Wider than the page in the last frame: room for the bar under it.
+        let wide = handle.max_offset().x > px(0.);
+        let (painted, thumb_color) = (handle.clone(), theme.editor.thumb);
+        let thumb = canvas(
+            |_, _, _| {},
+            move |bounds, _, window, _| {
+                if let Some((left, width)) = area_thumb(&painted, bounds.size.width) {
+                    let thumb = Bounds::new(point(bounds.left() + left, bounds.top() + px(2.)), size(width, px(6.)));
+                    window.paint_quad(fill(thumb, rgb(thumb_color)).corner_radii(px(3.)));
+                }
+            },
+        )
+        .size_full();
+        let pressed = handle.clone();
+        let id = key.0 * 1024 + key.1;
+        let element = div()
+            .relative()
+            .w_full()
+            .child(
+                div()
+                    .id(("area", id))
+                    .w_full()
+                    .flex()
+                    .when(center, |area| area.justify_center())
+                    .when(wide, |area| area.pb(px(AREA_BAR + 2.)))
+                    .overflow_x_scroll()
+                    .track_scroll(&handle)
+                    .child(content),
+            )
+            .child(
+                div().id(("area-bar", id)).absolute().left_0().right_0().bottom_0().h(px(AREA_BAR)).child(thumb).when(
+                    wide,
+                    |bar| {
+                        bar.on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |preview, event, _, cx| preview.area_bar_down(&pressed, event, cx)),
+                        )
+                    },
+                ),
+            )
+            .into_any_element();
+        (element, handle)
+    }
+
     fn block_at(&mut self, index: usize, cx: &mut Context<Self>) -> AnyElement {
+        self.area = (index, 0);
         let blocks = self.blocks.clone();
         let Some(block) = blocks.get(index) else { return div().into_any_element() };
         let mut segment = self.starts.get(index).copied().unwrap_or_default();
         let content = self.block(block, 0, &mut segment, cx);
         let last = index + 1 == blocks.len();
+        // The page is as wide as the window, its margins aside; the scroll bar is in the right one.
         div()
             .w_full()
-            .flex()
-            .justify_center()
-            .child(
-                div()
-                    .w_full()
-                    .max_w(px(PAGE_WIDTH))
-                    .px(px(32.))
-                    .when(index == 0, |page| page.pt(px(24.)))
-                    .pb(px(if last { 48. } else { 14. }))
-                    .child(content),
-            )
+            .pl(px(32.))
+            .pr(px(32. + BAR))
+            .when(index == 0, |page| page.pt(px(24.)))
+            .pb(px(if last { 48. } else { 14. }))
+            .child(content)
             .into_any_element()
     }
 
@@ -413,37 +601,61 @@ impl MarkdownPreview {
     ) -> AnyElement {
         let theme = theme(cx);
         let count = columns.len().max(1);
-        let mut cells = Vec::with_capacity(count * (rows.len() + 1));
+        let all_rows = || std::iter::once(header).chain(rows.iter().map(Vec::as_slice));
+        // Each column takes a share of the width as wide as its longest cell, within limits: GPUI
+        // knows no least width of wrapped text, so columns cannot be sized by it, as tables of the
+        // web are. The same shares in every row keep the columns straight.
+        let weights: Vec<f32> = (0..count)
+            .map(|column| {
+                let longest = all_rows().filter_map(|row| row.get(column)).map(|cell| inline_chars(cell)).max();
+                (longest.unwrap_or(0) as f32).clamp(4., 40.)
+            })
+            .collect();
+        let total: f32 = weights.iter().sum();
+        let mut lines = Vec::with_capacity(rows.len() + 1);
         for (row, is_header) in std::iter::once((header, true)).chain(rows.iter().map(|row| (row.as_slice(), false))) {
-            for column in 0..count {
+            let mut cells = Vec::with_capacity(count);
+            for (column, weight) in weights.iter().enumerate() {
                 let content = row.get(column).map(|content| self.inlines(content, segment, cx));
                 let cell = div()
+                    .flex_none()
+                    .w(relative(weight / total))
                     .px(px(12.))
                     .py(px(6.))
-                    .border_b_1()
                     .border_r_1()
                     .border_color(rgb(theme.border))
-                    .when(is_header, |cell| cell.font_weight(FontWeight::SEMIBOLD).bg(rgb(theme.bar)))
                     // The text goes to its place, rather than its lines in its box: GPUI finds the
-                    // characters under the mouse as if lines were to the left.
+                    // characters under the mouse as if lines were to the left. It wraps at the
+                    // width of the cell.
                     .flex()
                     .map(|cell| match columns.get(column) {
                         Some(Align::Center) => cell.justify_center(),
                         Some(Align::Right) => cell.justify_end(),
                         _ => cell,
                     })
-                    .children(content);
+                    .children(content.map(|content| div().min_w_0().child(content)));
                 cells.push(cell);
             }
+            let line = div()
+                .flex()
+                .w_full()
+                .border_b_1()
+                .border_color(rgb(theme.border))
+                .when(is_header, |line| line.font_weight(FontWeight::SEMIBOLD).bg(rgb(theme.bar)))
+                .children(cells);
+            lines.push(line);
         }
-        div()
-            .grid()
-            .grid_cols_min_content(count as u16)
+        // As wide as the page; narrower than 72 pixels a column, it scrolls sideways.
+        let table = div()
+            .flex_none()
+            .w_full()
+            .min_w(px(72. * count as f32))
             .border_t_1()
             .border_l_1()
             .border_color(rgb(theme.border))
-            .children(cells)
-            .into_any_element()
+            .children(lines)
+            .into_any_element();
+        self.area(table, false, cx).0
     }
 
     /// Text with images among it: the images on lines of their own.
@@ -570,13 +782,9 @@ impl MarkdownPreview {
         let dark = theme(cx).appearance == Appearance::Dark;
         let key = (source.to_owned(), dark);
         match self.diagrams.get(&key) {
-            Some(Diagram::Drawn(image)) => {
-                return div()
-                    .w_full()
-                    .flex()
-                    .justify_center()
-                    .child(img(image.clone()).max_w_full())
-                    .into_any_element();
+            Some(Diagram::Drawn(image, natural)) => {
+                let (image, natural) = (image.clone(), *natural);
+                return self.zoomable(source, image, natural, cx);
             }
             Some(Diagram::Failed(error)) => {
                 let error = format!("{} {error}", self.diagram_error);
@@ -593,7 +801,10 @@ impl MarkdownPreview {
                 });
                 cx.spawn(async move |preview, cx| {
                     let diagram = match draw.await {
-                        Ok(svg) => Diagram::Drawn(Arc::new(Image::from_bytes(ImageFormat::Svg, svg.into_bytes()))),
+                        Ok(svg) => Diagram::Drawn(
+                            Arc::new(Image::from_bytes(ImageFormat::Svg, svg.text.into_bytes())),
+                            size(svg.width, svg.height),
+                        ),
                         Err(error) => Diagram::Failed(error.into()),
                     };
                     let _ = preview.update(cx, |preview, cx| {
@@ -609,6 +820,69 @@ impl MarkdownPreview {
         }
         div().h(px(80.)).w_full().into_any_element()
     }
+
+    /// A drawn diagram: as wide as the page, or less if it is smaller, enlarged by a pinch or by
+    /// the wheel with Cmd — Ctrl on Windows and Linux — and back by a double click; enlarged past
+    /// the page it scrolls sideways.
+    fn zoomable(&mut self, source: &str, image: Arc<Image>, natural: Size<f32>, cx: &mut Context<Self>) -> AnyElement {
+        let zoom = self.zooms.get(source).copied().unwrap_or(1.);
+        let given = self.diagram_widths.borrow().get(source).copied();
+        // Laid out once, the width the page gives is known; the first time, the image just fits.
+        let shown = given.map(|given| px(natural.width).min(given) * zoom);
+        let picture = match shown {
+            Some(shown) => img(image).w(shown).flex_none().into_any_element(),
+            None => img(image).max_w_full().into_any_element(),
+        };
+        let fits = match (shown, given) {
+            (Some(shown), Some(given)) => shown <= given + px(0.5),
+            _ => true,
+        };
+        let id = self.area.0 * 1024 + self.area.1;
+        let (widths, bounds, key) = (self.diagram_widths.clone(), self.diagram_bounds.clone(), source.to_owned());
+        let measure = canvas(
+            move |area, window, _| {
+                let width = area.size.width;
+                if widths.borrow_mut().insert(key.clone(), width) != Some(width) {
+                    // The width changed: the image takes the new one in the next frame.
+                    window.refresh();
+                }
+                (key, area)
+            },
+            move |_, (key, area), _, _| {
+                bounds.borrow_mut().insert(key, area);
+            },
+        )
+        .absolute()
+        .size_full();
+        let (area, handle) = self.area(picture, fits, cx);
+        let (wheel, pinch, click) = (handle.clone(), handle.clone(), handle);
+        let (wheel_source, pinch_source, click_source) = (source.to_owned(), source.to_owned(), source.to_owned());
+        div()
+            .id(("diagram", id))
+            .relative()
+            .w_full()
+            .child(area)
+            .child(measure)
+            .on_scroll_wheel(cx.listener(move |preview, event: &ScrollWheelEvent, _, cx| {
+                let zooming =
+                    if cfg!(target_os = "macos") { event.modifiers.platform } else { event.modifiers.control };
+                if zooming {
+                    let delta = f32::from(event.delta.pixel_delta(px(20.)).y);
+                    preview.zoom(&wheel_source, (delta * 0.005).exp(), event.position, &wheel, cx);
+                    cx.stop_propagation();
+                }
+            }))
+            .on_pinch(cx.listener(move |preview, event: &PinchEvent, _, cx| {
+                preview.zoom(&pinch_source, 1. + event.delta, event.position, &pinch, cx);
+                cx.stop_propagation();
+            }))
+            .on_click(cx.listener(move |preview, event: &ClickEvent, _, cx| {
+                if event.click_count() == 2 {
+                    preview.unzoom(&click_source, &click, cx);
+                }
+            }))
+            .into_any_element()
+    }
 }
 
 impl Focusable for MarkdownPreview {
@@ -621,9 +895,33 @@ impl Render for MarkdownPreview {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.focused = self.focus.contains_focused(window, cx) && window.is_window_active();
         let theme = theme(cx);
-        // Painted before the blocks: the segments of the last frame go, those painted now come.
-        let layouts = self.layouts.clone();
-        let forget = canvas(|_, _, _| {}, move |_, _, _, _| layouts.borrow_mut().clear()).absolute().size_0();
+        // Painted before the blocks: the segments and diagrams of the last frame go, those painted now
+        // come.
+        let (layouts, diagrams) = (self.layouts.clone(), self.diagram_bounds.clone());
+        let forget = canvas(
+            |_, _, _| {},
+            move |_, _, _, _| {
+                layouts.borrow_mut().clear();
+                diagrams.borrow_mut().clear();
+            },
+        )
+        .absolute()
+        .size_0();
+        // The scroll bar of the page, as the editor has it, painted as the list is laid out now.
+        let (painted, track, thumb) = (self.list.clone(), theme.editor.track, theme.editor.thumb);
+        let bar = canvas(
+            |_, _, _| {},
+            move |bounds, _, window, _| {
+                if let Some((top, height)) = page_thumb(&painted, bounds.size.height) {
+                    window.paint_quad(fill(bounds, rgb(track)));
+                    let thumb_bounds =
+                        Bounds::new(point(bounds.left() + px(2.), bounds.top() + top), size(px(BAR - 4.), height));
+                    window.paint_quad(fill(thumb_bounds, rgb(thumb)));
+                }
+            },
+        )
+        .size_full();
+        let scrolls = self.list.max_offset_for_scrollbar().y > px(0.);
         div()
             .id("markdown-preview")
             .key_context(CONTEXT)
@@ -632,7 +930,9 @@ impl Render for MarkdownPreview {
             .on_action(cx.listener(Self::select_all))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
             .on_mouse_move(cx.listener(Self::mouse_move))
-            .on_mouse_up(MouseButton::Left, cx.listener(|preview, _, _, _| preview.selecting = false))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up))
+            .relative()
             .size_full()
             .bg(rgb(theme.editor.background))
             .text_color(rgb(theme.editor.text))
@@ -642,7 +942,54 @@ impl Render for MarkdownPreview {
             .child(
                 list(self.list.clone(), cx.processor(|preview, index, _, cx| preview.block_at(index, cx))).size_full(),
             )
+            .child(
+                div()
+                    .id("page-bar")
+                    .absolute()
+                    .top_0()
+                    .right_0()
+                    .bottom_0()
+                    .w(px(BAR))
+                    .child(bar)
+                    .when(scrolls, |bar| bar.on_mouse_down(MouseButton::Left, cx.listener(Self::page_bar_down))),
+            )
     }
+}
+
+/// How many characters the text of `content` has: the width a cell of a table asks for.
+fn inline_chars(content: &[Inline]) -> usize {
+    content
+        .iter()
+        .map(|inline| match inline {
+            Inline::Text(text) => text.text.chars().count(),
+            Inline::Image { alt, .. } => alt.chars().count(),
+        })
+        .sum()
+}
+
+/// The thumb of the scroll bar of a page in a track `track` high: its top and its height; none if
+/// the page fits.
+fn page_thumb(list: &ListState, track: Pixels) -> Option<(Pixels, Pixels)> {
+    let max = list.max_offset_for_scrollbar().y;
+    if max <= px(0.) || track <= px(0.) {
+        return None;
+    }
+    let top = (-list.scroll_px_offset_for_scrollbar().y).clamp(px(0.), max);
+    let height = (track * (f32::from(track) / f32::from(track + max))).max(px(24.)).min(track);
+    Some(((track - height) * (f32::from(top) / f32::from(max)), height))
+}
+
+/// The thumb of the scroll bar of an area in a track `track` wide: its left and its width; none if
+/// the area fits.
+fn area_thumb(handle: &ScrollHandle, track: Pixels) -> Option<(Pixels, Pixels)> {
+    let max = handle.max_offset().x;
+    let viewport = handle.bounds().size.width;
+    if max <= px(0.) || track <= px(0.) || viewport <= px(0.) {
+        return None;
+    }
+    let offset = (-handle.offset().x).clamp(px(0.), max);
+    let width = (track * (f32::from(viewport) / f32::from(viewport + max))).max(px(24.)).min(track);
+    Some(((track - width) * (f32::from(offset) / f32::from(max)), width))
 }
 
 /// The calls `text` gets for each segment of `block`, in order: what the preview draws as one run
