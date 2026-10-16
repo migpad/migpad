@@ -2517,7 +2517,6 @@ impl Render for Workspace {
     }
 }
 
-/// Makes `preview` of the text of `document` as it is now; false if the file is still loading.
 /// A page for a Markdown document of this window: the files of its links open in tabs here.
 fn new_preview(window: &mut Window, cx: &mut Context<Workspace>) -> Entity<MarkdownPreview> {
     let preview = cx.new(|cx| MarkdownPreview::new(tr(Key::MarkdownDiagramError).into(), cx));
@@ -2528,6 +2527,7 @@ fn new_preview(window: &mut Window, cx: &mut Context<Workspace>) -> Entity<Markd
     preview
 }
 
+/// Makes `preview` of the text of `document` as it is now; false if the file is still loading.
 fn fill_preview(preview: &Entity<MarkdownPreview>, document: &Entity<Document>, cx: &mut App) -> bool {
     if document.read(cx).is_preview() {
         return false;

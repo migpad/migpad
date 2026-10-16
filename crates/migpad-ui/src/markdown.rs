@@ -87,9 +87,9 @@ struct Place {
     offset: usize,
 }
 
-/// A diagram of the page: its source, and the block it is in. The same diagram in two blocks is laid
-/// out, enlarged and found apart.
-type DiagramKey = (String, usize);
+/// A diagram of the page: its source, the block it is in and its area there. The same diagram twice
+/// is laid out, enlarged and found apart.
+type DiagramKey = (String, usize, usize);
 
 /// The widths of the columns of a table — least and most — and the fonts they were measured in.
 struct ColumnWidths {
@@ -169,6 +169,8 @@ pub struct MarkdownPreview {
     gesture: OngoingScroll,
     /// The link followed last, and when.
     followed: Option<(String, Instant)>,
+    /// The link under the pointer: its segment, and its number in it.
+    hovered_link: Option<(usize, usize)>,
     reading: Option<Task<()>>,
 }
 
@@ -206,6 +208,7 @@ impl MarkdownPreview {
             dragging: None,
             gesture: OngoingScroll::default(),
             followed: None,
+            hovered_link: None,
             reading: None,
         }
     }
@@ -357,6 +360,10 @@ impl MarkdownPreview {
     /// names does; an anchor goes to its heading. A link of another scheme leads nowhere: it could
     /// start any program.
     fn follow(&mut self, url: &str, cx: &mut Context<Self>) {
+        // A part of the link selected by dragging over it, or by Shift and a click.
+        if self.ordered_selection().is_some() {
+            return;
+        }
         let now = Instant::now();
         if let Some((last, at)) = &self.followed
             && last == url
@@ -365,38 +372,43 @@ impl MarkdownPreview {
             return;
         }
         self.followed = Some((url.to_owned(), now));
-        match markdown::link_target(url, self.folder.as_deref()) {
-            Some(LinkTarget::Web(url)) => cx.open_url(&url),
-            Some(LinkTarget::File(path)) if is_text_file(&path) => cx.emit(PreviewEvent::OpenFile(path)),
-            Some(LinkTarget::File(path) | LinkTarget::Reveal(path)) => reveal(&path, cx),
-            Some(LinkTarget::Heading(anchor)) => self.go_to_heading(&anchor, cx),
-            None => {}
-        }
+        let (path, open) = match markdown::link_target(url, self.folder.as_deref()) {
+            Some(LinkTarget::Web(url)) => return cx.open_url(&url),
+            Some(LinkTarget::Heading(anchor)) => return self.go_to_heading(&anchor, cx),
+            Some(LinkTarget::File(path)) => (path, true),
+            Some(LinkTarget::Reveal(path)) => (path, false),
+            None => return,
+        };
+        // What the file is, it is asked of the disk in the background: on a share of the network,
+        // or kept in the cloud, it takes a while.
+        let kind = cx.background_spawn({
+            let path = path.clone();
+            async move { file_kind(&path) }
+        });
+        cx.spawn(async move |preview, cx| {
+            let kind = kind.await;
+            let _ = preview.update(cx, |_, cx| match kind {
+                Some(FileKind::Text) if open => cx.emit(PreviewEvent::OpenFile(path)),
+                Some(_) => cx.reveal_path(&path),
+                None => {}
+            });
+        })
+        .detach();
     }
 
     /// Scrolls the page to the heading of the anchor `anchor`, named as GitHub names them: of two
     /// headings of the same text, the second has `-1` after its name.
     fn go_to_heading(&mut self, anchor: &str, cx: &mut Context<Self>) {
         let anchor = anchor.to_lowercase();
-        let mut seen: HashMap<String, usize> = HashMap::new();
+        let mut headings = Vec::new();
         for (index, block) in self.blocks.iter().enumerate() {
-            let Block::Heading { content, .. } = block else { continue };
-            let text: String = content
-                .iter()
-                .filter_map(|inline| match inline {
-                    Inline::Text(text) => Some(text.text.as_str()),
-                    Inline::Image { .. } => None,
-                })
-                .collect();
-            let slug = markdown::slug(&text);
-            let count = seen.entry(slug.clone()).or_default();
-            let name = if *count == 0 { slug } else { format!("{slug}-{count}") };
-            *count += 1;
-            if name == anchor {
-                self.list.scroll_to(ListOffset { item_ix: index, offset_in_item: px(0.) });
-                cx.notify();
-                return;
-            }
+            block_headings(block, index, &mut headings);
+        }
+        let names = markdown::slugs(headings.iter().map(|(_, text)| text.as_str()));
+        if let Some(at) = names.iter().position(|name| *name == anchor) {
+            // A heading in a list or a quote: the top of its block.
+            self.list.scroll_to(ListOffset { item_ix: headings[at].0, offset_in_item: px(0.) });
+            cx.notify();
         }
     }
 
@@ -790,10 +802,12 @@ impl MarkdownPreview {
         let code = monospace(cx);
         // Measured once for the text as it is, in these fonts: the table is laid out every frame.
         let key = self.area;
-        let measured = self
-            .table_widths
-            .get(&key)
-            .filter(|measured| measured.size == size && measured.font == style.font_family && measured.code == code);
+        let measured = self.table_widths.get(&key).filter(|measured| {
+            measured.size == size
+                && measured.font == style.font_family
+                && measured.code == code
+                && measured.widths.len() == count
+        });
         let widths = match measured {
             Some(measured) => measured.widths.clone(),
             None => {
@@ -885,7 +899,7 @@ impl MarkdownPreview {
             let shown;
             let (text, styled) = match inline {
                 Inline::Text(text) => (text.text.as_str(), Some(text)),
-                Inline::Image { url, alt } => {
+                Inline::Image { url, alt, .. } => {
                     let path = markdown::local_file(url, self.folder.as_deref());
                     if let Some(Picture::Read(_, natural, _)) = path.and_then(|path| self.pictures.get(&path)) {
                         let width = natural.map_or(px(PICTURE_UNKNOWN), |natural| px(natural.width));
@@ -926,7 +940,7 @@ impl MarkdownPreview {
                     children.push(self.text(text, Some(*segment), cx));
                     *segment += 1;
                 }
-                Inline::Image { url, alt } => children.push(self.image(url, alt, cx)),
+                Inline::Image { url, alt, link } => children.push(self.image(url, alt, link.as_deref(), cx)),
             }
         }
         match children.len() {
@@ -970,13 +984,28 @@ impl MarkdownPreview {
             // they lead.
             let ranges: Vec<Range<usize>> = text.links.iter().map(|link| link.range.clone()).collect();
             let urls: Rc<[String]> = text.links.iter().map(|link| link.url.clone()).collect();
-            let (told, within) = (urls.clone(), ranges.clone());
-            let preview = cx.weak_entity();
-            InteractiveText::new(("text", segment), styled)
+            let (told, within, hovering) = (urls.clone(), ranges.clone(), ranges.clone());
+            let (preview, hovered) = (cx.weak_entity(), cx.weak_entity());
+            // A tooltip shown stays while the pointer is over the text: over another of its links,
+            // the text is another element, with a tooltip of its own.
+            let link = self.hovered_link.filter(|(of, _)| *of == segment).map(|(_, link)| link);
+            let id = SharedString::from(format!("links {segment} {link:?}"));
+            InteractiveText::new(id, styled)
                 .on_click(ranges, move |index, _, cx| {
                     if let Some(url) = urls.get(index) {
                         let _ = preview.update(cx, |preview, cx| preview.follow(url, cx));
                     }
+                })
+                .on_hover(move |at, _, _, cx| {
+                    let link = at.and_then(|at| hovering.iter().position(|range| range.contains(&at)));
+                    let _ = hovered.update(cx, |preview, cx| {
+                        let now = link.map(|link| (segment, link));
+                        let was = preview.hovered_link.filter(|(of, _)| *of == segment);
+                        if now != was && (now.is_some() || was.is_some()) {
+                            preview.hovered_link = now;
+                            cx.notify();
+                        }
+                    });
                 })
                 .tooltip(move |at, window, cx| {
                     let index = within.iter().position(|range| range.contains(&at))?;
@@ -1024,20 +1053,36 @@ impl MarkdownPreview {
 
     /// An image from a file, read in the background the first time it shows; one from anywhere
     /// else, or not an image the page shows, shows as its text.
-    fn image(&mut self, url: &str, alt: &str, cx: &mut Context<Self>) -> AnyElement {
+    fn image(&mut self, url: &str, alt: &str, link: Option<&str>, cx: &mut Context<Self>) -> AnyElement {
         let theme = theme(cx);
         let alt = SharedString::from(if alt.is_empty() { url.to_owned() } else { alt.to_owned() });
         let missing = move || div().text_color(rgb(theme.text_muted)).child(format!("[{alt}]")).into_any_element();
-        let Some(path) = markdown::local_file(url, self.folder.as_deref()) else { return missing() };
-        match self.pictures.get(&path) {
-            Some(Picture::Read(image, ..)) => img(image.clone()).max_w_full().with_fallback(missing).into_any_element(),
-            Some(Picture::Refused(_)) => missing(),
-            Some(Picture::Reading) => div().into_any_element(),
-            None => {
-                self.read_picture(path, cx);
-                div().into_any_element()
-            }
-        }
+        let image = match markdown::local_file(url, self.folder.as_deref()) {
+            None => missing(),
+            Some(path) => match self.pictures.get(&path) {
+                Some(Picture::Read(image, ..)) => {
+                    img(image.clone()).max_w_full().with_fallback(missing).into_any_element()
+                }
+                Some(Picture::Refused(_)) => missing(),
+                Some(Picture::Reading) => div().into_any_element(),
+                None => {
+                    self.read_picture(path, cx);
+                    div().into_any_element()
+                }
+            },
+        };
+        // In a link, as a badge is, it follows it.
+        let Some(link) = link else { return image };
+        let (preview, followed) = (cx.weak_entity(), link.to_owned());
+        div()
+            .id(SharedString::from(format!("{url}\n{link}")))
+            .cursor_pointer()
+            .tooltip(Tooltip::builder(shorten(link), None))
+            .on_click(move |_, _, cx| {
+                let _ = preview.update(cx, |preview, cx| preview.follow(&followed, cx));
+            })
+            .child(image)
+            .into_any_element()
     }
 
     /// Reads the image of the file `path` in the background.
@@ -1069,11 +1114,15 @@ impl MarkdownPreview {
     fn diagram(&mut self, source: &str, cx: &mut Context<Self>) -> AnyElement {
         let dark = theme(cx).appearance == Appearance::Dark;
         let key = (source.to_owned(), dark);
+        if let Some(Diagram::Drawn(image, natural)) = self.diagrams.get(&key) {
+            let (image, natural) = (image.clone(), *natural);
+            return self.zoomable(source, image, natural, cx);
+        }
+        // Its area is kept for it while it is not drawn: the areas after it keep their numbers, and
+        // what is kept by them — where they were scrolled, the widths of the columns of a table.
+        self.area.1 += 1;
         match self.diagrams.get(&key) {
-            Some(Diagram::Drawn(image, natural)) => {
-                let (image, natural) = (image.clone(), *natural);
-                return self.zoomable(source, image, natural, cx);
-            }
+            Some(Diagram::Drawn(..)) => {}
             Some(Diagram::Failed(error)) => {
                 let error = format!("{} {error}", self.diagram_error);
                 return self.code_block(source, Some(&error), None, cx);
@@ -1114,7 +1163,7 @@ impl MarkdownPreview {
     /// the page it scrolls sideways.
     fn zoomable(&mut self, source: &str, image: Arc<Image>, natural: Size<f32>, cx: &mut Context<Self>) -> AnyElement {
         let (block, id) = (self.area.0, self.area.0 * 1024 + self.area.1);
-        let key: DiagramKey = (source.to_owned(), block);
+        let key: DiagramKey = (source.to_owned(), block, self.area.1);
         let zoom = self.zooms.get(&key).copied().unwrap_or(1.);
         let given = self.diagram_widths.borrow().get(&key).copied();
         // Laid out once, the width the page gives is known; the first time, the image just fits.
@@ -1327,25 +1376,35 @@ fn wide(c: char) -> bool {
         | '\u{FE30}'..='\u{FE4F}' | '\u{FF00}'..='\u{FFEF}' | '\u{20000}'..='\u{3FFFD}')
 }
 
-/// Whether `path` is a plain file of text: none of its first bytes is zero, as in files of other
-/// kinds, unless it starts as text in UTF-16 does. A file that is not plain — a pipe, a device —
-/// is not opened, which would wait for a writer or read forever.
-fn is_text_file(path: &Path) -> bool {
-    let plain = std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file());
-    let Some(file) = plain.then(|| std::fs::File::open(path).ok()).flatten() else { return false };
-    let mut head = Vec::with_capacity(8192);
-    if file.take(8192).read_to_end(&mut head).is_err() {
-        return false;
-    }
-    head.starts_with(&[0xFF, 0xFE]) || head.starts_with(&[0xFE, 0xFF]) || !head.contains(&0)
+/// What a file a link leads to is.
+enum FileKind {
+    /// A plain file of text, which opens in a tab.
+    Text,
+    /// A file of another kind, or a folder, which the file manager shows.
+    Other,
 }
 
-/// Shows `path` in the file manager if it is a file or a folder: not a pipe or a device, which the
-/// file manager of Linux opens first, waiting for a writer.
-fn reveal(path: &Path, cx: &App) {
-    if std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file() || metadata.is_dir()) {
-        cx.reveal_path(path);
+/// What the file `path` is: of text if it is a plain file none of whose first bytes is zero, as in
+/// files of other kinds — unless it starts as text in UTF-16 does — and if it is not larger than a
+/// file MigPad opens at once; none if it is not a file nor a folder. A pipe or a device is not
+/// opened, which would wait for a writer or read forever; and the file manager of Linux opens what
+/// it shows.
+fn file_kind(path: &Path) -> Option<FileKind> {
+    const MOST_TEXT: u64 = 64 << 20;
+    let metadata = std::fs::metadata(path).ok()?;
+    if metadata.is_dir() {
+        return Some(FileKind::Other);
     }
+    if !metadata.is_file() {
+        return None;
+    }
+    if metadata.len() > MOST_TEXT {
+        return Some(FileKind::Other);
+    }
+    let mut head = Vec::with_capacity(8192);
+    std::fs::File::open(path).ok()?.take(8192).read_to_end(&mut head).ok()?;
+    let text = head.starts_with(&[0xFF, 0xFE]) || head.starts_with(&[0xFE, 0xFF]) || !head.contains(&0);
+    Some(if text { FileKind::Text } else { FileKind::Other })
 }
 
 /// `url` for a tooltip: no longer than a line.
@@ -1415,6 +1474,28 @@ fn block_segments(block: &Block, text: &mut impl FnMut(&str)) {
                 }
             }
         }
+    }
+}
+
+/// The texts of the headings of `block`, the block `index` of the page, in order, with that index:
+/// those in its lists and quotes too.
+fn block_headings(block: &Block, index: usize, headings: &mut Vec<(usize, String)>) {
+    match block {
+        Block::Heading { content, .. } => {
+            let text = content
+                .iter()
+                .filter_map(|inline| match inline {
+                    Inline::Text(text) => Some(text.text.as_str()),
+                    Inline::Image { .. } => None,
+                })
+                .collect();
+            headings.push((index, text));
+        }
+        Block::Quote(blocks) => blocks.iter().for_each(|block| block_headings(block, index, headings)),
+        Block::List { items, .. } => {
+            items.iter().flat_map(|item| &item.blocks).for_each(|block| block_headings(block, index, headings))
+        }
+        _ => {}
     }
 }
 
