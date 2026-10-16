@@ -78,12 +78,14 @@ mod tests {
             path: Some(PathBuf::from(path)),
             encoding: Some(crate::encoding::Encoding::UTF_16LE),
             selection: Selection::caret(4),
+            pinned: false,
         };
         let kept = TabState {
             document: Some(DocumentId::random()),
             path: None,
             encoding: None,
             selection: Selection { anchor: 1, head: 0 },
+            pinned: false,
         };
         let closed = vec![
             ClosedState::Tab(kept),

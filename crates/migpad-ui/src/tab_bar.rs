@@ -25,6 +25,8 @@ pub struct TabInfo {
     pub modified: bool,
     /// Whether its file is not there any more: the title is struck through.
     pub missing: bool,
+    /// Whether the tab is pinned: it shows a pin icon instead of a close button.
+    pub pinned: bool,
 }
 
 type Handler<T> = Rc<dyn Fn(T, &mut Window, &mut App)>;
@@ -201,48 +203,66 @@ impl RenderOnce for TabBar {
         let marker = move || div().absolute().top_0().bottom_0().w(px(2.)).bg(rgb(theme.accent));
         let tabs = self.tabs.into_iter().enumerate().map(|(i, tab)| {
             let active = i == self.active;
+            let pinned = tab.pinned;
+            let tab_title = tab.title.clone();
+            let tab_missing = tab.missing;
             let group = SharedString::from(format!("tab-{i}"));
             let (on_select, on_close, on_close_middle, on_move) =
                 (self.on_select.clone(), self.on_close.clone(), self.on_close.clone(), self.on_move.clone());
             let (on_context_menu, on_receive) = (self.on_context_menu.clone(), self.on_receive.clone());
             let dragged = DraggedTab { owner, window, document: tab.document, index: i, title: tab.title.clone() };
-            // ● for changes to save; × on the active tab and under the pointer.
-            let close = div()
-                .id(("close", i))
-                .role(Role::Button)
-                .aria_label(self.close_label.clone())
-                .relative()
-                .flex_none()
-                .size(px(18.))
-                .rounded(px(4.))
-                .text_color(rgb(theme.text_muted))
-                .hover(|style| style.bg(rgb(theme.hover)).text_color(rgb(theme.text)))
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(move |_, window, cx| on_close(i, window, cx))
-                .tooltip(Tooltip::builder(self.close_label.clone(), None))
-                .child(
-                    div()
-                        .absolute()
-                        .size_full()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_size(px(10.))
-                        .child("●")
-                        .when(!tab.modified, |dot| dot.invisible())
-                        .group_hover(group.clone(), |style| style.invisible()),
-                )
-                .child(
-                    div()
-                        .absolute()
-                        .size_full()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child("×")
-                        .when(tab.modified || !active, |cross| cross.invisible())
-                        .group_hover(group.clone(), |style| style.visible()),
-                );
+            // Pinned tabs show a pin icon; unpinned show ● for changes or × to close.
+            let trailing = if pinned {
+                div()
+                    .id(("close", i))
+                    .relative()
+                    .flex_none()
+                    .size(px(18.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(11.))
+                    .text_color(rgb(theme.text_muted))
+                    .child("📌")
+            } else {
+                let close_label = self.close_label.clone();
+                div()
+                    .id(("close", i))
+                    .role(Role::Button)
+                    .aria_label(close_label.clone())
+                    .relative()
+                    .flex_none()
+                    .size(px(18.))
+                    .rounded(px(4.))
+                    .text_color(rgb(theme.text_muted))
+                    .hover(|style| style.bg(rgb(theme.hover)).text_color(rgb(theme.text)))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(move |_, window, cx| on_close(i, window, cx))
+                    .tooltip(Tooltip::builder(close_label, None))
+                    .child(
+                        div()
+                            .absolute()
+                            .size_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_size(px(10.))
+                            .child("●")
+                            .when(!tab.modified, |dot| dot.invisible())
+                            .group_hover(group.clone(), |style| style.invisible()),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .size_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child("×")
+                            .when(tab.modified || !active, |cross| cross.invisible())
+                            .group_hover(group.clone(), |style| style.visible()),
+                    )
+            };
             div()
                 .id(("tab", i))
                 .group(group)
@@ -255,10 +275,8 @@ impl RenderOnce for TabBar {
                 .items_center()
                 .gap(px(4.))
                 .h_full()
-                .min_w(px(64.))
-                .max_w(px(220.))
-                .pl(px(12.))
-                .pr(px(5.))
+                .when(pinned, |tab| tab.min_w(px(36.)).max_w(px(36.)).justify_center().pl(px(4.)).pr(px(4.)))
+                .when(!pinned, |tab| tab.min_w(px(64.)).max_w(px(220.)).pl(px(12.)).pr(px(5.)))
                 .border_r_1()
                 .border_color(rgb(theme.border))
                 .when(active, |tab| tab.bg(rgb(theme.tab_active)).text_color(rgb(theme.text)))
@@ -268,11 +286,12 @@ impl RenderOnce for TabBar {
                     on_context_menu((i, event.position), window, cx);
                     cx.stop_propagation();
                 })
-                .on_mouse_up(MouseButton::Middle, move |_, window, cx| on_close_middle(i, window, cx))
+                .when(!pinned, |tab| {
+                    tab.on_mouse_up(MouseButton::Middle, move |_, window, cx| on_close_middle(i, window, cx))
+                })
                 .on_drag(dragged, |dragged, _, _, cx| {
                     cx.set_global(Dragging { tab: Some(dragged.clone()), over: None });
                     let view = cx.new(|_| dragged.clone());
-                    // The drag ends with its view, wherever it is dropped: the tab is forgotten.
                     cx.observe_release(&view, |_, cx| {
                         show_tab_drop(None, cx);
                         cx.global_mut::<Dragging>().tab = None;
@@ -292,23 +311,24 @@ impl RenderOnce for TabBar {
                     }
                 })
                 .when_some(tab.tooltip, |tab, path| tab.tooltip(Tooltip::builder(path, None)))
-                // The active tab is marked by a line over it.
                 .when(active, |tab| {
                     tab.child(div().absolute().top_0().left_0().right_0().h(px(2.)).bg(rgb(theme.accent)))
                 })
                 .when(drop_at == Some(i), |tab| tab.child(marker().left_0()))
                 .when(drop_at == Some(count) && i + 1 == count, |tab| tab.child(marker().right_0()))
-                .child(
-                    div()
-                        .flex_shrink(1.)
-                        .min_w_0()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .when(tab.missing, |title| title.line_through())
-                        .child(tab.title),
-                )
-                .child(close)
+                .when(!pinned, |tab| {
+                    tab.child(
+                        div()
+                            .flex_shrink(1.)
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .when(tab_missing, |title| title.line_through())
+                            .child(tab_title.clone()),
+                    )
+                })
+                .child(trailing)
         });
         let (on_move, on_new, on_plus, on_receive_end) =
             (self.on_move.clone(), self.on_new.clone(), self.on_new.clone(), self.on_receive.clone());

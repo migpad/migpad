@@ -48,6 +48,16 @@ pub struct CopyTabPath(pub usize);
 #[action(namespace = file, no_json)]
 pub struct RevealTabFile(pub usize);
 
+/// Pins the tab at the given index.
+#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[action(namespace = file, no_json)]
+pub struct PinTabAt(pub usize);
+
+/// Unpins the tab at the given index.
+#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[action(namespace = file, no_json)]
+pub struct UnpinTabAt(pub usize);
+
 pub struct FileModule;
 
 impl Module for FileModule {
@@ -135,6 +145,12 @@ impl Module for FileModule {
         });
         registry.on_window_action(|workspace, action: &RevealTabFile, _, cx| {
             workspace.reveal_tab_file(action.0, cx);
+        });
+        registry.on_window_action(|workspace, action: &PinTabAt, _, cx| {
+            workspace.pin_tab(action.0, cx);
+        });
+        registry.on_window_action(|workspace, action: &UnpinTabAt, _, cx| {
+            workspace.unpin_tab(action.0, cx);
         });
         registry.on_window_action(|workspace, _: &CloseWindow, window, cx| workspace.close_window(window, cx));
         // Without a window of documents — from the settings window on macOS — and for a new window

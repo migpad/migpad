@@ -26,7 +26,9 @@ use crate::find::FindBar;
 use crate::go_to::{self, GoToBar};
 use crate::journals;
 use crate::keys;
-use crate::modules::file::{CloseOtherTabs, CloseTabAt, CloseTabsToRight, CopyTabPath, NewTab, RevealTabFile};
+use crate::modules::file::{
+    CloseOtherTabs, CloseTabAt, CloseTabsToRight, CopyTabPath, NewTab, PinTabAt, RevealTabFile, UnpinTabAt,
+};
 use crate::modules::format;
 use crate::notices::{self, Notice, NoticeAction, Topic};
 use crate::recent;
@@ -68,6 +70,8 @@ pub struct Tab {
     losses_checked: bool,
     /// Flushes the journal to the disk a moment after the last edit.
     journal_sync: Option<Task<()>>,
+    /// Whether the tab is pinned: it does not close and stays across restarts.
+    pub pinned: bool,
     /// Whether its file is not there any more: another program removed it.
     missing: bool,
     /// Whether the encoding of its file was chosen by hand rather than guessed: reading the file
@@ -193,7 +197,8 @@ impl Workspace {
         });
         let window_id = window.window_handle().window_id();
         let untitled = Self::untitled_for(&first.document, [], window_id, cx);
-        let tab = Tab::new(first.document, untitled, first.loading, first.encoding_chosen, window, cx);
+        let mut tab = Tab::new(first.document, untitled, first.loading, first.encoding_chosen, window, cx);
+        tab.pinned = first.pinned;
         let menu_bar = view_options::menu_bar(cx).then(|| Self::make_menu_bar(window, cx));
         let mut workspace = Workspace {
             window_id,
@@ -463,13 +468,15 @@ impl Workspace {
     /// Adds a tab at the end and switches to it. A file opened into a window whose only tab is an
     /// untitled document never used — empty, without history or notifications — takes its place.
     pub fn add_tab(&mut self, tab: ForTab, window: &mut Window, cx: &mut Context<Self>) {
+        let pinned = tab.pinned;
         let unused = self.tabs.len() == 1 && {
             let only = self.tabs.active();
             let doc = only.document.read(cx);
             doc.path.is_none() && doc.text().is_empty() && !doc.can_undo() && only.notices.is_empty()
         };
         if unused && tab.document.read(cx).path.is_some() {
-            let replaced = Tab::new(tab.document, None, tab.loading, tab.encoding_chosen, window, cx);
+            let mut replaced = Tab::new(tab.document, None, tab.loading, tab.encoding_chosen, window, cx);
+            replaced.pinned = pinned;
             let gone = self.tabs.replace(0, replaced);
             gone.document.update(cx, |doc, _| doc.remove_journal());
             self.settle(0, tab.selection, tab.notice, window, cx);
@@ -482,7 +489,9 @@ impl Workspace {
         }
         let numbers: Vec<u32> = self.untitled_numbers().collect();
         let untitled = Self::untitled_for(&tab.document, numbers, self.window_id, cx);
-        let index = self.tabs.push(Tab::new(tab.document, untitled, tab.loading, tab.encoding_chosen, window, cx));
+        let mut new_tab = Tab::new(tab.document, untitled, tab.loading, tab.encoding_chosen, window, cx);
+        new_tab.pinned = pinned;
+        let index = self.tabs.push(new_tab);
         self.settle(index, tab.selection, tab.notice, window, cx);
         self.activate(index, window, cx);
     }
@@ -887,8 +896,45 @@ impl Workspace {
         self.activate(index.map_or(last, |index| index.min(last)), window, cx);
     }
 
-    /// Moves a tab dragged from `from` to `to`.
+    /// The number of pinned tabs at the start of the tab bar.
+    fn pinned_count(&self) -> usize {
+        self.tabs.iter().take_while(|tab| tab.pinned).count()
+    }
+
+    /// Pins the tab at `index`: moves it to the end of the pinned group.
+    pub fn pin_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get_mut(index) else { return };
+        if tab.pinned {
+            return;
+        }
+        tab.pinned = true;
+        let pinned = self.pinned_count();
+        if index + 1 != pinned {
+            self.tabs.move_tab(index, pinned - 1);
+        }
+        cx.notify();
+    }
+
+    /// Unpins the tab at `index`: moves it to the first position after the pinned group.
+    pub fn unpin_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get_mut(index) else { return };
+        if !tab.pinned {
+            return;
+        }
+        tab.pinned = false;
+        let pinned = self.pinned_count();
+        if index != pinned {
+            self.tabs.move_tab(index, pinned);
+        }
+        cx.notify();
+    }
+
+    /// Moves a tab dragged from `from` to `to`, respecting the boundary between pinned and
+    /// unpinned tabs: a pinned tab stays among pinned, an unpinned among unpinned.
     pub fn move_tab(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+        let pinned = self.pinned_count();
+        let from_pinned = from < pinned;
+        let to = if from_pinned { to.min(pinned.saturating_sub(1)) } else { to.max(pinned) };
         self.tabs.move_tab(from, to);
         cx.notify();
     }
@@ -898,6 +944,9 @@ impl Workspace {
     /// last tab closes the window.
     pub fn close_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.tabs.get(index) else { return };
+        if tab.pinned {
+            return;
+        }
         if !tab.has_changes(cx) {
             return self.close_tab_now(index, window, cx);
         }
@@ -1074,7 +1123,7 @@ impl Workspace {
         let changed: Vec<(EntityId, String)> = self
             .tabs
             .iter()
-            .filter(|tab| tab.has_changes(cx))
+            .filter(|tab| tab.has_changes(cx) && !tab.pinned)
             .map(|tab| (tab.document.entity_id(), Self::tab_title(tab, cx)))
             .collect();
         if changed.is_empty() {
@@ -1142,23 +1191,30 @@ impl Workspace {
         windows::remember_window(tabs, self.tabs.active_index(), cx);
     }
 
-    /// Closes all tabs except the one at `keep`, asking about changes to save.
+    /// Closes all tabs except the one at `keep`, asking about changes to save; pinned tabs stay.
     pub fn close_others(&mut self, keep: usize, window: &mut Window, cx: &mut Context<Self>) {
         if keep >= self.tabs.len() {
             return;
         }
         let keep_id = self.tabs.get(keep).map(|tab| tab.document.entity_id());
-        let to_close: Vec<EntityId> =
-            self.tabs.iter().map(|tab| tab.document.entity_id()).filter(|id| Some(*id) != keep_id).collect();
+        let to_close: Vec<EntityId> = self
+            .tabs
+            .iter()
+            .filter(|tab| !tab.pinned)
+            .map(|tab| tab.document.entity_id())
+            .filter(|id| Some(*id) != keep_id)
+            .collect();
         self.close_batch(to_close, window, cx);
     }
 
-    /// Closes all tabs to the right of the one at `after`, asking about changes to save.
+    /// Closes all tabs to the right of the one at `after`, asking about changes to save; pinned
+    /// tabs stay.
     pub fn close_to_right(&mut self, after: usize, window: &mut Window, cx: &mut Context<Self>) {
         if after >= self.tabs.len() {
             return;
         }
-        let to_close: Vec<EntityId> = self.tabs.iter().skip(after + 1).map(|tab| tab.document.entity_id()).collect();
+        let to_close: Vec<EntityId> =
+            self.tabs.iter().skip(after + 1).filter(|tab| !tab.pinned).map(|tab| tab.document.entity_id()).collect();
         self.close_batch(to_close, window, cx);
     }
 
@@ -1269,6 +1325,7 @@ impl Workspace {
     ) {
         let Some(tab) = self.tabs.get(index) else { return };
         let has_path = tab.document.read(cx).path.is_some();
+        let is_pinned = tab.pinned;
         let has_others = self.tabs.len() > 1;
         let has_right = index + 1 < self.tabs.len();
         let reveal_key = if cfg!(target_os = "macos") {
@@ -1278,13 +1335,34 @@ impl Workspace {
         } else {
             Key::FileRevealLinux
         };
+        let pin_item = if is_pinned {
+            ItemSpec::Action {
+                label: tr(Key::FileUnpinTab).into(),
+                mnemonic: mnemonic(Key::FileUnpinTab),
+                keys: None,
+                checked: None,
+                enabled: true,
+                action: Box::new(UnpinTabAt(index)),
+            }
+        } else {
+            ItemSpec::Action {
+                label: tr(Key::FilePinTab).into(),
+                mnemonic: mnemonic(Key::FilePinTab),
+                keys: None,
+                checked: None,
+                enabled: true,
+                action: Box::new(PinTabAt(index)),
+            }
+        };
         let items = vec![
+            pin_item,
+            ItemSpec::Separator,
             ItemSpec::Action {
                 label: tr(Key::FileCloseTab).into(),
                 mnemonic: mnemonic(Key::FileCloseTab),
                 keys: None,
                 checked: None,
-                enabled: true,
+                enabled: !is_pinned,
                 action: Box::new(CloseTabAt(index)),
             },
             ItemSpec::Action {
@@ -1354,10 +1432,11 @@ impl Workspace {
         let tab = self.tabs.get(index)?;
         let doc = tab.document.clone();
         let encoding_chosen = tab.encoding_chosen;
+        let pinned = tab.pinned;
         let selection = Some(tab.editor.read(cx).selection());
         if self.tabs.len() == 1 {
             window.remove_window();
-            return Some(ForTab { document: doc, loading: None, selection, notice: None, encoding_chosen });
+            return Some(ForTab { document: doc, loading: None, selection, notice: None, encoding_chosen, pinned });
         }
         let was_active = index == self.tabs.active_index();
         self.tabs.remove(index);
@@ -1367,7 +1446,7 @@ impl Workspace {
         } else {
             cx.notify();
         }
-        Some(ForTab { document: doc, loading: None, selection, notice: None, encoding_chosen })
+        Some(ForTab { document: doc, loading: None, selection, notice: None, encoding_chosen, pinned })
     }
 
     /// A tab dropped on the window outside the tab bar: if from this window, tear it off into a new
@@ -1753,7 +1832,7 @@ impl Workspace {
                 let doc = tab.document.read(cx);
                 let selection = tab.pending_selection.unwrap_or_else(|| tab.editor.read(cx).selection());
                 let encoding = tab.encoding_chosen.then_some(doc.format.encoding).filter(|_| doc.path.is_some());
-                TabState { document: Some(doc.id()), path: doc.path.clone(), encoding, selection }
+                TabState { document: Some(doc.id()), path: doc.path.clone(), encoding, selection, pinned: tab.pinned }
             })
             .collect();
         let (bounds, mode, display) = self.place.clone();
@@ -2001,6 +2080,7 @@ impl Workspace {
                     tooltip: tooltip.map(SharedString::from),
                     modified: doc.is_modified(),
                     missing: tab.missing,
+                    pinned: tab.pinned,
                 }
             })
             .collect();
@@ -2078,6 +2158,7 @@ impl Tab {
             pending_selection: None,
             pending_place: None,
             notices: Vec::new(),
+            pinned: false,
             discarded: false,
             losses_checked: false,
             journal_sync: None,
