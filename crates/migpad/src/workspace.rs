@@ -18,6 +18,7 @@ use migpad_core::state::TabState;
 use migpad_core::state::session::{Rect, WindowMode, WindowState};
 use migpad_core::text::TextStore;
 use migpad_editor::{ContextMenuEvent, EditorView};
+use migpad_ui::markdown::PreviewEvent;
 use migpad_ui::notification::NotificationBar;
 use migpad_ui::{
     Button, ContextMenu, DraggedTab, ItemSpec, MarkdownPreview, MenuBar, Segmented, TabBar, TabInfo, theme,
@@ -341,7 +342,12 @@ impl Workspace {
     }
 
     /// The page of the tab at `index`, if it shows one: made, and its text read, the first time.
-    fn preview_of(&mut self, index: usize, cx: &mut Context<Self>) -> Option<Entity<MarkdownPreview>> {
+    fn preview_of(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<MarkdownPreview>> {
         let tab = self.tabs.get_mut(index)?;
         if !tab.previewing || !is_markdown(tab.document.read(cx).path.as_deref()) {
             return None;
@@ -349,8 +355,8 @@ impl Workspace {
         if let Some(preview) = &tab.preview {
             return Some(preview.clone());
         }
-        let preview = cx.new(|cx| MarkdownPreview::new(tr(Key::MarkdownDiagramError).into(), cx));
-        tab.preview = Some(preview.clone());
+        let preview = new_preview(window, cx);
+        self.tabs.get_mut(index)?.preview = Some(preview.clone());
         self.refresh_preview(index, cx);
         Some(preview)
     }
@@ -371,7 +377,7 @@ impl Workspace {
 
     /// Gives the keyboard to what the active tab shows: its page or its text.
     fn focus_content(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        match self.preview_of(self.tabs.active_index(), cx) {
+        match self.preview_of(self.tabs.active_index(), window, cx) {
             Some(preview) => window.focus(&preview.focus_handle(cx), cx),
             None => window.focus(&self.editor().focus_handle(cx), cx),
         }
@@ -2325,7 +2331,7 @@ impl Tab {
         // page is made at once, so that it has the keyboard of a new window.
         let markdown = is_markdown(document.read(cx).path.as_deref());
         let previewing = markdown && previewing.unwrap_or_else(|| !document.read(cx).is_large());
-        let preview = previewing.then(|| cx.new(|cx| MarkdownPreview::new(tr(Key::MarkdownDiagramError).into(), cx)));
+        let preview = previewing.then(|| new_preview(window, cx));
         let preview_pending = preview.as_ref().is_some_and(|preview| !fill_preview(preview, &document, cx));
         Tab {
             document,
@@ -2467,7 +2473,7 @@ impl Render for Workspace {
             None => root,
         };
         let status_bar = self.status_bar(window, cx);
-        let content = match self.preview_of(self.tabs.active_index(), cx) {
+        let content = match self.preview_of(self.tabs.active_index(), window, cx) {
             Some(preview) => preview.into_any_element(),
             None => self.editor().clone().into_any_element(),
         };
@@ -2512,6 +2518,16 @@ impl Render for Workspace {
 }
 
 /// Makes `preview` of the text of `document` as it is now; false if the file is still loading.
+/// A page for a Markdown document of this window: the files of its links open in tabs here.
+fn new_preview(window: &mut Window, cx: &mut Context<Workspace>) -> Entity<MarkdownPreview> {
+    let preview = cx.new(|cx| MarkdownPreview::new(tr(Key::MarkdownDiagramError).into(), cx));
+    cx.subscribe_in(&preview, window, |workspace, _, event: &PreviewEvent, window, cx| match event {
+        PreviewEvent::OpenFile(path) => workspace.open_paths(std::slice::from_ref(path), window, cx),
+    })
+    .detach();
+    preview
+}
+
 fn fill_preview(preview: &Entity<MarkdownPreview>, document: &Entity<Document>, cx: &mut App) -> bool {
     if document.read(cx).is_preview() {
         return false;

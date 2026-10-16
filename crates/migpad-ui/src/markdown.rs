@@ -1,7 +1,9 @@
 //! The preview of a Markdown document: its blocks laid out as a page — headings, paragraphs,
 //! lists, quotes, tables, code, images from files, Mermaid diagrams — in a list that lays out only
-//! what is in view. Its text can be selected with the mouse and copied; links are not followed, and
-//! nothing is loaded from the network.
+//! what is in view. Its text can be selected with the mouse and copied. A click on a link opens a
+//! page of the web or a letter in the programs of the system, a file in a tab, and shows one named
+//! by `file:` in the file manager; an anchor goes to its heading. The page loads nothing from the
+//! network.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -11,21 +13,22 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use gpui::{
-    AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, FocusHandle, Focusable, Font, FontStyle, FontWeight,
-    HighlightStyle, Hsla, Image, ImageFormat, ImageSource, IntoElement, IsZero, KeyBinding, ListAlignment, ListOffset,
-    ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, OngoingScroll, PinchEvent, Pixels, Point,
-    Render, ScrollHandle, ScrollWheelEvent, SharedString, Size, StrikethroughStyle, StyledImage, StyledText, Task,
-    TextLayout, TextRun, UnderlineStyle, Window, canvas, div, fill, img, list, point, prelude::*, px, relative, rgb,
-    size,
+    AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, EventEmitter, FocusHandle, Focusable, Font, FontStyle,
+    FontWeight, HighlightStyle, Hsla, Image, ImageFormat, ImageSource, InteractiveText, IntoElement, IsZero,
+    KeyBinding, ListAlignment, ListOffset, ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    OngoingScroll, PinchEvent, Pixels, Point, Render, ScrollHandle, ScrollWheelEvent, SharedString, Size,
+    StrikethroughStyle, StyledImage, StyledText, Task, TextLayout, TextRun, UnderlineStyle, Window, canvas, div, fill,
+    img, list, point, prelude::*, px, relative, rgb, size,
 };
-use migpad_core::markdown::{self, Align, Block, Inline, Item, Style, Text, mermaid};
+use migpad_core::markdown::{self, Align, Block, Inline, Item, LinkTarget, Style, Text, mermaid};
 use migpad_editor::actions::{Copy, SelectAll};
 use migpad_editor::{EditorSettings, system_font};
 
 use crate::theme::{Appearance, Theme, theme};
+use crate::tooltip::Tooltip;
 
 const CONTEXT: &str = "MarkdownPreview";
 
@@ -57,6 +60,15 @@ pub fn init(cx: &mut App) {
         cx.bind_keys([KeyBinding::new("ctrl-insert", Copy, Some(CONTEXT))]);
     }
 }
+
+/// What the preview asks of the window it is in.
+pub enum PreviewEvent {
+    /// To open in a tab the file of a link.
+    OpenFile(PathBuf),
+}
+
+/// How soon a link followed again is the click of the same double click, which opens it once.
+const DOUBLE_CLICK: Duration = Duration::from_millis(600);
 
 /// A place in the text of the preview: a segment — a run of text drawn as one — and a byte in it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -125,6 +137,8 @@ pub struct MarkdownPreview {
     dragging: Option<Drag>,
     /// The direction a gesture of the trackpad started in, which it keeps to over an area.
     gesture: OngoingScroll,
+    /// The link followed last, and when.
+    followed: Option<(String, Instant)>,
     reading: Option<Task<()>>,
 }
 
@@ -159,6 +173,7 @@ impl MarkdownPreview {
             diagram_places: Rc::default(),
             dragging: None,
             gesture: OngoingScroll::default(),
+            followed: None,
             reading: None,
         }
     }
@@ -219,7 +234,7 @@ impl MarkdownPreview {
             }
             keep
         });
-        let files: Vec<PathBuf> = urls.iter().filter_map(|url| markdown::image_file(url, folder)).collect();
+        let files: Vec<PathBuf> = urls.iter().filter_map(|url| markdown::local_file(url, folder)).collect();
         let mut changed = Vec::new();
         self.pictures.retain(|path, picture| {
             let keep = files.contains(path);
@@ -294,6 +309,55 @@ impl MarkdownPreview {
         if let Some(last) = self.segments.len().checked_sub(1) {
             self.selection = Some((Place::default(), Place { segment: last, offset: self.segments[last].len() }));
             cx.notify();
+        }
+    }
+
+    /// Follows the link `url`: a page of the web or a letter opens in its program of the system; a
+    /// file of text in a tab, another file or a folder in the file manager, as one a `file:` URL
+    /// names does; an anchor goes to its heading. A link of another scheme leads nowhere: it could
+    /// start any program.
+    fn follow(&mut self, url: &str, cx: &mut Context<Self>) {
+        let now = Instant::now();
+        if let Some((last, at)) = &self.followed
+            && last == url
+            && now.duration_since(*at) < DOUBLE_CLICK
+        {
+            return;
+        }
+        self.followed = Some((url.to_owned(), now));
+        match markdown::link_target(url, self.folder.as_deref()) {
+            Some(LinkTarget::Web(url)) => cx.open_url(&url),
+            Some(LinkTarget::Reveal(path)) => cx.reveal_path(&path),
+            Some(LinkTarget::File(path)) if is_text_file(&path) => cx.emit(PreviewEvent::OpenFile(path)),
+            Some(LinkTarget::File(path)) if path.exists() => cx.reveal_path(&path),
+            Some(LinkTarget::Heading(anchor)) => self.go_to_heading(&anchor, cx),
+            Some(LinkTarget::File(_)) | None => {}
+        }
+    }
+
+    /// Scrolls the page to the heading of the anchor `anchor`, named as GitHub names them: of two
+    /// headings of the same text, the second has `-1` after its name.
+    fn go_to_heading(&mut self, anchor: &str, cx: &mut Context<Self>) {
+        let anchor = anchor.to_lowercase();
+        let mut seen: HashMap<String, usize> = HashMap::new();
+        for (index, block) in self.blocks.iter().enumerate() {
+            let Block::Heading { content, .. } = block else { continue };
+            let text: String = content
+                .iter()
+                .filter_map(|inline| match inline {
+                    Inline::Text(text) => Some(text.text.as_str()),
+                    Inline::Image { .. } => None,
+                })
+                .collect();
+            let slug = markdown::slug(&text);
+            let count = seen.entry(slug.clone()).or_default();
+            let name = if *count == 0 { slug } else { format!("{slug}-{count}") };
+            *count += 1;
+            if name == anchor {
+                self.list.scroll_to(ListOffset { item_ix: index, offset_in_item: px(0.) });
+                cx.notify();
+                return;
+            }
         }
     }
 
@@ -764,7 +828,7 @@ impl MarkdownPreview {
 
     /// Text with its styles; a segment, if `segment` is its number, with the part of the selection
     /// in it, which the mouse can find once it is painted.
-    fn text(&self, text: &Text, segment: Option<usize>, cx: &App) -> AnyElement {
+    fn text(&self, text: &Text, segment: Option<usize>, cx: &Context<Self>) -> AnyElement {
         let theme = theme(cx);
         let selected = segment.and_then(|segment| self.selected_in(segment, &text.text));
         let selection = if self.focused { theme.editor.selection } else { theme.editor.selection_inactive };
@@ -790,12 +854,39 @@ impl MarkdownPreview {
         // done for every element before any paints.
         let (layouts, layout) = (self.layouts.clone(), styled.layout().clone());
         let found = canvas(|_, _, _| {}, move |_, _, _, _| layouts.borrow_mut().push((segment, layout)));
+        let styled = if text.links.is_empty() {
+            styled.into_any_element()
+        } else {
+            // Its links are clicked; the pointer over them is a hand, and a tooltip tells where
+            // they lead.
+            let ranges: Vec<Range<usize>> = text.links.iter().map(|link| link.range.clone()).collect();
+            let urls: Rc<[String]> = text.links.iter().map(|link| link.url.clone()).collect();
+            let (told, within) = (urls.clone(), ranges.clone());
+            let preview = cx.weak_entity();
+            InteractiveText::new(("text", segment), styled)
+                .on_click(ranges, move |index, _, cx| {
+                    if let Some(url) = urls.get(index) {
+                        let _ = preview.update(cx, |preview, cx| preview.follow(url, cx));
+                    }
+                })
+                .tooltip(move |at, window, cx| {
+                    let index = within.iter().position(|range| range.contains(&at))?;
+                    Some(Tooltip::builder(shorten(&told[index]), None)(window, cx))
+                })
+                .into_any_element()
+        };
         div().relative().child(styled).child(found.absolute().size_0()).into_any_element()
     }
 
     /// Code on a background of its own — the first lines of a long one — with what is wrong with
     /// it if `error` tells; its text a segment if `segment` is its number, and then the next.
-    fn code_block(&self, code: &str, error: Option<&str>, segment: Option<&mut usize>, cx: &App) -> AnyElement {
+    fn code_block(
+        &self,
+        code: &str,
+        error: Option<&str>,
+        segment: Option<&mut usize>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
         let theme = theme(cx);
         let code = code.strip_suffix('\n').unwrap_or(code);
         let shown = match code.match_indices('\n').nth(CODE_LINES - 1) {
@@ -828,7 +919,7 @@ impl MarkdownPreview {
         let theme = theme(cx);
         let alt = SharedString::from(if alt.is_empty() { url.to_owned() } else { alt.to_owned() });
         let missing = move || div().text_color(rgb(theme.text_muted)).child(format!("[{alt}]")).into_any_element();
-        let Some(path) = markdown::image_file(url, self.folder.as_deref()) else { return missing() };
+        let Some(path) = markdown::local_file(url, self.folder.as_deref()) else { return missing() };
         match self.pictures.get(&path) {
             Some(Picture::Read(image, _)) => img(image.clone()).max_w_full().with_fallback(missing).into_any_element(),
             Some(Picture::Refused(_)) => missing(),
@@ -975,6 +1066,8 @@ impl MarkdownPreview {
             .into_any_element()
     }
 }
+
+impl EventEmitter<PreviewEvent> for MarkdownPreview {}
 
 impl Focusable for MarkdownPreview {
     fn focus_handle(&self, _: &App) -> FocusHandle {
@@ -1137,6 +1230,28 @@ fn wide(c: char) -> bool {
     matches!(c,
         '\u{1100}'..='\u{11FF}' | '\u{2E80}'..='\u{A4CF}' | '\u{AC00}'..='\u{D7AF}' | '\u{F900}'..='\u{FAFF}'
         | '\u{FE30}'..='\u{FE4F}' | '\u{FF00}'..='\u{FFEF}' | '\u{20000}'..='\u{3FFFD}')
+}
+
+/// Whether `path` is a plain file of text: none of its first bytes is zero, as in files of other
+/// kinds, unless it starts as text in UTF-16 does. A file that is not plain — a pipe, a device —
+/// is not opened, which would wait for a writer or read forever.
+fn is_text_file(path: &Path) -> bool {
+    let plain = std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file());
+    let Some(file) = plain.then(|| std::fs::File::open(path).ok()).flatten() else { return false };
+    let mut head = Vec::with_capacity(8192);
+    if file.take(8192).read_to_end(&mut head).is_err() {
+        return false;
+    }
+    head.starts_with(&[0xFF, 0xFE]) || head.starts_with(&[0xFE, 0xFF]) || !head.contains(&0)
+}
+
+/// `url` for a tooltip: no longer than a line.
+fn shorten(url: &str) -> String {
+    const MOST: usize = 120;
+    match url.char_indices().nth(MOST) {
+        Some((at, _)) => format!("{}…", &url[..at]),
+        None => url.to_owned(),
+    }
 }
 
 /// Whether the wheel enlarges a diagram: with Cmd on macOS, Ctrl on Windows and Linux.
@@ -1325,7 +1440,11 @@ fn highlight(style: Style, theme: &Theme) -> HighlightStyle {
 
 /// Text of one style, as code is.
 fn plain(text: &str) -> Text {
-    Text { text: text.to_owned(), runs: vec![markdown::Run { range: 0..text.len(), style: Style::default() }] }
+    Text {
+        text: text.to_owned(),
+        runs: vec![markdown::Run { range: 0..text.len(), style: Style::default() }],
+        links: Vec::new(),
+    }
 }
 
 fn color(rgb_value: u32) -> Hsla {

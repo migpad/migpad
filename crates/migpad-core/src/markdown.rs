@@ -71,11 +71,20 @@ pub enum Inline {
     },
 }
 
-/// Text and the styles of its parts: the runs follow each other and cover it whole.
+/// Text and the styles of its parts: the runs follow each other and cover it whole. Its links are
+/// parts of it too, with where they lead.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Text {
     pub text: String,
     pub runs: Vec<Run>,
+    pub links: Vec<Link>,
+}
+
+/// A link: its text, as a byte range, and where it leads, as it is written.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Link {
+    pub range: Range<usize>,
+    pub url: String,
 }
 
 /// A part of a text with one style, as a byte range.
@@ -93,7 +102,7 @@ pub struct Style {
     pub strikethrough: bool,
     /// Inline code.
     pub code: bool,
-    /// The text of a link, which is not followed.
+    /// The text of a link.
     pub link: bool,
 }
 
@@ -151,7 +160,8 @@ struct Inlines {
     strong: usize,
     emphasis: usize,
     strikethrough: usize,
-    link: usize,
+    /// The links open: where each starts in the text, and where it leads.
+    links: Vec<(usize, String)>,
     /// An image being read: where it is, and its text so far.
     image: Option<(String, String)>,
 }
@@ -163,7 +173,7 @@ impl Inlines {
             emphasis: self.emphasis > 0,
             strikethrough: self.strikethrough > 0,
             code,
-            link: self.link > 0,
+            link: !self.links.is_empty(),
         }
     }
 
@@ -179,7 +189,18 @@ impl Inlines {
 
     fn flush_text(&mut self) {
         if !self.text.text.is_empty() {
+            // The links open go on in the text that follows.
+            for (start, url) in &mut self.links {
+                close_link(&mut self.text, *start, url.clone());
+                *start = 0;
+            }
             self.inlines.push(Inline::Text(std::mem::take(&mut self.text)));
+        }
+    }
+
+    fn end_link(&mut self) {
+        if let Some((start, url)) = self.links.pop() {
+            close_link(&mut self.text, start, url);
         }
     }
 
@@ -299,7 +320,9 @@ impl Builder {
             Tag::Emphasis => self.with_inlines(|inlines| inlines.emphasis += 1),
             Tag::Strong => self.with_inlines(|inlines| inlines.strong += 1),
             Tag::Strikethrough => self.with_inlines(|inlines| inlines.strikethrough += 1),
-            Tag::Link { .. } => self.with_inlines(|inlines| inlines.link += 1),
+            Tag::Link { dest_url, .. } => {
+                self.with_inlines(|inlines| inlines.links.push((inlines.text.text.len(), dest_url.into_string())))
+            }
             Tag::Image { dest_url, .. } => self.with_inlines(|inlines| {
                 inlines.flush_text();
                 inlines.image = Some((dest_url.into_string(), String::new()));
@@ -394,7 +417,7 @@ impl Builder {
             TagEnd::Strikethrough => {
                 self.with_inlines(|inlines| inlines.strikethrough = inlines.strikethrough.saturating_sub(1))
             }
-            TagEnd::Link => self.with_inlines(|inlines| inlines.link = inlines.link.saturating_sub(1)),
+            TagEnd::Link => self.with_inlines(Inlines::end_link),
             TagEnd::Image => self.with_inlines(|inlines| {
                 if let Some((url, alt)) = inlines.image.take() {
                     inlines.inlines.push(Inline::Image { url, alt });
@@ -490,10 +513,10 @@ impl Builder {
     }
 }
 
-/// The file of an image, by its URL as written in a document in `folder`: a path relative to the
-/// folder or an absolute one, or a `file:` URL, percent escapes decoded. `None` for an image
-/// anywhere else — on the network, in the URL itself — which is not loaded.
-pub fn image_file(url: &str, folder: Option<&Path>) -> Option<PathBuf> {
+/// The file of an image or of a link, by its URL as written in a document in `folder`: a path
+/// relative to the folder or an absolute one, or a `file:` URL, percent escapes decoded. `None` for
+/// one anywhere else — on the network, in the URL itself — which is not read.
+pub fn local_file(url: &str, folder: Option<&Path>) -> Option<PathBuf> {
     let url = url.trim();
     let path = match url.strip_prefix("file://") {
         Some(rest) => {
@@ -519,6 +542,60 @@ pub fn image_file(url: &str, folder: Option<&Path>) -> Option<PathBuf> {
     }
     let path = PathBuf::from(path);
     if path.is_absolute() { Some(path) } else { Some(folder?.join(path)) }
+}
+
+/// Where a link of a document leads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LinkTarget {
+    /// A page of the web or a letter, which programs of the system open.
+    Web(String),
+    /// A file or a folder of this computer, named by a `file:` URL: the file manager shows it.
+    Reveal(PathBuf),
+    /// A file or a folder by its path, relative to the document or not.
+    File(PathBuf),
+    /// A heading of the document, by its anchor.
+    Heading(String),
+}
+
+/// Where the link `url` of a document in `folder` leads; `None` for a link of another kind — a
+/// scheme other than `http:`, `https:`, `mailto:` and `file:` could start any program — or to a
+/// file of another computer.
+pub fn link_target(url: &str, folder: Option<&Path>) -> Option<LinkTarget> {
+    let url = url.trim();
+    if let Some(anchor) = url.strip_prefix('#') {
+        return Some(LinkTarget::Heading(decode_percent(anchor)?));
+    }
+    if !has_scheme(url) {
+        return local_file(url, folder).map(LinkTarget::File);
+    }
+    let scheme = url.split(':').next().unwrap_or_default().to_ascii_lowercase();
+    match scheme.as_str() {
+        "http" | "https" | "mailto" => Some(LinkTarget::Web(url.to_owned())),
+        "file" => local_file(url, None).map(LinkTarget::Reveal),
+        _ => None,
+    }
+}
+
+/// The anchor of a heading of the text `text`, as GitHub makes it: in lower case, its spaces
+/// hyphens, without punctuation and symbols but the hyphen and the underscore.
+pub fn slug(text: &str) -> String {
+    text.trim()
+        .to_lowercase()
+        .chars()
+        .filter_map(|c| match c {
+            ' ' => Some('-'),
+            '-' | '_' => Some(c),
+            c if c.is_alphanumeric() => Some(c),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The link of `text` from `start` to its end, if it has any of it.
+fn close_link(text: &mut Text, start: usize, url: String) {
+    if start < text.text.len() {
+        text.links.push(Link { range: start..text.text.len(), url });
+    }
 }
 
 /// Whether `url` starts with a scheme, as `https:` or `data:` do; a drive letter, as in `C:\`, is
@@ -580,7 +657,11 @@ mod tests {
     use super::*;
 
     fn plain(text: &str) -> Inline {
-        Inline::Text(Text { text: text.to_owned(), runs: vec![Run { range: 0..text.len(), style: Style::default() }] })
+        Inline::Text(Text {
+            text: text.to_owned(),
+            runs: vec![Run { range: 0..text.len(), style: Style::default() }],
+            links: Vec::new(),
+        })
     }
 
     #[test]
@@ -619,6 +700,67 @@ mod tests {
                 ("f", Style { link: true, ..Style::default() }),
             ]
         );
+    }
+
+    #[test]
+    fn links_lead_where_they_are_written() {
+        let blocks = parse("see [the *doc*](a.md#x), <https://example.com> or [mail](mailto:a@b)");
+        let [Block::Paragraph(content)] = &blocks[..] else { panic!("one paragraph: {blocks:?}") };
+        let [Inline::Text(text)] = &content[..] else { panic!("one text: {content:?}") };
+        let links: Vec<(&str, &str)> =
+            text.links.iter().map(|link| (&text.text[link.range.clone()], link.url.as_str())).collect();
+        assert_eq!(
+            links,
+            [("the doc", "a.md#x"), ("https://example.com", "https://example.com"), ("mail", "mailto:a@b")]
+        );
+        // An image in a link parts its text: the link goes on after it.
+        let blocks = parse("[before ![i](x.png) after](https://l) out");
+        let [Block::Paragraph(content)] = &blocks[..] else { panic!("one paragraph: {blocks:?}") };
+        let [Inline::Text(before), Inline::Image { .. }, Inline::Text(after)] = &content[..] else {
+            panic!("text, image, text: {content:?}")
+        };
+        assert_eq!(before.links, [Link { range: 0..7, url: "https://l".to_owned() }]);
+        assert_eq!(after.text, " after out");
+        assert_eq!(after.links, [Link { range: 0..6, url: "https://l".to_owned() }]);
+    }
+
+    #[test]
+    fn links_lead_to_the_web_files_and_headings_only() {
+        let folder = Path::new(if cfg!(windows) { r"C:\docs" } else { "/docs" });
+        let target = |url| link_target(url, Some(folder));
+        assert_eq!(target("#Связь-флоу"), Some(LinkTarget::Heading("Связь-флоу".to_owned())));
+        assert_eq!(target("#%D1%84"), Some(LinkTarget::Heading("ф".to_owned())));
+        for url in ["https://a/b?c#d", "HTTP://A", "mailto:a@b"] {
+            assert_eq!(target(url), Some(LinkTarget::Web(url.to_owned())), "{url}");
+        }
+        assert_eq!(target("01-deposit.md"), Some(LinkTarget::File(folder.join("01-deposit.md"))));
+        assert_eq!(target("../flows/a%20b.md#top"), Some(LinkTarget::File(folder.join("../flows/a b.md"))));
+        for url in [
+            "javascript:alert(1)",
+            "zoommtg://zoom.us/join",
+            "vscode://file/a",
+            "data:text/html,a",
+            "file:relative.txt",
+            "file://host/share/a",
+            "//host/share/a",
+            r"\\host\share\a",
+            "",
+        ] {
+            assert_eq!(target(url), None, "{url}");
+        }
+        if cfg!(windows) {
+            assert_eq!(target("file:///D:/a%20b.txt"), Some(LinkTarget::Reveal(PathBuf::from("D:/a b.txt"))));
+        } else {
+            assert_eq!(target("file:///tmp/a%20b.txt"), Some(LinkTarget::Reveal(PathBuf::from("/tmp/a b.txt"))));
+        }
+    }
+
+    #[test]
+    fn anchors_of_headings_as_github_makes_them() {
+        assert_eq!(slug("Связь флоу"), "связь-флоу");
+        assert_eq!(slug("F-ING.1 — Общая схема"), "f-ing1--общая-схема");
+        assert_eq!(slug(" Hello, World! "), "hello-world");
+        assert_eq!(slug("snake_case and `code`"), "snake_case-and-code");
     }
 
     #[test]
@@ -699,7 +841,8 @@ mod tests {
                     vec![plain("1")],
                     vec![Inline::Text(Text {
                         text: "2".to_owned(),
-                        runs: vec![Run { range: 0..1, style: Style { strong: true, ..Style::default() } }]
+                        runs: vec![Run { range: 0..1, style: Style { strong: true, ..Style::default() } }],
+                        links: Vec::new(),
                     })],
                     vec![],
                 ]],
@@ -726,11 +869,11 @@ mod tests {
     #[test]
     fn images_come_from_files_only() {
         let folder = Path::new(if cfg!(windows) { r"C:\docs" } else { "/docs" });
-        let file = |url| image_file(url, Some(folder));
+        let file = |url| local_file(url, Some(folder));
         assert_eq!(file("img/a.png"), Some(folder.join("img/a.png")));
         assert_eq!(file("./my%20logo.png?raw=true#top"), Some(folder.join("./my logo.png")));
         assert_eq!(file("%D0%BB%D0%BE%D0%B3%D0%BE.png"), Some(folder.join("лого.png")));
-        assert_eq!(image_file("a.png", None), None);
+        assert_eq!(local_file("a.png", None), None);
         for url in [
             "https://example.com/a.png",
             "http://a/b.png",
