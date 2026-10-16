@@ -542,8 +542,10 @@ impl<P: LinuxClient + 'static> Platform for LinuxPlatform<P> {
                             .expect("pathbuf should not be nul terminated");
 
                     if let Some(suggested_name) = suggested_name {
-                        // MigPad: the type of the suggested name first, chosen, and all files: KDE
-                        // hides the extension of the name and, without a type, never adds it back.
+                        // MigPad: the type of the suggested name first, chosen, and all files. KDE
+                        // shows the suggested name without its extension and, with no type chosen,
+                        // saved the file so; with one, it adds the extension of the type to a name
+                        // that does not end with it, unless all files are chosen.
                         let extension = Path::new(&suggested_name)
                             .extension()
                             .and_then(|extension| extension.to_str());
