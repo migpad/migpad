@@ -16,6 +16,12 @@ targets = [
 # Vulnerabilities fail the check anywhere in the tree. Unmaintained crates fail it only
 # as direct dependencies: transitive ones come with GPUI and are updated together with it.
 unmaintained = "workspace"
+ignore = [
+    # ttf-parser is unmaintained. The core measures the text of Mermaid diagrams with it in the fonts GPUI draws
+    # them in; GPUI parses the same fonts with the same version — its SVG renderer, its text system — and the crate
+    # goes when GPUI moves off it.
+    { id = "RUSTSEC-2026-0192", reason = "the font parser of GPUI, which measures diagram text as GPUI draws it" },
+]
 
 [licenses]
 # Permissive licenses compatible with MIT. MPL-2.0 and EPL-2.0 are weak file-level copyleft:
