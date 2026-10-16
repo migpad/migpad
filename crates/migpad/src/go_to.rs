@@ -104,7 +104,8 @@ pub fn confirm(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<
         });
         return;
     };
-    go_to(workspace, line - 1, column.map_or(0, |column| column - 1), window, cx);
+    // In a file still loading, a line past the beginning shown is gone to once it has loaded.
+    workspace.go_to_line(line - 1, column.map_or(0, |column| column - 1), window, cx);
     workspace.hide_go_to_bar(cx);
     window.focus(&workspace.editor().focus_handle(cx), cx);
 }

@@ -52,6 +52,26 @@ pub fn open_options() -> PathPromptOptions {
 /// How often the status bar shows how far a file has loaded.
 const PROGRESS_TICK: Duration = Duration::from_millis(100);
 
+/// What the view of a file that is loading is to do once it has loaded, and its selection when
+/// that was asked: if the selection has moved since — the user has clicked or pressed keys — the
+/// user has gone elsewhere, and it is not done.
+#[derive(Clone, Copy)]
+struct Pending<T> {
+    what: T,
+    since: Selection,
+}
+
+impl<T: Copy> Pending<T> {
+    fn new(what: T, editor: &Entity<EditorView>, cx: &App) -> Self {
+        Pending { what, since: editor.read(cx).selection() }
+    }
+
+    /// What is to be done, unless the selection of `editor` has moved.
+    fn still(&self, editor: &Entity<EditorView>, cx: &App) -> Option<T> {
+        (editor.read(cx).selection() == self.since).then_some(self.what)
+    }
+}
+
 /// A document in a tab of the window, and its view.
 pub struct Tab {
     pub document: Entity<Document>,
@@ -62,10 +82,10 @@ pub struct Tab {
     loading: Option<Loading>,
     /// Where the view puts the selection once the file has loaded: that of a reopened tab, which
     /// the beginning shown while loading may not reach.
-    pending_selection: Option<Selection>,
+    pending_selection: Option<Pending<Selection>>,
     /// Where the caret goes once the file has loaded: a line and a column, from zero, that the
-    /// command line gave.
-    pending_place: Option<(usize, usize)>,
+    /// command line or Go to Line gave, beyond the beginning shown while loading.
+    pending_place: Option<Pending<(usize, usize)>>,
     /// Notifications over the text, each with its number in the window.
     notices: Vec<(u64, Notice)>,
     /// Whether its changes are to be dropped: the question on closing it was answered so.
@@ -498,8 +518,7 @@ impl Workspace {
         }
     }
 
-    /// Puts the caret of the tab at `index` at `column` of `line`, both from zero, the tab shown: at
-    /// once, or once its file has loaded — the beginning shown meanwhile may not reach that line.
+    /// Puts the caret of the tab at `index` at `column` of `line`, both from zero, the tab shown.
     pub fn go_to_place(
         &mut self,
         index: usize,
@@ -509,10 +528,20 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.activate(index, window, cx);
+        self.go_to_line(line, column, window, cx);
+    }
+
+    /// Puts the caret of the active tab at `column` of `line`, both from zero: at once, or once its
+    /// file has loaded if the beginning shown meanwhile does not have that line whole.
+    pub fn go_to_line(&mut self, line: usize, column: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let index = self.tabs.active_index();
         let Some(tab) = self.tabs.get_mut(index) else { return };
-        if tab.document.read(cx).is_preview() {
-            tab.pending_place = Some((line, column));
-            tab.pending_selection = None;
+        // Where the view was to go once the file has loaded, it goes here instead.
+        tab.pending_selection = None;
+        tab.pending_place = None;
+        let doc = tab.document.read(cx);
+        if doc.is_preview() && line + 1 >= doc.lines().count() {
+            tab.pending_place = Some(Pending::new((line, column), &tab.editor, cx));
             return;
         }
         go_to::go_to(self, line, column, window, cx);
@@ -619,7 +648,7 @@ impl Workspace {
             && let Some(tab) = self.tabs.get_mut(index)
         {
             if tab.document.read(cx).is_preview() {
-                tab.pending_selection = Some(selection);
+                tab.pending_selection = Some(Pending::new(selection, &tab.editor, cx));
             } else {
                 tab.editor.update(cx, |editor, cx| editor.select(selection, window, cx));
             }
@@ -1785,7 +1814,7 @@ impl Workspace {
             Some(encoding) => OpenAs::Encoding(encoding),
             None => OpenAs::Detect { tld: None },
         };
-        let selection = tab.pending_selection.unwrap_or_else(|| tab.editor.read(cx).selection());
+        let selection = tab.kept_selection(cx);
         let changes = tab.has_changes(cx);
         let document = changes.then(|| tab.document.clone());
         let kept = tab.encoding_chosen.then_some(doc.format.encoding);
@@ -1962,7 +1991,7 @@ impl Workspace {
             .iter()
             .map(|tab| {
                 let doc = tab.document.read(cx);
-                let selection = tab.pending_selection.unwrap_or_else(|| tab.editor.read(cx).selection());
+                let selection = tab.kept_selection(cx);
                 let encoding = tab.encoding_chosen.then_some(doc.format.encoding).filter(|_| doc.path.is_some());
                 TabState { document: Some(doc.id()), path: doc.path.clone(), encoding, selection, pinned: tab.pinned }
             })
@@ -2016,15 +2045,18 @@ impl Workspace {
     fn document_changed(&mut self, document: EntityId, window: &mut Window, cx: &mut Context<Self>) {
         self.revision += 1;
         if let Some(index) = self.tab_of(document) {
-            // A reopened tab goes back to where it was once its file has loaded.
+            // A reopened tab goes back to where it was once its file has loaded, and the caret to
+            // the place it was sent to — unless the selection has moved meanwhile.
             let tab = self.tabs.get_mut(index).expect("found above");
-            if !tab.document.read(cx).is_preview()
-                && let Some(selection) = tab.pending_selection.take()
+            let loaded = !tab.document.read(cx).is_preview();
+            if loaded
+                && let Some(selection) = tab.pending_selection.take().and_then(|pending| pending.still(&tab.editor, cx))
             {
                 tab.editor.update(cx, |editor, cx| editor.select(selection, window, cx));
             }
-            if !tab.document.read(cx).is_preview()
-                && let Some((line, column)) = tab.pending_place.take()
+            if loaded
+                && let Some((line, column)) =
+                    tab.pending_place.take().and_then(|pending| pending.still(&tab.editor, cx))
             {
                 let editor = tab.editor.clone();
                 let pos = editor.read(cx).position_at(line, column, cx);
@@ -2377,6 +2409,13 @@ impl Tab {
         closed
     }
 
+    /// The selection the tab is to have: that it is to go back to once its file has loaded, or
+    /// that of its view.
+    fn kept_selection(&self, cx: &App) -> Selection {
+        let pending = self.pending_selection.and_then(|pending| pending.still(&self.editor, cx));
+        pending.unwrap_or_else(|| self.editor.read(cx).selection())
+    }
+
     /// What is kept of the tab once it is closed: the document, if it has changes to save.
     fn closed(&self, cx: &App) -> ClosedTab {
         let doc = self.document.read(cx);
@@ -2385,7 +2424,7 @@ impl Tab {
             journal: None,
             path: doc.path.clone(),
             encoding: self.encoding_chosen.then_some(doc.format.encoding).filter(|_| doc.path.is_some()),
-            selection: self.pending_selection.unwrap_or_else(|| self.editor.read(cx).selection()),
+            selection: self.kept_selection(cx),
             pinned: self.pinned,
         }
     }
