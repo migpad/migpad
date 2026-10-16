@@ -28,13 +28,15 @@ pub(super) fn add_web_links<'a>(source: &'a str, events: Vec<(Event<'a>, Range<u
     let mut i = 0;
     while i < events.len() {
         let (event, range) = &events[i];
+        // The rest of a text after an address is as it is written: that is known.
         if let Event::Text(text) = event
             && inside == 0
-            && is_raw(source, text, range)
+            && (from.is_some() || is_raw(source, text, range))
         {
             let start = from.take().unwrap_or(range.start);
             let first = (start == range.start && line_start).then_some(start);
-            let Some(link) = next_web_link(source, start..range.end, first, &events[i + 1..], &mut brackets) else {
+            let found = next_web_link(source, start..range.end, range.start, first, &events[i + 1..], &mut brackets);
+            let Some(link) = found else {
                 if start < range.end {
                     out.push(Event::Text(CowStr::Borrowed(&source[start..range.end])));
                 }
@@ -122,27 +124,33 @@ enum After {
     Event,
 }
 
-/// The first web address that starts within the text at `text` of the source; `first` is the
-/// start of the text if nothing stands before it. `brackets` counts the brackets open.
+/// The first web address that starts within the text at `text` of the source, which is the rest of
+/// a text from `event_start`; `first` is the start of the text if nothing stands before it.
+/// `brackets` counts the brackets open.
 fn next_web_link(
     source: &str,
     text: Range<usize>,
+    event_start: usize,
     first: Option<usize>,
     events: &[(Event, Range<usize>)],
     brackets: &mut usize,
 ) -> Option<WebLink> {
+    // An escaped character starts a text of its own, after the backslash: one not escaped itself.
+    let escaped =
+        |at: usize| at == event_start && source[..at].bytes().rev().take_while(|&b| b == b'\\').count() % 2 == 1;
     for (offset, c) in source[text.clone()].char_indices() {
         let at = text.start + offset;
         match c {
-            // An escaped bracket comes as a text of its own, after the backslash.
-            '[' if !(at == text.start && source[..at].ends_with('\\')) => *brackets += 1,
-            ']' => *brackets = brackets.saturating_sub(1),
+            '[' if !escaped(at) => *brackets += 1,
+            ']' if !escaped(at) => *brackets = brackets.saturating_sub(1),
             'h' | 'H' | 'w' if *brackets == 0 => {
                 let before = if Some(at) == first { None } else { source[..at].chars().next_back() };
                 if let Some(domain) = web_domain(&source[at..], before) {
-                    let (text, passed, after) = reach(source, at, text.end, events);
-                    let end = trim_end(&text);
+                    let reach = reach(source, at, text.end, events);
+                    // Trimmed as it is written: `&amp;` at its end is an entity, not `&`.
+                    let end = reach.shown(trim_end(&source[at..at + reach.written()]));
                     if end > domain {
+                        let Reach { text, passed, after, .. } = reach;
                         return Some(WebLink { start: at, text, end, passed, after });
                     }
                 }
@@ -181,45 +189,84 @@ fn web_domain(text: &str, before: Option<char>) -> Option<usize> {
 /// event it cannot cover: the end of a paragraph or a cell, the end of emphasis that started
 /// before it, an element with a space — with how many events after the text it covers, and what
 /// comes after them. Emphasis, code and links within it are its text as they are written.
-fn reach(source: &str, at: usize, text_end: usize, events: &[(Event, Range<usize>)]) -> (String, usize, After) {
+fn reach(source: &str, at: usize, text_end: usize, events: &[(Event, Range<usize>)]) -> Reach {
     let stops = |c: char| c.is_whitespace() || c == '<';
+    let mut reach = Reach { text: String::new(), pieces: Vec::new(), passed: 0, after: After::Event };
     if let Some(stop) = source[at..text_end].find(stops) {
-        return (source[at..at + stop].to_owned(), 0, After::Here);
+        reach.push(0..stop, &source[at..at + stop]);
+        reach.after = After::Here;
+        return reach;
     }
-    let mut text = source[at..text_end].to_owned();
+    reach.push(0..text_end - at, &source[at..text_end]);
     let mut end = text_end;
-    let mut j = 0;
-    while let Some((event, range)) = events.get(j) {
+    while let Some((event, range)) = events.get(reach.passed) {
         // Between them, a backslash that escapes what follows.
         if range.start < end || source[end..range.start].contains(stops) {
             break;
         }
         match event {
-            Event::Text(written) => match written.find(stops) {
-                Some(stop) if is_raw(source, written, range) => {
-                    text.push_str(&written[..stop]);
-                    return (text, j, After::Text(range.start + stop));
+            Event::Text(shown) => match shown.find(stops) {
+                Some(stop) if is_raw(source, shown, range) => {
+                    reach.push(end - at..range.start + stop - at, &shown[..stop]);
+                    reach.after = After::Text(range.start + stop);
+                    return reach;
                 }
                 Some(_) => break,
-                None => {
-                    text.push_str(written);
-                    end = range.end;
-                    j += 1;
-                }
+                None => reach.push(end - at..range.end - at, shown),
             },
             Event::Code(_)
             | Event::Start(Tag::Emphasis | Tag::Strong | Tag::Strikethrough | Tag::Link { .. } | Tag::Image { .. }) => {
                 if source[range.clone()].contains(stops) {
                     break;
                 }
-                text.push_str(&source[range.clone()]);
-                end = range.end;
-                j += if let Event::Code(_) = event { 1 } else { past_end(&events[j..]) };
+                reach.push(end - at..range.end - at, &source[range.clone()]);
+                if !matches!(event, Event::Code(_)) {
+                    reach.passed += past_end(&events[reach.passed..]) - 1;
+                }
             }
             _ => break,
         }
+        end = range.end;
+        reach.passed += 1;
     }
-    (text, j, After::Event)
+    reach
+}
+
+/// The text from the start of a web address to where it may reach.
+struct Reach {
+    /// As it shows: entities and escapes read.
+    text: String,
+    /// Its pieces, by where they are in the source from the start of the address and in `text`:
+    /// an entity or an escape is not as long as it is written.
+    pieces: Vec<(Range<usize>, Range<usize>)>,
+    /// How many events after the text of its start it covers.
+    passed: usize,
+    after: After,
+}
+
+impl Reach {
+    fn push(&mut self, written: Range<usize>, shown: &str) {
+        let start = self.text.len();
+        self.text.push_str(shown);
+        self.pieces.push((written, start..self.text.len()));
+    }
+
+    /// How long it is as it is written.
+    fn written(&self) -> usize {
+        self.pieces.last().map_or(0, |(written, _)| written.end)
+    }
+
+    /// How much of `text` shows the first `written` bytes of the source: of an entity or an escape
+    /// cut short, nothing.
+    fn shown(&self, written: usize) -> usize {
+        for (piece, shown) in &self.pieces {
+            if written < piece.end {
+                let exact = piece.len() == shown.len();
+                return if exact { shown.start + written.saturating_sub(piece.start) } else { shown.start };
+            }
+        }
+        self.text.len()
+    }
 }
 
 /// How many events the element that starts the `events` takes, its end included.
@@ -464,8 +511,10 @@ mod tests {
         assert_eq!(links(url), [web(url)]);
         assert_eq!(links("www.google.com/search?q=commonmark&hl;"), [web("www.google.com/search?q=commonmark")]);
         assert_eq!(links("www.a.b/c;"), [web("www.a.b/c")]);
-        // An entity that is one reads as its character.
+        // An entity that is one reads as its character; at the end, it is trimmed as written.
         assert_eq!(links("www.a.b/?q=1&amp;hl=en"), [web("www.a.b/?q=1&hl=en")]);
+        assert_eq!(links("https://a.b/&amp; https://c.d/x.&amp;"), [web("https://a.b/"), web("https://c.d/x")]);
+        assert_eq!(links("https://a.b/x\\."), [web("https://a.b/x")]);
     }
 
     #[test]
@@ -526,6 +575,8 @@ mod tests {
             [("x".to_owned(), "https://a.b".to_owned()), web("https://c.d")]
         );
         assert_eq!(links("\\[ www.a.b"), [web("www.a.b")], "an escaped bracket is text");
+        assert_eq!(links("[x\\] www.a.b"), []);
+        assert_eq!(links("\\\\[ www.a.b"), [], "an escaped backslash, then a bracket");
     }
 
     #[test]
@@ -569,5 +620,10 @@ mod tests {
         // One address through all the emphasis.
         let text = "https://a.b/".to_owned() + &"*x*".repeat(20_000);
         assert_eq!(links(&text).len(), 1);
+        // A long line of addresses: the rest of its text after each is not compared again.
+        let text = "www.a.b ".repeat(80_000);
+        let started = std::time::Instant::now();
+        assert_eq!(links(&text).len(), 80_000);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "{:?}", started.elapsed());
     }
 }
