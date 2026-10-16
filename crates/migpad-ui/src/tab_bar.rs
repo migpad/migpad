@@ -211,15 +211,23 @@ impl RenderOnce for TabBar {
                 (self.on_select.clone(), self.on_close.clone(), self.on_close.clone(), self.on_move.clone());
             let (on_context_menu, on_receive) = (self.on_context_menu.clone(), self.on_receive.clone());
             let dragged = DraggedTab { owner, window, document: tab.document, index: i, title: tab.title.clone() };
-            // Pinned tabs show a pin icon (● over it for changes); unpinned show ● or × to close.
-            let pin_color = if tab.modified { theme.text } else { theme.text_muted };
+            // Pinned tabs show a pin, or ● for changes to save; unpinned show ● or × to close.
             let trailing = if pinned {
-                div()
-                    .id(("close", i))
-                    .relative()
-                    .flex_none()
-                    .size(px(18.))
-                    .child(
+                let icon =
+                    div().id(("close", i)).relative().flex_none().size(px(18.)).text_color(rgb(theme.text_muted));
+                if tab.modified {
+                    icon.child(
+                        div()
+                            .absolute()
+                            .size_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_size(px(10.))
+                            .child("●"),
+                    )
+                } else {
+                    icon.child(
                         div()
                             .absolute()
                             .left(px(6.5))
@@ -227,7 +235,7 @@ impl RenderOnce for TabBar {
                             .size(px(5.))
                             .rounded(px(2.5))
                             .border_1()
-                            .border_color(rgb(pin_color)),
+                            .border_color(rgb(theme.text_muted)),
                     )
                     .child(
                         div()
@@ -237,21 +245,9 @@ impl RenderOnce for TabBar {
                             .w(px(1.5))
                             .h(px(7.))
                             .rounded(px(0.75))
-                            .bg(rgb(pin_color)),
+                            .bg(rgb(theme.text_muted)),
                     )
-                    .when(tab.modified, |pin| {
-                        pin.child(
-                            div()
-                                .absolute()
-                                .size_full()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .text_size(px(10.))
-                                .text_color(rgb(pin_color))
-                                .child("●"),
-                        )
-                    })
+                }
             } else {
                 let close_label = self.close_label.clone();
                 div()
@@ -322,6 +318,7 @@ impl RenderOnce for TabBar {
                 .on_drag(dragged, |dragged, _, _, cx| {
                     cx.set_global(Dragging { tab: Some(dragged.clone()), over: None });
                     let view = cx.new(|_| dragged.clone());
+                    // The drag ends with its view, wherever it is dropped: the tab is forgotten.
                     cx.observe_release(&view, |_, cx| {
                         show_tab_drop(None, cx);
                         cx.global_mut::<Dragging>().tab = None;
@@ -341,6 +338,7 @@ impl RenderOnce for TabBar {
                     }
                 })
                 .when_some(tab.tooltip, |tab, path| tab.tooltip(Tooltip::builder(path, None)))
+                // The active tab is marked by a line over it.
                 .when(active, |tab| {
                     tab.child(div().absolute().top_0().left_0().right_0().h(px(2.)).bg(rgb(theme.accent)))
                 })

@@ -465,18 +465,18 @@ impl Workspace {
         document.read(cx).path.is_none().then(|| windows::untitled_number(own, Some(window), cx))
     }
 
-    /// Adds a tab at the end and switches to it. A file opened into a window whose only tab is an
-    /// untitled document never used — empty, without history or notifications — takes its place.
+    /// Adds a tab at the end — a pinned one after the pinned tabs — and switches to it. A file
+    /// opened into a window whose only tab is an untitled document never used — empty, without
+    /// history or notifications, not pinned — takes its place.
     pub fn add_tab(&mut self, tab: ForTab, window: &mut Window, cx: &mut Context<Self>) {
-        let pinned = tab.pinned;
         let unused = self.tabs.len() == 1 && {
             let only = self.tabs.active();
             let doc = only.document.read(cx);
-            doc.path.is_none() && doc.text().is_empty() && !doc.can_undo() && only.notices.is_empty()
+            !only.pinned && doc.path.is_none() && doc.text().is_empty() && !doc.can_undo() && only.notices.is_empty()
         };
         if unused && tab.document.read(cx).path.is_some() {
             let mut replaced = Tab::new(tab.document, None, tab.loading, tab.encoding_chosen, window, cx);
-            replaced.pinned = pinned;
+            replaced.pinned = tab.pinned;
             let gone = self.tabs.replace(0, replaced);
             gone.document.update(cx, |doc, _| doc.remove_journal());
             self.settle(0, tab.selection, tab.notice, window, cx);
@@ -490,14 +490,13 @@ impl Workspace {
         let numbers: Vec<u32> = self.untitled_numbers().collect();
         let untitled = Self::untitled_for(&tab.document, numbers, self.window_id, cx);
         let mut new_tab = Tab::new(tab.document, untitled, tab.loading, tab.encoding_chosen, window, cx);
-        new_tab.pinned = pinned;
+        new_tab.pinned = tab.pinned;
+        // Counted before the tab joins them.
+        let pinned = self.pinned_count();
         let mut index = self.tabs.push(new_tab);
-        if pinned {
-            let target = self.pinned_count();
-            if index != target {
-                self.tabs.move_tab(index, target);
-                index = target;
-            }
+        if tab.pinned {
+            self.tabs.move_tab(index, pinned);
+            index = pinned;
         }
         self.settle(index, tab.selection, tab.notice, window, cx);
         self.activate(index, window, cx);
@@ -908,31 +907,27 @@ impl Workspace {
         self.tabs.iter().take_while(|tab| tab.pinned).count()
     }
 
-    /// Pins the tab at `index`: moves it to the end of the pinned group.
+    /// Pins the tab at `index`: it goes after the pinned tabs there are already.
     pub fn pin_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+        let pinned = self.pinned_count();
         let Some(tab) = self.tabs.get_mut(index) else { return };
         if tab.pinned {
             return;
         }
         tab.pinned = true;
-        let pinned = self.pinned_count();
-        if index + 1 != pinned {
-            self.tabs.move_tab(index, pinned - 1);
-        }
+        self.tabs.move_tab(index, pinned);
         cx.notify();
     }
 
-    /// Unpins the tab at `index`: moves it to the first position after the pinned group.
+    /// Unpins the tab at `index`: it goes first among the tabs not pinned.
     pub fn unpin_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+        let pinned = self.pinned_count();
         let Some(tab) = self.tabs.get_mut(index) else { return };
         if !tab.pinned {
             return;
         }
         tab.pinned = false;
-        let pinned = self.pinned_count();
-        if index != pinned {
-            self.tabs.move_tab(index, pinned);
-        }
+        self.tabs.move_tab(index, pinned.saturating_sub(1));
         cx.notify();
     }
 
@@ -1419,11 +1414,10 @@ impl Workspace {
             source.update(cx, |workspace, window, cx| workspace.extract_tab_by_document(document_id, window, cx));
         let Ok(Some(extracted)) = extracted else { return };
         self.add_tab(extracted, window, cx);
-        let last = self.tabs.len() - 1;
-        let target = position.min(last);
-        if last != target {
-            self.move_tab(last, target, cx);
-        }
+        // The tab added is the active one, at the end or after the pinned tabs: it goes where it
+        // was dropped, on its side of the pinned ones.
+        let added = self.tabs.active_index();
+        self.move_tab(added, position, cx);
     }
 
     /// Takes a tab out of the window without remembering it as closed: it is being transferred to
@@ -1635,7 +1629,9 @@ impl Workspace {
         if open_has_changes {
             return self.add_tab(tab, window, cx);
         }
-        let replaced = Tab::new(tab.document, None, tab.loading, tab.encoding_chosen, window, cx);
+        let mut replaced = Tab::new(tab.document, None, tab.loading, tab.encoding_chosen, window, cx);
+        // In its place, pinned as it was.
+        replaced.pinned = self.tabs.get(index).is_some_and(|open| open.pinned);
         // The document replaced had no changes: it goes with its journal.
         let gone = self.tabs.replace(index, replaced);
         gone.document.update(cx, |doc, _| doc.remove_journal());
@@ -1657,6 +1653,7 @@ impl Workspace {
             return self.notify_tab(index, notice, cx);
         }
         let chosen = encoding.is_some() || tab.encoding_chosen;
+        let pinned = tab.pinned;
         let open_as = match encoding.or(tab.encoding_chosen.then_some(doc.format.encoding)) {
             Some(encoding) => OpenAs::Encoding(encoding),
             None => OpenAs::Detect { tld: None },
@@ -1670,7 +1667,8 @@ impl Workspace {
         let told = (changes && encoding.is_some()).then(|| notices::changes_kept(&Self::tab_title(tab, cx)));
         match windows::open_file_as(&path, open_as, cx) {
             Opening::Document(document, loading) => {
-                let replaced = Tab::new(document, None, loading, chosen, window, cx);
+                let mut replaced = Tab::new(document, None, loading, chosen, window, cx);
+                replaced.pinned = pinned;
                 self.tabs.replace(index, replaced);
                 windows::remember_tab(mine, cx);
                 self.settle(index, Some(selection), told, window, cx);
