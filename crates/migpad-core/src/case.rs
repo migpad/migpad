@@ -34,25 +34,18 @@ pub fn change_case(text: &str, case: Case) -> String {
 /// is a part of a word: "don't" is one word.
 fn title_case(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
-    let mut chars = text.char_indices().peekable();
-    while let Some((start, c)) = chars.next() {
-        if !is_word_char(c) {
-            out.push(c);
-            continue;
+    let mut lower = Lower::of(text);
+    let mut in_word = false;
+    for (at, c) in text.char_indices() {
+        let joins = || is_apostrophe(c) && text[at + c.len_utf8()..].chars().next().is_some_and(char::is_alphanumeric);
+        let word = is_word_char(c) || (in_word && joins());
+        let lowered = lower.next(c);
+        match (word, in_word) {
+            (true, false) => push_title(&mut out, c),
+            (true, true) => out.push_str(lowered),
+            (false, _) => out.push(c),
         }
-        let mut end = start + c.len_utf8();
-        while let Some(&(at, next)) = chars.peek() {
-            let joins =
-                is_apostrophe(next) && text[at + next.len_utf8()..].chars().next().is_some_and(char::is_alphanumeric);
-            if !is_word_char(next) && !joins {
-                break;
-            }
-            end = at + next.len_utf8();
-            chars.next();
-        }
-        push_title(&mut out, c);
-        // The rest at once: lower case of a Greek sigma depends on the letters around it.
-        out.push_str(&text[start + c.len_utf8()..end].to_lowercase());
+        in_word = word;
     }
     out
 }
@@ -62,20 +55,20 @@ fn title_case(text: &str) -> String {
 /// sentence and the space: `"Yes." He…`.
 fn sentence_case(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
-    // The start of the text not yet written to `out`: it goes in lower case.
-    let mut pending = 0;
+    let mut lower = Lower::of(text);
     let mut start = true;
     let mut after_end = false;
     let mut line_empty = true;
-    let mut chars = text.char_indices().peekable();
-    while let Some((at, c)) = chars.next() {
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        let lowered = lower.next(c);
+        if c.is_alphanumeric() && start {
+            push_title(&mut out, c);
+        } else {
+            out.push_str(lowered);
+        }
         if c.is_alphanumeric() {
-            if start {
-                out.push_str(&text[pending..at].to_lowercase());
-                push_title(&mut out, c);
-                pending = at + c.len_utf8();
-                start = false;
-            }
+            start = false;
             after_end = false;
             line_empty = false;
         } else if matches!(c, '.' | '!' | '?' | '…') {
@@ -87,7 +80,7 @@ fn sentence_case(text: &str) -> String {
                 after_end = false;
             }
             // CR LF is one line break: the LF counts it.
-            let crlf = c == '\r' && chars.peek().is_some_and(|&(_, next)| next == '\n');
+            let crlf = c == '\r' && chars.peek() == Some(&'\n');
             if is_line_break(c) && !crlf {
                 start |= line_empty;
                 line_empty = true;
@@ -99,23 +92,44 @@ fn sentence_case(text: &str) -> String {
             line_empty = false;
         }
     }
-    out.push_str(&text[pending..].to_lowercase());
     out
 }
 
+/// Lower case of a title case letter such as `ǅ`, of an upper case one and of others alike: these
+/// have no lower case but themselves.
 fn invert_case(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    // Run by run, as lower case of a Greek sigma depends on the letters around it. Lower case of a
-    // title case letter such as `ǅ`, of an upper case one and of others alike: these have no lower
-    // case but themselves.
-    while let Some(first) = rest.chars().next() {
-        let lower = first.is_lowercase();
-        let (run, after) = rest.split_at(rest.find(|c: char| c.is_lowercase() != lower).unwrap_or(rest.len()));
-        out.push_str(&if lower { run.to_uppercase() } else { run.to_lowercase() });
-        rest = after;
+    let mut lower = Lower::of(text);
+    for c in text.chars() {
+        let lowered = lower.next(c);
+        if c.is_lowercase() {
+            out.extend(c.to_uppercase());
+        } else {
+            out.push_str(lowered);
+        }
     }
     out
+}
+
+/// The lower case of a text, character by character, from its lower case whole: a Greek sigma at
+/// the end of a word is final, whatever the case of the letters around it is made.
+struct Lower {
+    text: String,
+    at: usize,
+}
+
+impl Lower {
+    fn of(text: &str) -> Self {
+        Lower { text: text.to_lowercase(), at: 0 }
+    }
+
+    /// The lower case of `c`, the next character of the text. The text in lower case is that of
+    /// its characters one by one, but for the sigma, whose two forms are as long.
+    fn next(&mut self, c: char) -> &str {
+        let len: usize = c.to_lowercase().map(char::len_utf8).sum();
+        self.at += len;
+        &self.text[self.at - len..self.at]
+    }
 }
 
 /// Writes `c`, the first letter of a word or a sentence, in title case.
@@ -220,6 +234,7 @@ mod tests {
         assert_eq!(title("ßa STRASSE"), "Ssa Strasse");
         assert_eq!(title("ǆungla ǄUNGLA"), "ǅungla ǅungla");
         assert_eq!(title("ΟΔΟΣ ΟΔΟΣ"), "Οδος Οδος");
+        assert_eq!(title("ΩΣ ΕΙΠΑ"), "Ως Ειπα");
     }
 
     #[test]
@@ -257,6 +272,7 @@ mod tests {
         assert_eq!(sentence("  ...WAIT"), "  ...Wait");
         assert_eq!(sentence("2ND PLACE. 1. FIRST"), "2nd place. 1. First");
         assert_eq!(sentence("ßA. ǄA"), "Ssa. ǅa");
+        assert_eq!(sentence("ΟΣ ΕΙΠΑ. ΩΣ"), "Ος ειπα. Ως");
     }
 
     #[test]
@@ -265,6 +281,7 @@ mod tests {
         assert_eq!(invert("Привет, Мир! 42"), "пРИВЕТ, мИР! 42");
         assert_eq!(invert("ßǅ"), "SSǆ");
         assert_eq!(invert("ΟΔΟΣ ΟΔΟΣ"), "οδος οδος");
+        assert_eq!(invert("οδοΣ ΣΟ"), "ΟΔΟς σο");
         assert_eq!(invert(""), "");
     }
 }
