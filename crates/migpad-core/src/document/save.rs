@@ -321,6 +321,24 @@ mod tests {
         assert_eq!(doc.format, format);
     }
 
+    #[test]
+    fn utf16_without_a_byte_order_mark_keeps_its_bytes() {
+        let text = "Привет, world!\r\nВторая строка\r\n";
+        let le: Vec<u8> = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let be: Vec<u8> = text.encode_utf16().flat_map(u16::to_be_bytes).collect();
+        for (bytes, encoding) in [(le, Encoding::UTF_16LE), (be, Encoding::UTF_16BE)] {
+            let dir = TempDir::new("save-utf16");
+            let path = dir.0.join("file.txt");
+            fs::write(&path, &bytes).unwrap();
+            let mut doc = load(&path, OpenAs::Detect { tld: None });
+            assert_eq!((doc.format.encoding, doc.format.bom), (encoding, false));
+            assert_eq!(doc.text().to_vec(0..doc.text().len()), text.as_bytes());
+            let format = doc.format;
+            doc.save(&path, format, false).unwrap();
+            assert_eq!(fs::read(&path).unwrap(), bytes, "{encoding:?}");
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn replacing_keeps_the_permissions() {

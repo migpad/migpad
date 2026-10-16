@@ -63,6 +63,9 @@ select_all = "Select &All"
 case_menu = "C&hange Case"
 upper_case = "&Upper Case"
 lower_case = "&Lower Case"
+title_case = "&Title Case"
+sentence_case = "&Sentence case"
+invert_case = "&Invert Case"
 
 [transform]
 menu = "Transfor&m"

@@ -340,11 +340,13 @@ mod tests {
     fn small_files_open_whole() {
         let utf16: Vec<u8> =
             b"\xFF\xFE".iter().copied().chain("hi\n".encode_utf16().flat_map(u16::to_le_bytes)).collect();
+        let utf16_no_bom: Vec<u8> = "Привет\r\n".encode_utf16().flat_map(u16::to_be_bytes).collect();
         let cases = [
             ("utf8", b"hello\nworld\n".to_vec(), Encoding::UTF_8, false, "hello\nworld\n", LineEnding::Lf),
             ("utf8-bom", b"\xEF\xBB\xBFhi\r\nthere".to_vec(), Encoding::UTF_8, true, "hi\r\nthere", LineEnding::CrLf),
             ("cp1251", cp1251(&PANGRAM.repeat(20)), windows_1251(), false, &PANGRAM.repeat(20), LineEnding::Lf),
             ("utf16", utf16, Encoding::UTF_16LE, true, "hi\n", LineEnding::Lf),
+            ("utf16-no-bom", utf16_no_bom, Encoding::UTF_16BE, false, "Привет\r\n", LineEnding::CrLf),
             ("empty", Vec::new(), Encoding::UTF_8, false, "", LineEnding::Lf),
         ];
         for (name, bytes, encoding, bom, expected, line_ending) in cases {
@@ -408,9 +410,11 @@ mod tests {
         let content = PANGRAM.repeat(5);
         let utf16: Vec<u8> =
             b"\xFE\xFF".iter().copied().chain(content.encode_utf16().flat_map(u16::to_be_bytes)).collect();
+        let utf16_no_bom: Vec<u8> = content.encode_utf16().flat_map(u16::to_le_bytes).collect();
         for (name, bytes, open_as) in [
             ("cp1251", cp1251(&content), OpenAs::Encoding(windows_1251())),
             ("utf16", utf16, OpenAs::Detect { tld: None }),
+            ("utf16-no-bom", utf16_no_bom, OpenAs::Detect { tld: None }),
         ] {
             let file = TempFile::new(&format!("chunks-{name}"), &bytes);
             let (preview, loader) = partial(open_with(&file.0, open_as, SMALL).unwrap());

@@ -1,8 +1,9 @@
 //! MigPad core: text storage, documents, encodings and line endings, saving, editing and undo,
-//! the edit journal, search, session state, settings and localization.
+//! changing case, the edit journal, search, session state, settings and localization.
 //!
 //! The core knows nothing about GPUI or windows, so it is tested and benchmarked on its own.
 
+pub mod case;
 pub mod data;
 pub mod document;
 pub mod encoding;
