@@ -5,10 +5,13 @@
 
 pub mod mermaid;
 
+use std::collections::HashMap;
 use std::ops::Range;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf, Prefix};
+use std::sync::LazyLock;
 
-use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, LinkType, Options, Parser, Tag, TagEnd};
+use regex::Regex;
 
 /// A block of a document.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -64,10 +67,11 @@ pub enum Align {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Inline {
     Text(Text),
-    /// An image: where it is, as written, and the text for it.
+    /// An image: where it is, as written, the text for it, and where it leads if it is in a link.
     Image {
         url: String,
         alt: String,
+        link: Option<String>,
     },
 }
 
@@ -320,8 +324,13 @@ impl Builder {
             Tag::Emphasis => self.with_inlines(|inlines| inlines.emphasis += 1),
             Tag::Strong => self.with_inlines(|inlines| inlines.strong += 1),
             Tag::Strikethrough => self.with_inlines(|inlines| inlines.strikethrough += 1),
-            Tag::Link { dest_url, .. } => {
-                self.with_inlines(|inlines| inlines.links.push((inlines.text.text.len(), dest_url.into_string())))
+            Tag::Link { link_type, dest_url, .. } => {
+                // An address in angle brackets, `<a@b.c>`, comes without its scheme.
+                let url = match link_type {
+                    LinkType::Email => format!("mailto:{dest_url}"),
+                    _ => dest_url.into_string(),
+                };
+                self.with_inlines(|inlines| inlines.links.push((inlines.text.text.len(), url)))
             }
             Tag::Image { dest_url, .. } => self.with_inlines(|inlines| {
                 inlines.flush_text();
@@ -420,7 +429,8 @@ impl Builder {
             TagEnd::Link => self.with_inlines(Inlines::end_link),
             TagEnd::Image => self.with_inlines(|inlines| {
                 if let Some((url, alt)) = inlines.image.take() {
-                    inlines.inlines.push(Inline::Image { url, alt });
+                    let link = inlines.links.last().map(|(_, url)| url.clone());
+                    inlines.inlines.push(Inline::Image { url, alt, link });
                 }
             }),
             TagEnd::Superscript | TagEnd::Subscript => {}
@@ -514,14 +524,18 @@ impl Builder {
 }
 
 /// The file of an image or of a link, by its URL as written in a document in `folder`: a path
-/// relative to the folder or an absolute one, or a `file:` URL, percent escapes decoded. `None` for
-/// one anywhere else — on the network, in the URL itself — which is not read.
+/// relative to the folder or an absolute one, or a `file:` URL, percent escapes decoded, `.` and
+/// `..` resolved as written. `None` for one anywhere else — on the network, in the URL itself, a
+/// device of Windows — which is not read.
 pub fn local_file(url: &str, folder: Option<&Path>) -> Option<PathBuf> {
     let url = url.trim();
-    let path = match url.strip_prefix("file://") {
+    let path = match strip_prefix_ignoring_case(url, "file:") {
         Some(rest) => {
-            let rest = rest.strip_prefix("localhost").unwrap_or(rest);
-            // A file of another computer: on the network.
+            // `file:///a`, `file://localhost/a` or `file:/a`; `file://host/a` is of another computer.
+            let rest = match rest.strip_prefix("//") {
+                Some(rest) => strip_prefix_ignoring_case(rest, "localhost").unwrap_or(rest),
+                None => rest,
+            };
             if !rest.starts_with('/') {
                 return None;
             }
@@ -536,12 +550,46 @@ pub fn local_file(url: &str, folder: Option<&Path>) -> Option<PathBuf> {
         // What follows `?` or `#` is not of the file: `logo.png?raw=true`.
         None => decode_percent(url.split(['?', '#']).next()?)?,
     };
-    // A path of the network, as `\\host\share` or `//host/share`, which Windows reads over it.
-    if path.is_empty() || path.starts_with("//") || path.starts_with("\\\\") || path.starts_with("/\\") {
+    // A path of the network, which Windows reads over it: two separators, as `\\host\share`,
+    // `//host/share` or `\/host/share`, start one.
+    let separator = |c: Option<char>| matches!(c, Some('/' | '\\'));
+    let mut start = path.chars();
+    if path.is_empty() || (separator(start.next()) && separator(start.next())) {
         return None;
     }
     let path = PathBuf::from(path);
-    if path.is_absolute() { Some(path) } else { Some(folder?.join(path)) }
+    if !path.is_absolute() {
+        return Some(lexical(&folder?.join(path)));
+    }
+    // Of Windows, a drive: not a share nor a device, as `\\?\UNC\…` or `\\.\pipe\…`.
+    if let Some(Component::Prefix(prefix)) = path.components().next()
+        && !matches!(prefix.kind(), Prefix::Disk(_))
+    {
+        return None;
+    }
+    Some(lexical(&path))
+}
+
+/// `text` without `prefix` at its start, in whatever case it is written.
+fn strip_prefix_ignoring_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
+    let start = text.get(..prefix.len())?;
+    start.eq_ignore_ascii_case(prefix).then(|| &text[prefix.len()..])
+}
+
+/// `path` with its `.` and `..` resolved as they are written, not through links: `a/b/../c` is
+/// `a/c`, as Windows resolves them; at the root `..` is the root.
+fn lexical(path: &Path) -> PathBuf {
+    let mut resolved = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                resolved.pop();
+            }
+            other => resolved.push(other),
+        }
+    }
+    resolved
 }
 
 /// Where a link of a document leads.
@@ -577,16 +625,39 @@ pub fn link_target(url: &str, folder: Option<&Path>) -> Option<LinkTarget> {
 }
 
 /// The anchor of a heading of the text `text`, as GitHub makes it: in lower case, its spaces
-/// hyphens, without punctuation and symbols but the hyphen and the underscore.
+/// hyphens, without punctuation and symbols but the hyphen and the underscore; letters, digits and
+/// the marks over and under letters stay.
 pub fn slug(text: &str) -> String {
+    static MARK: LazyLock<Option<Regex>> = LazyLock::new(|| Regex::new(r"^\p{M}$").ok());
+    let mark = |c: char| MARK.as_ref().is_some_and(|mark| mark.is_match(c.encode_utf8(&mut [0; 4])));
     text.trim()
         .to_lowercase()
         .chars()
         .filter_map(|c| match c {
             ' ' => Some('-'),
             '-' | '_' => Some(c),
-            c if c.is_alphanumeric() => Some(c),
+            c if c.is_alphanumeric() || mark(c) => Some(c),
             _ => None,
+        })
+        .collect()
+}
+
+/// The anchors of headings of the texts `texts`, in order, as GitHub makes them: a name taken
+/// before gets `-1`, `-2` after it, and so does the name of a heading that is already one of those.
+pub fn slugs<'a>(texts: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let mut taken: HashMap<String, usize> = HashMap::new();
+    texts
+        .into_iter()
+        .map(|text| {
+            let base = slug(text);
+            let mut name = base.clone();
+            while taken.contains_key(&name) {
+                let count = taken.entry(base.clone()).or_default();
+                *count += 1;
+                name = format!("{base}-{count}");
+            }
+            taken.insert(name.clone(), 0);
+            name
         })
         .collect()
 }
@@ -713,6 +784,18 @@ mod tests {
             links,
             [("the doc", "a.md#x"), ("https://example.com", "https://example.com"), ("mail", "mailto:a@b")]
         );
+        // An address in angle brackets is a letter.
+        let blocks = parse("<a@b.c>");
+        let [Block::Paragraph(content)] = &blocks[..] else { panic!("one paragraph: {blocks:?}") };
+        let [Inline::Text(text)] = &content[..] else { panic!("one text: {content:?}") };
+        assert_eq!(text.links, [Link { range: 0..5, url: "mailto:a@b.c".to_owned() }]);
+        // An image in a link leads where it does.
+        let blocks = parse("[![CI](badge.svg)](https://ci)");
+        let [Block::Paragraph(content)] = &blocks[..] else { panic!("one paragraph: {blocks:?}") };
+        assert_eq!(
+            content[..],
+            [Inline::Image { url: "badge.svg".to_owned(), alt: "CI".to_owned(), link: Some("https://ci".to_owned()) }]
+        );
         // An image in a link parts its text: the link goes on after it.
         let blocks = parse("[before ![i](x.png) after](https://l) out");
         let [Block::Paragraph(content)] = &blocks[..] else { panic!("one paragraph: {blocks:?}") };
@@ -734,7 +817,8 @@ mod tests {
             assert_eq!(target(url), Some(LinkTarget::Web(url.to_owned())), "{url}");
         }
         assert_eq!(target("01-deposit.md"), Some(LinkTarget::File(folder.join("01-deposit.md"))));
-        assert_eq!(target("../flows/a%20b.md#top"), Some(LinkTarget::File(folder.join("../flows/a b.md"))));
+        let parent = folder.parent().unwrap();
+        assert_eq!(target("../flows/a%20b.md#top"), Some(LinkTarget::File(parent.join("flows/a b.md"))));
         for url in [
             "javascript:alert(1)",
             "zoommtg://zoom.us/join",
@@ -761,6 +845,10 @@ mod tests {
         assert_eq!(slug("F-ING.1 — Общая схема"), "f-ing1--общая-схема");
         assert_eq!(slug(" Hello, World! "), "hello-world");
         assert_eq!(slug("snake_case and `code`"), "snake_case-and-code");
+        // The marks of Devanagari stay, as GitHub keeps them.
+        assert_eq!(slug("स्थापना"), "स्थापना");
+        // A name taken gets a number, as does one already of that form.
+        assert_eq!(slugs(["a", "a", "a-1", "b"]), ["a", "a-1", "a-1-1", "b"]);
     }
 
     #[test]
@@ -858,10 +946,10 @@ mod tests {
             [
                 Block::Paragraph(vec![
                     plain("before "),
-                    Inline::Image { url: "img/a.png".to_owned(), alt: "the alt".to_owned() },
+                    Inline::Image { url: "img/a.png".to_owned(), alt: "the alt".to_owned(), link: None },
                     plain(" after"),
                 ]),
-                Block::Paragraph(vec![Inline::Image { url: "/abs.svg".to_owned(), alt: String::new() }]),
+                Block::Paragraph(vec![Inline::Image { url: "/abs.svg".to_owned(), alt: String::new(), link: None }]),
             ]
         );
     }
@@ -884,9 +972,15 @@ mod tests {
             r"\\host\share\a.png",
             "file://host/share/a.png",
             "file:////host/share/a.png",
+            // Windows reads `\/host/share` over the network too.
+            "%5C/attacker/s/a.png",
+            r"\/attacker/s/a.png",
+            "/%5Cattacker/s/a.png",
         ] {
             assert_eq!(file(url), None, "{url}");
         }
+        // `.` and `..` are resolved as written.
+        assert_eq!(file("img/../logo.png"), Some(folder.join("logo.png")));
         if cfg!(windows) {
             assert_eq!(file(r"D:\pics\a.png"), Some(PathBuf::from(r"D:\pics\a.png")));
             assert_eq!(file("file:///D:/pics/a%20b.png"), Some(PathBuf::from("D:/pics/a b.png")));
@@ -894,6 +988,9 @@ mod tests {
             assert_eq!(file("/pics/a.png"), Some(PathBuf::from("/pics/a.png")));
             assert_eq!(file("file:///pics/a%20b.png"), Some(PathBuf::from("/pics/a b.png")));
             assert_eq!(file("file://localhost/pics/a.png"), Some(PathBuf::from("/pics/a.png")));
+            assert_eq!(file("FILE:///pics/a.png"), Some(PathBuf::from("/pics/a.png")));
+            assert_eq!(file("file:/pics/a.png"), Some(PathBuf::from("/pics/a.png")));
+            assert_eq!(file("/pics/../a.png"), Some(PathBuf::from("/a.png")));
         }
     }
 
