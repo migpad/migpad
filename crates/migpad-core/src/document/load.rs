@@ -94,14 +94,17 @@ impl Limits {
 
 fn open_with(path: &Path, open_as: OpenAs, limits: Limits) -> Result<Opened, OpenError> {
     let mut file = File::open(path)?;
-    let metadata = file.metadata()?;
-    if metadata.len() > limits.max as u64 {
+    // The file as it is before reading: what another program adds to it meanwhile is not read,
+    // and the next look at the file finds it changed.
+    let disk = Fingerprint::of_file(&file)?;
+    if disk.len > limits.max as u64 {
         return Err(OpenError::TooLarge);
     }
-    let len = metadata.len() as usize;
+    let len = disk.len as usize;
     let mut sample = Vec::with_capacity(len.min(limits.preview) + 1);
     // One byte more than the preview tells whether the sample is the whole file.
     (&mut file).take(limits.preview as u64 + 1).read_to_end(&mut sample)?;
+    sample.truncate(len);
     let complete = sample.len() <= limits.preview;
     sample.truncate(limits.preview);
     let (Detected { encoding, bom }, tld) = match open_as {
@@ -111,7 +114,6 @@ fn open_with(path: &Path, open_as: OpenAs, limits: Limits) -> Result<Opened, Ope
             (Detected { encoding, bom }, None)
         }
     };
-    let disk = Fingerprint::of_file(&file)?;
     let loader = Loader {
         file,
         path: path.to_owned(),
@@ -121,7 +123,7 @@ fn open_with(path: &Path, open_as: OpenAs, limits: Limits) -> Result<Opened, Ope
         bom,
         detected: matches!(open_as, OpenAs::Detect { .. }),
         tld,
-        large: metadata.len() >= limits.large,
+        large: disk.len >= limits.large,
         progress: Arc::new(AtomicU64::new(0)),
         cancel: Arc::new(AtomicBool::new(false)),
         limits,
