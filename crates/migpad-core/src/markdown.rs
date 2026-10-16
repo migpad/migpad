@@ -133,7 +133,8 @@ pub const MAX_NESTING: usize = 16;
 pub fn parse(markdown: &str) -> Vec<Block> {
     let options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
     let mut builder = Builder { stack: vec![Container::Blocks(Vec::new())], ..Builder::default() };
-    for event in Parser::new_ext(markdown, options) {
+    let events = Parser::new_ext(markdown, options).into_offset_iter().collect();
+    for event in autolink::add_web_links(markdown, events) {
         builder.event(event);
     }
     builder.finish()
@@ -199,7 +200,7 @@ impl Inlines {
                 close_link(&mut self.text, *start, url.clone());
                 *start = 0;
             }
-            autolink::add_autolinks(&mut self.text);
+            autolink::add_mail_links(&mut self.text);
             self.inlines.push(Inline::Text(std::mem::take(&mut self.text)));
         }
     }
