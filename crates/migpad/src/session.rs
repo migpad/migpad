@@ -71,7 +71,8 @@ pub fn activated(window: WindowId, cx: &mut App) {
     schedule(cx);
 }
 
-/// The window `window` closed: it is no longer in the session.
+/// The window `window` closed: it is no longer in the session. Its pinned tabs, if the user closed
+/// it, are among the closed ones, and come back from there at the next start.
 pub fn window_closed(window: WindowId, cx: &mut App) {
     let writer = cx.default_global::<Writer>();
     if writer.done {
@@ -264,9 +265,12 @@ pub fn restore(paths: &[PathBuf], cx: &mut App) -> Option<WindowHandle<Workspace
     let mut known: HashSet<DocumentId> =
         session.windows.iter().flat_map(|window| &window.tabs).filter_map(|tab| tab.document).collect();
     known.extend(closed.iter().flat_map(tabs_of).filter_map(|tab| tab.document));
+    let everything = settings::get(cx).restore_session;
+    // The pinned tabs of windows closed before quitting come back with the session; the other tabs
+    // of those windows stay closed.
+    let (closed, pinned) = if everything { closed::take_pinned(closed) } else { (closed, Vec::new()) };
     windows::restore_closed(closed, cx);
 
-    let everything = settings::get(cx).restore_session;
     let mut opened: Vec<(usize, WindowHandle<Workspace>)> = Vec::new();
     for (i, window) in session.windows.iter().enumerate() {
         let (mut tabs, mut notices, mut active) = (Vec::new(), Vec::new(), None);
@@ -295,6 +299,9 @@ pub fn restore(paths: &[PathBuf], cx: &mut App) -> Option<WindowHandle<Workspace
         }
     }
     let active = opened.iter().find(|(i, _)| *i == session.active).or(opened.last()).map(|(_, handle)| *handle);
+    // Those of each closed window in a window of their own.
+    let reopened = pinned.into_iter().filter_map(|(tabs, active)| windows::reopen_pinned(tabs, active, cx)).last();
+    let active = active.or(reopened);
 
     let orphans = orphans(&data.journals(), &known, cx);
     let active = match active {
@@ -330,12 +337,13 @@ enum Restored {
 
 fn restore_tab(tab: &TabState, cx: &mut App) -> Restored {
     let selection = Some(tab.selection);
+    let pinned = tab.pinned;
     let mut failure = None;
     if let Some(id) = tab.document {
         match recover(id, tab.path.as_deref(), cx) {
             Recovery::Document(document, notice) => {
                 let encoding_chosen = tab.encoding.is_some();
-                return Restored::Tab(ForTab { document, loading: None, selection, notice, encoding_chosen });
+                return Restored::Tab(ForTab { document, loading: None, selection, notice, encoding_chosen, pinned });
             }
             Recovery::Failed(notice) => failure = Some(notice),
             Recovery::FromFile => {}
@@ -350,7 +358,7 @@ fn restore_tab(tab: &TabState, cx: &mut App) -> Restored {
     match windows::open_document_as(path, open_as, cx) {
         Opening::Document(document, loading) => {
             let encoding_chosen = tab.encoding.is_some();
-            Restored::Tab(ForTab { document, loading, selection, notice: failure, encoding_chosen })
+            Restored::Tab(ForTab { document, loading, selection, notice: failure, encoding_chosen, pinned })
         }
         Opening::Failed(notice) => Restored::Notice(notice),
     }
@@ -363,7 +371,14 @@ fn restore_changes(tab: &TabState, cx: &mut App) -> Restored {
     match recover(id, tab.path.as_deref(), cx) {
         Recovery::Document(document, notice) if document.read(cx).is_modified() => {
             let encoding_chosen = tab.encoding.is_some();
-            Restored::Tab(ForTab { document, loading: None, selection: Some(tab.selection), notice, encoding_chosen })
+            Restored::Tab(ForTab {
+                document,
+                loading: None,
+                selection: Some(tab.selection),
+                notice,
+                encoding_chosen,
+                pinned: tab.pinned,
+            })
         }
         // What happened to changes set aside is still told.
         Recovery::Document(document, notice) => {
@@ -395,7 +410,14 @@ fn orphans(dir: &Path, known: &HashSet<DocumentId>, cx: &mut App) -> Vec<ForTab>
         match recover(id, None, cx) {
             Recovery::Document(document, notice) => {
                 if document.read(cx).is_modified() {
-                    tabs.push(ForTab { document, loading: None, selection: None, notice, encoding_chosen: false });
+                    tabs.push(ForTab {
+                        document,
+                        loading: None,
+                        selection: None,
+                        notice,
+                        encoding_chosen: false,
+                        pinned: false,
+                    });
                 } else {
                     document.update(cx, |doc, _| doc.remove_journal());
                 }

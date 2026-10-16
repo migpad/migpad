@@ -45,6 +45,8 @@ pub struct ClosedTab {
     /// The encoding chosen by hand for its file: it opens so again, not guessed anew.
     pub encoding: Option<Encoding>,
     pub selection: Selection,
+    /// Whether the tab was pinned.
+    pub pinned: bool,
 }
 
 impl ClosedTab {
@@ -60,12 +62,19 @@ impl ClosedTab {
 
     fn to_state(&self, cx: &App) -> TabState {
         let document = self.document.as_ref().map(|document| document.read(cx).id()).or(self.journal);
-        TabState { document, path: self.path.clone(), encoding: self.encoding, selection: self.selection }
+        TabState {
+            document,
+            path: self.path.clone(),
+            encoding: self.encoding,
+            selection: self.selection,
+            pinned: self.pinned,
+        }
     }
 
     fn from_state(tab: TabState) -> ClosedTab {
-        let (journal, path, encoding, selection) = (tab.document, tab.path, tab.encoding, tab.selection);
-        ClosedTab { document: None, journal, path, encoding, selection }
+        let (journal, path, encoding, selection, pinned) =
+            (tab.document, tab.path, tab.encoding, tab.selection, tab.pinned);
+        ClosedTab { document: None, journal, path, encoding, selection, pinned }
     }
 }
 
@@ -319,12 +328,14 @@ pub struct ForTab {
     /// Whether the encoding of its file was chosen by hand rather than guessed: reading the file
     /// again keeps it.
     pub encoding_chosen: bool,
+    /// Whether the tab is pinned: restored from the session.
+    pub pinned: bool,
 }
 
 impl ForTab {
     /// A tab for `document`, which tells nothing.
     pub fn new(document: Entity<Document>, loading: Option<Loading>, selection: Option<Selection>) -> Self {
-        ForTab { document, loading, selection, notice: None, encoding_chosen: false }
+        ForTab { document, loading, selection, notice: None, encoding_chosen: false, pinned: false }
     }
 }
 
@@ -426,14 +437,15 @@ pub enum Reopening {
 pub fn reopening(closed: ClosedTab, cx: &mut App) -> Reopening {
     let selection = Some(closed.selection);
     let encoding_chosen = closed.encoding.is_some();
+    let pinned = closed.pinned;
     if let Some(document) = closed.document {
-        return Reopening::Tab(ForTab { encoding_chosen, ..ForTab::new(document, None, selection) });
+        return Reopening::Tab(ForTab { encoding_chosen, pinned, ..ForTab::new(document, None, selection) });
     }
     let mut failure = None;
     if let Some(id) = closed.journal {
         match session::recover(id, closed.path.as_deref(), cx) {
             Recovery::Document(document, notice) => {
-                return Reopening::Tab(ForTab { document, loading: None, selection, notice, encoding_chosen });
+                return Reopening::Tab(ForTab { document, loading: None, selection, notice, encoding_chosen, pinned });
             }
             Recovery::Failed(notice) => failure = Some(notice),
             Recovery::FromFile => {}
@@ -443,7 +455,7 @@ pub fn reopening(closed: ClosedTab, cx: &mut App) -> Reopening {
     let open_as = closed.encoding.map_or(OpenAs::Detect { tld: None }, OpenAs::Encoding);
     match open_file_as(&path, open_as, cx) {
         Opening::Document(document, loading) => {
-            Reopening::Tab(ForTab { document, loading, selection, notice: failure, encoding_chosen })
+            Reopening::Tab(ForTab { document, loading, selection, notice: failure, encoding_chosen, pinned })
         }
         Opening::Failed(notice) => Reopening::Failed(notice),
     }
@@ -564,7 +576,10 @@ pub fn open_window_with(
 pub fn reopen_in_new_window(index: usize, cx: &mut App) {
     let closed = match take_closed(index, cx) {
         Some(Closed::Tab(tab)) => tab,
-        Some(Closed::Window { tabs, active }) => return reopen_window(tabs, active, cx),
+        Some(Closed::Window { tabs, active }) => {
+            reopen_window(tabs, active, cx);
+            return;
+        }
         None => return,
     };
     if let Some((window, _)) = closed.path.as_deref().and_then(|path| find_open(path, cx)) {
@@ -584,8 +599,8 @@ pub fn reopen_in_new_window(index: usize, cx: &mut App) {
 }
 
 /// Opens a closed window again, with its tabs and the one that was active. A file opened in another
-/// window since stays there, unless its tab kept changes to save.
-pub fn reopen_window(tabs: Vec<ClosedTab>, active: usize, cx: &mut App) {
+/// window since stays there, unless its tab kept changes to save. Returns the window, if it opened.
+pub fn reopen_window(tabs: Vec<ClosedTab>, active: usize, cx: &mut App) -> Option<WindowHandle<Workspace>> {
     let mut reopened = Vec::new();
     let mut notices = Vec::new();
     let mut active_tab = None;
@@ -607,13 +622,19 @@ pub fn reopen_window(tabs: Vec<ClosedTab>, active: usize, cx: &mut App) {
         reopened.push(tab);
     }
     if reopened.is_empty() && notices.is_empty() {
-        return;
+        return None;
     }
-    if let Some(window) = open_window_with(reopened, notices, None, cx)
-        && let Some(index) = active_tab
-    {
+    let window = open_window_with(reopened, notices, None, cx)?;
+    if let Some(index) = active_tab {
         let _ = window.update(cx, |workspace, window, cx| workspace.activate(index, window, cx));
     }
+    Some(window)
+}
+
+/// Opens again the pinned tabs of a window closed before the program quit, in a window of their
+/// own, `active` among them shown. Returns the window, if it opened.
+pub fn reopen_pinned(tabs: Vec<TabState>, active: usize, cx: &mut App) -> Option<WindowHandle<Workspace>> {
+    reopen_window(tabs.into_iter().map(ClosedTab::from_state).collect(), active, cx)
 }
 
 /// Opens a recent file without a window to put it in: in a new window, or where it is open.

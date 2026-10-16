@@ -42,6 +42,8 @@ no_closed = "Nothing Closed Lately"
 recent_label = "{name} — {folder}"
 # A closed window in the menu, by the names of its tabs.
 closed_window = "Window: {tabs}"
+pin_tab = "&Pin Tab"
+unpin_tab = "Un&pin Tab"
 copy_path = "Cop&y Path"
 reveal_macos = "Show in &Finder"
 reveal_windows = "Show in File E&xplorer"

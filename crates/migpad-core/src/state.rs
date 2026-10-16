@@ -56,6 +56,8 @@ pub struct TabState {
     /// The encoding the file was read or saved in: it is read so again, not guessed anew.
     pub encoding: Option<Encoding>,
     pub selection: Selection,
+    /// Whether the tab is pinned: it does not close and stays across restarts.
+    pub pinned: bool,
 }
 
 /// Writes `text` to `path` whole: through a temporary file next to it, flushed to the disk, which
@@ -131,6 +133,9 @@ fn tab_to_table(tab: &TabState) -> Table {
     }
     table["anchor"] = value(tab.selection.anchor as i64);
     table["head"] = value(tab.selection.head as i64);
+    if tab.pinned {
+        table["pinned"] = value(true);
+    }
     table
 }
 
@@ -148,7 +153,8 @@ fn tab_from_table(table: &Table) -> Result<TabState, StateError> {
     // An encoding not known any more is guessed, as for a new file.
     let encoding = table.get("encoding").and_then(Item::as_str).and_then(Encoding::for_name);
     let selection = Selection { anchor: number(table, "anchor")?, head: number(table, "head")? };
-    Ok(TabState { document, path, encoding, selection })
+    let pinned = table.get("pinned").and_then(Item::as_bool).unwrap_or(false);
+    Ok(TabState { document, path, encoding, selection, pinned })
 }
 
 /// The tables of the array `key` of `table`; none if it has no such key.

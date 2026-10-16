@@ -25,6 +25,8 @@ pub struct TabInfo {
     pub modified: bool,
     /// Whether its file is not there any more: the title is struck through.
     pub missing: bool,
+    /// Whether the tab is pinned: it shows a pin icon instead of a close button.
+    pub pinned: bool,
 }
 
 type Handler<T> = Rc<dyn Fn(T, &mut Window, &mut App)>;
@@ -201,48 +203,90 @@ impl RenderOnce for TabBar {
         let marker = move || div().absolute().top_0().bottom_0().w(px(2.)).bg(rgb(theme.accent));
         let tabs = self.tabs.into_iter().enumerate().map(|(i, tab)| {
             let active = i == self.active;
+            let pinned = tab.pinned;
+            let tab_title = tab.title.clone();
+            let tab_missing = tab.missing;
             let group = SharedString::from(format!("tab-{i}"));
             let (on_select, on_close, on_close_middle, on_move) =
                 (self.on_select.clone(), self.on_close.clone(), self.on_close.clone(), self.on_move.clone());
             let (on_context_menu, on_receive) = (self.on_context_menu.clone(), self.on_receive.clone());
             let dragged = DraggedTab { owner, window, document: tab.document, index: i, title: tab.title.clone() };
-            // ● for changes to save; × on the active tab and under the pointer.
-            let close = div()
-                .id(("close", i))
-                .role(Role::Button)
-                .aria_label(self.close_label.clone())
-                .relative()
-                .flex_none()
-                .size(px(18.))
-                .rounded(px(4.))
-                .text_color(rgb(theme.text_muted))
-                .hover(|style| style.bg(rgb(theme.hover)).text_color(rgb(theme.text)))
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(move |_, window, cx| on_close(i, window, cx))
-                .tooltip(Tooltip::builder(self.close_label.clone(), None))
-                .child(
-                    div()
-                        .absolute()
-                        .size_full()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_size(px(10.))
-                        .child("●")
-                        .when(!tab.modified, |dot| dot.invisible())
-                        .group_hover(group.clone(), |style| style.invisible()),
-                )
-                .child(
-                    div()
-                        .absolute()
-                        .size_full()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child("×")
-                        .when(tab.modified || !active, |cross| cross.invisible())
-                        .group_hover(group.clone(), |style| style.visible()),
-                );
+            // Pinned tabs show a pin, or ● for changes to save; unpinned show ● or × to close.
+            let trailing = if pinned {
+                let icon =
+                    div().id(("close", i)).relative().flex_none().size(px(18.)).text_color(rgb(theme.text_muted));
+                if tab.modified {
+                    icon.child(
+                        div()
+                            .absolute()
+                            .size_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_size(px(10.))
+                            .child("●"),
+                    )
+                } else {
+                    icon.child(
+                        div()
+                            .absolute()
+                            .left(px(6.5))
+                            .top(px(3.))
+                            .size(px(5.))
+                            .rounded(px(2.5))
+                            .border_1()
+                            .border_color(rgb(theme.text_muted)),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .left(px(8.25))
+                            .top(px(8.))
+                            .w(px(1.5))
+                            .h(px(7.))
+                            .rounded(px(0.75))
+                            .bg(rgb(theme.text_muted)),
+                    )
+                }
+            } else {
+                let close_label = self.close_label.clone();
+                div()
+                    .id(("close", i))
+                    .role(Role::Button)
+                    .aria_label(close_label.clone())
+                    .relative()
+                    .flex_none()
+                    .size(px(18.))
+                    .rounded(px(4.))
+                    .text_color(rgb(theme.text_muted))
+                    .hover(|style| style.bg(rgb(theme.hover)).text_color(rgb(theme.text)))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(move |_, window, cx| on_close(i, window, cx))
+                    .tooltip(Tooltip::builder(close_label, None))
+                    .child(
+                        div()
+                            .absolute()
+                            .size_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_size(px(10.))
+                            .child("●")
+                            .when(!tab.modified, |dot| dot.invisible())
+                            .group_hover(group.clone(), |style| style.invisible()),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .size_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child("×")
+                            .when(tab.modified || !active, |cross| cross.invisible())
+                            .group_hover(group.clone(), |style| style.visible()),
+                    )
+            };
             div()
                 .id(("tab", i))
                 .group(group)
@@ -268,7 +312,9 @@ impl RenderOnce for TabBar {
                     on_context_menu((i, event.position), window, cx);
                     cx.stop_propagation();
                 })
-                .on_mouse_up(MouseButton::Middle, move |_, window, cx| on_close_middle(i, window, cx))
+                .when(!pinned, |tab| {
+                    tab.on_mouse_up(MouseButton::Middle, move |_, window, cx| on_close_middle(i, window, cx))
+                })
                 .on_drag(dragged, |dragged, _, _, cx| {
                     cx.set_global(Dragging { tab: Some(dragged.clone()), over: None });
                     let view = cx.new(|_| dragged.clone());
@@ -305,10 +351,10 @@ impl RenderOnce for TabBar {
                         .overflow_hidden()
                         .whitespace_nowrap()
                         .text_ellipsis()
-                        .when(tab.missing, |title| title.line_through())
-                        .child(tab.title),
+                        .when(tab_missing, |title| title.line_through())
+                        .child(tab_title.clone()),
                 )
-                .child(close)
+                .child(trailing)
         });
         let (on_move, on_new, on_plus, on_receive_end) =
             (self.on_move.clone(), self.on_new.clone(), self.on_new.clone(), self.on_receive.clone());

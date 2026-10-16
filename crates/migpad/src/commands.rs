@@ -769,6 +769,40 @@ mod tests {
     }
 
     #[test]
+    fn mnemonics_tell_the_items_of_the_tab_menu_apart() {
+        use crate::strings::{LANGUAGE_LOCK, Language, mnemonic, set_language};
+
+        let _lock = LANGUAGE_LOCK.lock();
+        let letter = |key: Key| {
+            let at = mnemonic(key)?;
+            tr(key)[at..].chars().next().map(|c| c.to_lowercase().to_string())
+        };
+        for language in [Language::English, Language::Russian] {
+            set_language(language);
+            // The menu of a pinned tab and of another, on Windows and on Linux: macOS shows no
+            // mnemonics.
+            for pin in [Key::FilePinTab, Key::FileUnpinTab] {
+                for reveal in [Key::FileRevealWindows, Key::FileRevealLinux] {
+                    let labels = [
+                        pin,
+                        Key::FileCloseTab,
+                        Key::FileCloseOtherTabs,
+                        Key::FileCloseTabsToRight,
+                        Key::FileCopyPath,
+                        reveal,
+                    ];
+                    let mut letters: Vec<String> = labels.iter().filter_map(|key| letter(*key)).collect();
+                    assert_eq!(letters.len(), labels.len(), "{language:?} {pin:?}: every item has a mnemonic");
+                    letters.sort();
+                    letters.dedup();
+                    assert_eq!(letters.len(), labels.len(), "{language:?} {pin:?} {reveal:?}: mnemonics repeat");
+                }
+            }
+        }
+        set_language(Language::English);
+    }
+
+    #[test]
     fn commands_are_named_once_and_in_the_menus_once() {
         let registry = registry();
         let mut ids: Vec<&str> = registry.commands.iter().map(|command| command.id).collect();

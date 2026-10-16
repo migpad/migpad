@@ -127,6 +127,7 @@ mod tests {
             path: path.map(PathBuf::from),
             encoding: path.map(|_| crate::encoding::Encoding::for_name("windows-1251").unwrap()),
             selection: Selection { anchor, head },
+            pinned: false,
         };
         Session {
             windows: vec![
