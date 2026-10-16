@@ -405,7 +405,7 @@ pub fn serve(inbox: Arc<Inbox>, cx: &mut App) {
 }
 
 /// Opens the files of `request` in the window used last, at their places, and brings MigPad
-/// forward; without files, it just comes forward. Without a window — on macOS — in a new one.
+/// forward; without files, it just comes forward. Without a window of documents, in a new one.
 fn open(request: Request, cx: &mut App) {
     let paths: Vec<PathBuf> = request.files.iter().map(|file| file.path.clone()).collect();
     match windows::last_active(cx) {
