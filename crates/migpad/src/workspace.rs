@@ -491,7 +491,14 @@ impl Workspace {
         let untitled = Self::untitled_for(&tab.document, numbers, self.window_id, cx);
         let mut new_tab = Tab::new(tab.document, untitled, tab.loading, tab.encoding_chosen, window, cx);
         new_tab.pinned = pinned;
-        let index = self.tabs.push(new_tab);
+        let mut index = self.tabs.push(new_tab);
+        if pinned {
+            let target = self.pinned_count();
+            if index != target {
+                self.tabs.move_tab(index, target);
+                index = target;
+            }
+        }
         self.settle(index, tab.selection, tab.notice, window, cx);
         self.activate(index, window, cx);
     }
@@ -1326,8 +1333,8 @@ impl Workspace {
         let Some(tab) = self.tabs.get(index) else { return };
         let has_path = tab.document.read(cx).path.is_some();
         let is_pinned = tab.pinned;
-        let has_others = self.tabs.len() > 1;
-        let has_right = index + 1 < self.tabs.len();
+        let has_others = self.tabs.iter().any(|t| !t.pinned && t.document.entity_id() != tab.document.entity_id());
+        let has_right = self.tabs.iter().skip(index + 1).any(|t| !t.pinned);
         let reveal_key = if cfg!(target_os = "macos") {
             Key::FileRevealMacos
         } else if cfg!(target_os = "windows") {
@@ -1659,7 +1666,8 @@ impl Workspace {
         let changes = tab.has_changes(cx);
         let document = changes.then(|| tab.document.clone());
         let kept = tab.encoding_chosen.then_some(doc.format.encoding);
-        let mine = ClosedTab { document, journal: None, path: Some(path.clone()), encoding: kept, selection };
+        let mine =
+            ClosedTab { document, journal: None, path: Some(path.clone()), encoding: kept, selection, pinned: false };
         let told = (changes && encoding.is_some()).then(|| notices::changes_kept(&Self::tab_title(tab, cx)));
         match windows::open_file_as(&path, open_as, cx) {
             Opening::Document(document, loading) => {
@@ -2200,6 +2208,7 @@ impl Tab {
             path: doc.path.clone(),
             encoding: self.encoding_chosen.then_some(doc.format.encoding).filter(|_| doc.path.is_some()),
             selection: self.pending_selection.unwrap_or_else(|| self.editor.read(cx).selection()),
+            pinned: self.pinned,
         }
     }
 }

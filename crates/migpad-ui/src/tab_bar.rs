@@ -211,7 +211,7 @@ impl RenderOnce for TabBar {
                 (self.on_select.clone(), self.on_close.clone(), self.on_close.clone(), self.on_move.clone());
             let (on_context_menu, on_receive) = (self.on_context_menu.clone(), self.on_receive.clone());
             let dragged = DraggedTab { owner, window, document: tab.document, index: i, title: tab.title.clone() };
-            // Pinned tabs show a pin icon; unpinned show ● for changes or × to close.
+            // Pinned tabs show a pin icon (and ● for changes); unpinned show ● or × to close.
             let trailing = if pinned {
                 div()
                     .id(("close", i))
@@ -222,8 +222,8 @@ impl RenderOnce for TabBar {
                     .items_center()
                     .justify_center()
                     .text_size(px(11.))
-                    .text_color(rgb(theme.text_muted))
-                    .child("📌")
+                    .text_color(rgb(if tab.modified { theme.text } else { theme.text_muted }))
+                    .child(if tab.modified { "●" } else { "📌" })
             } else {
                 let close_label = self.close_label.clone();
                 div()
