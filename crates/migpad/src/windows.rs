@@ -576,7 +576,10 @@ pub fn open_window_with(
 pub fn reopen_in_new_window(index: usize, cx: &mut App) {
     let closed = match take_closed(index, cx) {
         Some(Closed::Tab(tab)) => tab,
-        Some(Closed::Window { tabs, active }) => return reopen_window(tabs, active, cx),
+        Some(Closed::Window { tabs, active }) => {
+            reopen_window(tabs, active, cx);
+            return;
+        }
         None => return,
     };
     if let Some((window, _)) = closed.path.as_deref().and_then(|path| find_open(path, cx)) {
@@ -596,8 +599,8 @@ pub fn reopen_in_new_window(index: usize, cx: &mut App) {
 }
 
 /// Opens a closed window again, with its tabs and the one that was active. A file opened in another
-/// window since stays there, unless its tab kept changes to save.
-pub fn reopen_window(tabs: Vec<ClosedTab>, active: usize, cx: &mut App) {
+/// window since stays there, unless its tab kept changes to save. Returns the window, if it opened.
+pub fn reopen_window(tabs: Vec<ClosedTab>, active: usize, cx: &mut App) -> Option<WindowHandle<Workspace>> {
     let mut reopened = Vec::new();
     let mut notices = Vec::new();
     let mut active_tab = None;
@@ -619,13 +622,19 @@ pub fn reopen_window(tabs: Vec<ClosedTab>, active: usize, cx: &mut App) {
         reopened.push(tab);
     }
     if reopened.is_empty() && notices.is_empty() {
-        return;
+        return None;
     }
-    if let Some(window) = open_window_with(reopened, notices, None, cx)
-        && let Some(index) = active_tab
-    {
+    let window = open_window_with(reopened, notices, None, cx)?;
+    if let Some(index) = active_tab {
         let _ = window.update(cx, |workspace, window, cx| workspace.activate(index, window, cx));
     }
+    Some(window)
+}
+
+/// Opens again the pinned tabs of a window closed before the program quit, in a window of their
+/// own, `active` among them shown. Returns the window, if it opened.
+pub fn reopen_pinned(tabs: Vec<TabState>, active: usize, cx: &mut App) -> Option<WindowHandle<Workspace>> {
+    reopen_window(tabs.into_iter().map(ClosedTab::from_state).collect(), active, cx)
 }
 
 /// Opens a recent file without a window to put it in: in a new window, or where it is open.

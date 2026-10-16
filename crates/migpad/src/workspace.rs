@@ -1112,9 +1112,10 @@ impl Workspace {
         }
     }
 
-    /// Closes the window; its tabs go among the closed ones. Changes to save in unpinned tabs are
-    /// asked about first ([ADR 0020]); pinned tabs go to the session silently — their changes are
-    /// kept in the journal and come back at the next start.
+    /// Closes the window; its tabs go among the closed ones. Changes to save are asked about
+    /// first, in one question for all the documents that have them ([ADR 0020]) — but those of
+    /// pinned tabs that a journal keeps: pinned tabs open again at the next start, with their
+    /// changes.
     pub fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // The last window: closing it is quitting, which keeps the window for the next start, as
         // its button does — once this window is done with the action. The settings window does
@@ -1123,10 +1124,17 @@ impl Workspace {
             cx.defer(session::quit);
             return;
         }
+        let pinned: Vec<Entity<Document>> =
+            self.tabs.iter().filter(|tab| tab.pinned).map(|tab| tab.document.clone()).collect();
+        let kept: Vec<EntityId> = pinned
+            .into_iter()
+            .filter(|document| document.update(cx, |doc, _| doc.keep_changes()))
+            .map(|document| document.entity_id())
+            .collect();
         let changed: Vec<(EntityId, String)> = self
             .tabs
             .iter()
-            .filter(|tab| tab.has_changes(cx) && !tab.pinned)
+            .filter(|tab| tab.has_changes(cx) && !kept.contains(&tab.document.entity_id()))
             .map(|tab| (tab.document.entity_id(), Self::tab_title(tab, cx)))
             .collect();
         if changed.is_empty() {
@@ -1156,6 +1164,8 @@ impl Workspace {
         cx.spawn_in(window, async move |workspace, cx| {
             match answer.await {
                 SaveAnswer::Save => {
+                    // Each in turn, its tab shown: the dialog of an untitled one and what went
+                    // wrong are about the document in view. One not saved keeps the window open.
                     for (document, _) in changed {
                         let save = workspace.update_in(cx, |workspace, window, cx| {
                             if let Some(index) = workspace.tab_of(document) {
@@ -1566,7 +1576,9 @@ impl Workspace {
         match windows::take_closed(index, cx) {
             Some(Closed::Tab(tab)) => self.reopen(tab, window, cx),
             // Once this window is done with the action: a new window is placed and numbered by it.
-            Some(Closed::Window { tabs, active }) => cx.defer(move |cx| windows::reopen_window(tabs, active, cx)),
+            Some(Closed::Window { tabs, active }) => cx.defer(move |cx| {
+                windows::reopen_window(tabs, active, cx);
+            }),
             None => {}
         }
     }

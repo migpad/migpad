@@ -61,6 +61,29 @@ pub fn from_toml(text: &str) -> Result<Vec<ClosedState>, StateError> {
     tables(doc.as_table(), "closed")?.into_iter().map(entry).collect()
 }
 
+/// Takes the pinned tabs out of the closed windows — they open again at the next start — which keep
+/// their other tabs, or go if they had none. Returns what stays closed, and the pinned tabs of each
+/// window in their order, with the one of them to show: the one that was active, or the first.
+pub fn take_pinned(closed: Vec<ClosedState>) -> (Vec<ClosedState>, Vec<(Vec<TabState>, usize)>) {
+    let mut pinned = Vec::new();
+    let closed = closed
+        .into_iter()
+        .filter_map(|entry| match entry {
+            ClosedState::Window { tabs, active } if tabs.iter().any(|tab| tab.pinned) => {
+                // Where the active tab is among the tabs of its kind.
+                let active_pinned = tabs.get(active).is_some_and(|tab| tab.pinned);
+                let place = tabs.iter().take(active).filter(|tab| tab.pinned == active_pinned).count();
+                let (pins, rest): (Vec<TabState>, Vec<TabState>) = tabs.into_iter().partition(|tab| tab.pinned);
+                pinned.push((pins, if active_pinned { place } else { 0 }));
+                let active = if active_pinned { 0 } else { place };
+                (!rest.is_empty()).then(|| ClosedState::Window { active: active.min(rest.len() - 1), tabs: rest })
+            }
+            entry => Some(entry),
+        })
+        .collect();
+    (closed, pinned)
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -87,9 +110,10 @@ mod tests {
             selection: Selection { anchor: 1, head: 0 },
             pinned: false,
         };
+        let pinned = TabState { pinned: true, ..tab("/pinned.txt") };
         let closed = vec![
             ClosedState::Tab(kept),
-            ClosedState::Window { tabs: vec![tab("/a.txt"), tab("/b.txt")], active: 1 },
+            ClosedState::Window { tabs: vec![pinned, tab("/a.txt"), tab("/b.txt")], active: 1 },
             ClosedState::Tab(tab("/c.txt")),
         ];
         let dir = TempDir::new("closed-file");
@@ -98,6 +122,52 @@ mod tests {
         write_atomically(&path, &to_toml(&closed)).unwrap();
         assert_eq!(read_closed(&path).unwrap(), closed);
         assert_eq!(from_toml(&to_toml(&[])).unwrap(), []);
+    }
+
+    #[test]
+    fn pinned_tabs_leave_the_closed_windows() {
+        let tab = |path: &str, pinned: bool| TabState {
+            document: None,
+            path: Some(PathBuf::from(path)),
+            encoding: None,
+            selection: Selection::caret(0),
+            pinned,
+        };
+        let closed = vec![
+            ClosedState::Tab(tab("/a.txt", false)),
+            // The active tab is not pinned: it stays active among the closed ones.
+            ClosedState::Window {
+                tabs: vec![tab("/b.txt", true), tab("/c.txt", true), tab("/d.txt", false), tab("/e.txt", false)],
+                active: 3,
+            },
+            // The active tab is pinned: it is shown among the pinned ones.
+            ClosedState::Window {
+                tabs: vec![tab("/f.txt", true), tab("/g.txt", true), tab("/h.txt", false)],
+                active: 1,
+            },
+            // Only pinned tabs: the window goes.
+            ClosedState::Window { tabs: vec![tab("/i.txt", true)], active: 0 },
+            ClosedState::Window { tabs: vec![tab("/j.txt", false), tab("/k.txt", false)], active: 1 },
+        ];
+        let (closed, pinned) = take_pinned(closed);
+        assert_eq!(
+            closed,
+            [
+                ClosedState::Tab(tab("/a.txt", false)),
+                ClosedState::Window { tabs: vec![tab("/d.txt", false), tab("/e.txt", false)], active: 1 },
+                ClosedState::Window { tabs: vec![tab("/h.txt", false)], active: 0 },
+                ClosedState::Window { tabs: vec![tab("/j.txt", false), tab("/k.txt", false)], active: 1 },
+            ]
+        );
+        assert_eq!(
+            pinned,
+            [
+                (vec![tab("/b.txt", true), tab("/c.txt", true)], 0),
+                (vec![tab("/f.txt", true), tab("/g.txt", true)], 1),
+                (vec![tab("/i.txt", true)], 0),
+            ]
+        );
+        assert_eq!(take_pinned(Vec::new()), (Vec::new(), Vec::new()));
     }
 
     #[test]
