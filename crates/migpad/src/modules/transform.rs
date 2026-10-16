@@ -1,10 +1,11 @@
-//! Transforms of the selected text: hex, Base64, Base58, URL encoding and decoding, and
-//! BIP-39 mnemonic ↔ dig (word indices concatenated by fours).
+//! Transforms of the selected text: hex, Base64, Base58, URL encoding and decoding, BIP-39
+//! mnemonic ↔ dig (word indices concatenated by fours), and its SHA-256 and SHA-512 hashes.
 
 use base64::Engine;
 use gpui::actions;
 use migpad_core::history::{EditKind, Selection};
 use migpad_core::text::TextStore;
+use sha2::{Digest, Sha256, Sha512};
 
 use crate::commands::{Command, MenuId, Module, Registry};
 use crate::notices::Notice;
@@ -24,7 +25,9 @@ actions!(
         UrlEncode,
         UrlDecode,
         Bip39ToDig,
-        DigToBip39
+        DigToBip39,
+        Sha256Hash,
+        Sha512Hash
     ]
 );
 
@@ -54,6 +57,8 @@ impl Module for TransformModule {
             Command::new("transform.url_decode", Key::TransformUrlDecode, UrlDecode).enabled(has_selection),
             Command::new("transform.bip39_to_dig", Key::TransformBip39ToDig, Bip39ToDig).enabled(has_selection),
             Command::new("transform.dig_to_bip39", Key::TransformDigToBip39, DigToBip39).enabled(has_selection),
+            Command::new("transform.sha256", Key::TransformSha256, Sha256Hash).enabled(has_selection),
+            Command::new("transform.sha512", Key::TransformSha512, Sha512Hash).enabled(has_selection),
         ];
         registry.add_group(Key::TransformMenu, commands, MenuId::Edit, 3);
 
@@ -74,6 +79,8 @@ impl Module for TransformModule {
         on_transform!(registry, UrlDecode, |bytes: &[u8]| url_decode(bytes));
         on_transform!(registry, Bip39ToDig, |bytes: &[u8]| bip39_to_dig(bytes));
         on_transform!(registry, DigToBip39, |bytes: &[u8]| dig_to_bip39(bytes));
+        on_transform!(registry, Sha256Hash, |bytes: &[u8]| Ok(hash::<Sha256>(bytes)));
+        on_transform!(registry, Sha512Hash, |bytes: &[u8]| Ok(hash::<Sha512>(bytes)));
     }
 }
 
@@ -190,6 +197,12 @@ fn dig_to_bip39(bytes: &[u8]) -> Result<Vec<u8>, &'static str> {
     Ok(out)
 }
 
+/// The hash of `bytes` in hex, in small letters as `sha256sum` and `sha512sum` print it.
+fn hash<D: Digest>(bytes: &[u8]) -> Vec<u8> {
+    let hex: String = D::digest(bytes).iter().map(|b| format!("{b:02x}")).collect();
+    hex.into_bytes()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,6 +249,18 @@ mod tests {
         assert_eq!(dig, b"00000001");
         let back = dig_to_bip39(&dig).unwrap();
         assert_eq!(back, b"abandon ability");
+    }
+
+    #[test]
+    fn sha_hashes_of_the_standard() {
+        assert_eq!(hash::<Sha256>(b"abc"), b"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        assert_eq!(
+            hash::<Sha512>(b"abc"),
+            b"ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a\
+              2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"
+        );
+        // UTF-8, as the text is kept.
+        assert_eq!(hash::<Sha256>("ё".as_bytes()), hash::<Sha256>(&[0xd1, 0x91]));
     }
 
     #[test]

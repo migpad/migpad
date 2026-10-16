@@ -7,8 +7,8 @@ use std::rc::Rc;
 use std::sync::atomic::Ordering;
 
 use gpui::{
-    App, AppContext, Bounds, DisplayId, Entity, Focusable, Global, Pixels, Point, TitlebarOptions, WindowBounds,
-    WindowHandle, WindowId, WindowOptions, point, px, size,
+    App, AppContext, Bounds, DisplayId, Entity, Focusable, Global, Pixels, Point, TitlebarOptions, Window,
+    WindowBounds, WindowHandle, WindowId, WindowOptions, point, px, size,
 };
 use migpad_core::document::{Document, DocumentId, OpenAs, OpenError, Opened, open};
 use migpad_core::encoding::Encoding;
@@ -200,23 +200,90 @@ pub fn document_windows(cx: &App) -> usize {
     cx.windows().iter().filter(|window| window.downcast::<Workspace>().is_some()).count()
 }
 
-/// The window of documents at `point` of the screen, other than `except`, that takes a tab there,
-/// and where the tab goes among its tabs. The front one where windows overlap, where the system
-/// tells their order.
-pub fn workspace_at(point: Point<Pixels>, except: WindowId, cx: &mut App) -> Option<(WindowHandle<Workspace>, usize)> {
-    let windows = cx.window_stack().filter(|stack| !stack.is_empty()).unwrap_or_else(|| cx.windows());
-    windows
-        .into_iter()
-        .filter_map(|window| window.downcast::<Workspace>())
-        .filter(|w| w.window_id() != except)
-        .find_map(|handle| {
-            let index = handle.update(cx, |workspace, window, _| {
+/// Where a tab let go of outside its window goes.
+pub enum TabDrop {
+    /// Into a window of documents, at a place among its tabs.
+    Into(WindowHandle<Workspace>, usize),
+    /// Into a window of its own where it was let go of, at a point of the screen: no window of
+    /// documents is under the pointer.
+    Apart(Point<Pixels>),
+    /// Nowhere: the window under the pointer asks a question, which the tab would take the keyboard
+    /// from.
+    Stays,
+}
+
+/// Where a tab let go of at `position` of `window`, outside of it, goes: into the window of
+/// documents under the pointer, or apart where no window of documents is. The windows of Wayland
+/// do not know where they are: there it always goes apart, under the window.
+pub fn tab_drop(position: Point<Pixels>, window: &Window, cx: &mut App) -> TabDrop {
+    let except = window.window_handle().window_id();
+    #[cfg(target_os = "macos")]
+    let (into, at) = {
+        let into = workspace_where(except, cx, crate::native_window::pointer_in);
+        (into, crate::native_window::pointer_on_screens(cx).unwrap_or(window.bounds().origin + position))
+    };
+    #[cfg(not(target_os = "macos"))]
+    let (into, at) = {
+        let at = window.bounds().origin + position;
+        let into = (cx.compositor_name() != "Wayland").then(|| {
+            workspace_where(except, cx, |window| {
                 let bounds = window.bounds();
-                let over = bounds.contains(&point) && workspace.takes_tabs(window);
-                over.then(|| workspace.drop_index(point - bounds.origin))
-            });
-            Some((handle, index.ok()??))
-        })
+                bounds.contains(&at).then(|| at - bounds.origin)
+            })
+        });
+        (into.flatten(), at)
+    };
+    match into {
+        Some((handle, Some(index))) => TabDrop::Into(handle, index),
+        Some((_, None)) => TabDrop::Stays,
+        None => TabDrop::Apart(at),
+    }
+}
+
+/// Where a window of its own for a tab let go of `at` a point of the screen goes: the pointer over
+/// its tab — and on macOS below the menu bar, where its title bar can be reached.
+pub fn apart_origin(at: Point<Pixels>, cx: &App) -> Point<Pixels> {
+    let origin = at - point(px(60.), px(40.));
+    #[cfg(target_os = "macos")]
+    let origin = crate::native_window::title_bar_in_sight(origin, cx);
+    #[cfg(not(target_os = "macos"))]
+    let _ = cx;
+    origin
+}
+
+/// The window of documents, other than `except`, that `locate` finds the pointer in, and where a
+/// tab goes among its tabs — none while it asks a question. Where the system tells the order of the
+/// windows, the one in front decides, the settings window too, which takes no tab; elsewhere —
+/// Windows — the first window of documents that takes one.
+fn workspace_where(
+    except: WindowId,
+    cx: &mut App,
+    locate: impl Fn(&Window) -> Option<Point<Pixels>>,
+) -> Option<(WindowHandle<Workspace>, Option<usize>)> {
+    let stack = cx.window_stack().filter(|stack| !stack.is_empty());
+    let ordered = stack.is_some();
+    for window in stack.unwrap_or_else(|| cx.windows()) {
+        if window.window_id() == except {
+            continue;
+        }
+        let Some(handle) = window.downcast::<Workspace>() else {
+            let over = ordered && window.update(cx, |_, window, _| locate(window).is_some()).unwrap_or(false);
+            if over {
+                return None;
+            }
+            continue;
+        };
+        let found = handle.update(cx, |workspace, window, _| {
+            let at = locate(window)?;
+            Some(workspace.takes_tabs(window).then(|| workspace.drop_index(at)))
+        });
+        match found.ok().flatten() {
+            Some(Some(index)) => return Some((handle, Some(index))),
+            Some(None) if ordered => return Some((handle, None)),
+            _ => {}
+        }
+    }
+    None
 }
 
 /// The workspaces of the open windows, except one that is being updated now.
@@ -468,14 +535,14 @@ pub fn open_window_with(
     window
         .update(cx, |_, window, cx| {
             // The button of the window closes it as Close Window does, asking about changes to
-            // save first — but the last window on Windows and Linux, which is quitting: then
-            // nothing is asked, the journals stay, and the window comes back at the next start
-            // with everything in it ([ADR 0020]).
+            // save first — but the last window, which is quitting: then nothing is asked, the
+            // journals stay, and the window comes back at the next start with everything in it
+            // ([ADR 0020]).
             window.on_window_should_close(cx, |window, cx| {
                 let Some(Some(workspace)) = window.root::<Workspace>() else { return true };
                 // Quitting goes on once this window is done with the question whether to close. The
                 // settings window does not count: it closes with the program.
-                if !cfg!(target_os = "macos") && document_windows(cx) == 1 {
+                if document_windows(cx) == 1 {
                     cx.defer(session::quit);
                     return false;
                 }

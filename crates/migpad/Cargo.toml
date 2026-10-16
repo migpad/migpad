@@ -15,6 +15,7 @@ migpad-core.workspace = true
 migpad-editor.workspace = true
 migpad-ui.workspace = true
 percent-encoding.workspace = true
+sha2.workspace = true
 sys-locale.workspace = true
 # The translations the user puts in the folder of the data.
 toml_edit.workspace = true
@@ -43,6 +44,8 @@ block2.workspace = true
 objc2.workspace = true
 objc2-app-kit.workspace = true
 objc2-foundation.workspace = true
+# The window of AppKit of a window of GPUI: which one a tab dragged out of its window is over.
+raw-window-handle.workspace = true
 
 [build-dependencies]
 toml_edit.workspace = true

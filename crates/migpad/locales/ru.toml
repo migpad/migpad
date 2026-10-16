@@ -63,6 +63,8 @@ url_encode = "&URL — закодировать"
 url_decode = "URL — рас&кодировать"
 bip39_to_dig = "BIP-39 → di&g"
 dig_to_bip39 = "dig → &BIP-39"
+sha256 = "&SHA-256"
+sha512 = "SHA-5&12"
 
 [find]
 menu = "&Найти"

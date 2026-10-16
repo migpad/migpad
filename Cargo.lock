@@ -2411,8 +2411,6 @@ dependencies = [
 [[package]]
 name = "gpui-pre-windows"
 version = "0.3.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f05592a6f9e3e6bb7a9f2a0d4779271cf747a948db1c07b02448de777ffff8f3"
 dependencies = [
  "accesskit",
  "accesskit_windows",
@@ -3259,6 +3257,8 @@ dependencies = [
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "percent-encoding",
+ "raw-window-handle",
+ "sha2",
  "sys-locale",
  "toml_edit 0.25.17+spec-1.1.0",
  "windows-sys 0.61.2",

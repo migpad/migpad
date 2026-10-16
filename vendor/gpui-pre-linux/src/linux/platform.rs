@@ -542,6 +542,23 @@ impl<P: LinuxClient + 'static> Platform for LinuxPlatform<P> {
                             .expect("pathbuf should not be nul terminated");
 
                     if let Some(suggested_name) = suggested_name {
+                        // MigPad: the type of the suggested name first, chosen, and all files. KDE
+                        // shows the suggested name without its extension and, with no type chosen,
+                        // saved the file so; with one, it adds the extension of the type to a name
+                        // that does not end with it, unless all files are chosen.
+                        let extension = Path::new(&suggested_name)
+                            .extension()
+                            .and_then(|extension| extension.to_str());
+                        if let Some(extension) = extension {
+                            let pattern = format!("*.{extension}");
+                            let own_type =
+                                ashpd::desktop::file_chooser::FileFilter::new(&pattern).glob(&pattern);
+                            let all_files =
+                                ashpd::desktop::file_chooser::FileFilter::new("*").glob("*");
+                            request_builder = request_builder
+                                .filters([own_type.clone(), all_files])
+                                .current_filter(own_type);
+                        }
                         request_builder = request_builder.current_name(suggested_name.as_str());
                     }
 

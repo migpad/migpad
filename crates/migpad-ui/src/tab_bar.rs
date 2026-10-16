@@ -29,16 +29,46 @@ pub struct TabInfo {
 
 type Handler<T> = Rc<dyn Fn(T, &mut Window, &mut App)>;
 
-/// The tab being dragged, from the start of the drag: GPUI keeps it to itself.
-struct Dragging(Option<DraggedTab>);
+/// The tab being dragged, from the start of the drag: GPUI keeps it to itself. And the window over
+/// which it goes outside its own, and where among the tabs there it would go: that bar shows it,
+/// since GPUI draws the dragged tab only in its own window.
+#[derive(Default)]
+struct Dragging {
+    tab: Option<DraggedTab>,
+    over: Option<(WindowId, usize)>,
+}
 
 impl Global for Dragging {}
+
+/// What the application does as a drag of a tab ends, wherever the tab was let go of.
+struct DragEnd(Rc<dyn Fn(&mut App)>);
+
+impl Global for DragEnd {}
 
 /// The tab being dragged, if a drag of a tab started and was not taken yet: for a window that gets
 /// the button back outside of itself, where no other window sees the drop.
 pub fn take_dragged_tab(cx: &mut App) -> Option<DraggedTab> {
     cx.try_global::<Dragging>()?;
-    cx.global_mut::<Dragging>().0.take()
+    cx.global_mut::<Dragging>().tab.take()
+}
+
+/// Shows in the bar of the window `over` — before its tab of that index — where the tab being
+/// dragged outside its window would go, or in no bar.
+pub fn show_tab_drop(over: Option<(WindowId, usize)>, cx: &mut App) {
+    let was = std::mem::replace(&mut cx.default_global::<Dragging>().over, over);
+    if was == over {
+        return;
+    }
+    for id in [was, over].into_iter().flatten().map(|(id, _)| id) {
+        if let Some(window) = cx.windows().into_iter().find(|window| window.window_id() == id) {
+            let _ = window.update(cx, |_, window, _| window.refresh());
+        }
+    }
+}
+
+/// Calls `handler` as each drag of a tab ends.
+pub fn on_tab_drag_end(handler: impl Fn(&mut App) + 'static, cx: &mut App) {
+    cx.set_global(DragEnd(Rc::new(handler)));
 }
 
 /// Where a tab dropped at `point` of a window goes among the tabs drawn at `tabs` — the bounds a
@@ -93,6 +123,10 @@ impl DraggedTab {
 
     pub fn source_index(&self) -> usize {
         self.index
+    }
+
+    pub fn title(&self) -> &str {
+        &self.title
     }
 }
 
@@ -161,6 +195,10 @@ impl RenderOnce for TabBar {
         let owner = self.owner;
         let window = self.window;
         let count = self.tabs.len();
+        // A tab dragged from another window over this one: where it would go, marked with a line.
+        let over = cx.try_global::<Dragging>().and_then(|dragging| dragging.over);
+        let drop_at = over.filter(|(over, _)| *over == window).map(|(_, index)| index);
+        let marker = move || div().absolute().top_0().bottom_0().w(px(2.)).bg(rgb(theme.accent));
         let tabs = self.tabs.into_iter().enumerate().map(|(i, tab)| {
             let active = i == self.active;
             let group = SharedString::from(format!("tab-{i}"));
@@ -232,10 +270,17 @@ impl RenderOnce for TabBar {
                 })
                 .on_mouse_up(MouseButton::Middle, move |_, window, cx| on_close_middle(i, window, cx))
                 .on_drag(dragged, |dragged, _, _, cx| {
-                    cx.set_global(Dragging(Some(dragged.clone())));
+                    cx.set_global(Dragging { tab: Some(dragged.clone()), over: None });
                     let view = cx.new(|_| dragged.clone());
                     // The drag ends with its view, wherever it is dropped: the tab is forgotten.
-                    cx.observe_release(&view, |_, cx| cx.set_global(Dragging(None))).detach();
+                    cx.observe_release(&view, |_, cx| {
+                        show_tab_drop(None, cx);
+                        cx.global_mut::<Dragging>().tab = None;
+                        if let Some(DragEnd(handler)) = cx.try_global::<DragEnd>() {
+                            handler.clone()(cx);
+                        }
+                    })
+                    .detach();
                     view
                 })
                 .drag_over::<DraggedTab>(move |style, _, _, _| style.bg(rgb(theme.pressed)))
@@ -251,6 +296,8 @@ impl RenderOnce for TabBar {
                 .when(active, |tab| {
                     tab.child(div().absolute().top_0().left_0().right_0().h(px(2.)).bg(rgb(theme.accent)))
                 })
+                .when(drop_at == Some(i), |tab| tab.child(marker().left_0()))
+                .when(drop_at == Some(count) && i + 1 == count, |tab| tab.child(marker().right_0()))
                 .child(
                     div()
                         .flex_shrink(1.)
@@ -296,7 +343,7 @@ impl RenderOnce for TabBar {
             .flex()
             .flex_none()
             .h(px(32.))
-            .bg(rgb(theme.bar))
+            .bg(rgb(if drop_at.is_some() { theme.pressed } else { theme.bar }))
             .border_b_1()
             .border_color(rgb(theme.border))
             // The tabs give way to the button when they do not fit: it stays in sight.

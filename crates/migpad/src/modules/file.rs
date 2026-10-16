@@ -137,7 +137,7 @@ impl Module for FileModule {
             workspace.reveal_tab_file(action.0, cx);
         });
         registry.on_window_action(|workspace, _: &CloseWindow, window, cx| workspace.close_window(window, cx));
-        // Without a window — on macOS, where MigPad stays open without them — and for a new window
+        // Without a window of documents — from the settings window on macOS — and for a new window
         // from any of them. The window opens once the action is handled: the window it came from
         // is being updated until then, and its place and tabs cannot be read.
         registry.on_app_action(|_: &NewTab, cx| cx.defer(open_window));

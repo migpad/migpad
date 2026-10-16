@@ -1,0 +1,21 @@
+--- a/src/platform.rs
++++ b/src/platform.rs
+@@ -1437,6 +1437,18 @@
+     }
+ 
+     if let Some(suggested_name) = suggested_name {
++        // MigPad: the extension of the suggested name is the default one, added to a name typed
++        // without one. Where Explorer hides the extensions of known types, the dialog shows the
++        // suggested name without its extension, and without a default one saved the file so. With
++        // All files, a name typed with an extension stays as it is.
++        if let Some(extension) = Path::new(&suggested_name).extension().and_then(|extension| extension.to_str()) {
++            unsafe {
++                dialog
++                    .SetDefaultExtension(&HSTRING::from(extension))
++                    .context("failed to set default extension")
++                    .log_err()
++            };
++        }
+         unsafe {
+             dialog
+                 .SetFileName(&HSTRING::from(suggested_name))

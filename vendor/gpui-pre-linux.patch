@@ -1,3 +1,29 @@
+--- a/src/linux/platform.rs
++++ b/src/linux/platform.rs
+@@ -542,6 +542,23 @@
+                             .expect("pathbuf should not be nul terminated");
+ 
+                     if let Some(suggested_name) = suggested_name {
++                        // MigPad: the type of the suggested name first, chosen, and all files. KDE
++                        // shows the suggested name without its extension and, with no type chosen,
++                        // saved the file so; with one, it adds the extension of the type to a name
++                        // that does not end with it, unless all files are chosen.
++                        let extension = Path::new(&suggested_name)
++                            .extension()
++                            .and_then(|extension| extension.to_str());
++                        if let Some(extension) = extension {
++                            let pattern = format!("*.{extension}");
++                            let own_type =
++                                ashpd::desktop::file_chooser::FileFilter::new(&pattern).glob(&pattern);
++                            let all_files =
++                                ashpd::desktop::file_chooser::FileFilter::new("*").glob("*");
++                            request_builder = request_builder
++                                .filters([own_type.clone(), all_files])
++                                .current_filter(own_type);
++                        }
+                         request_builder = request_builder.current_name(suggested_name.as_str());
+                     }
+ 
 --- a/src/linux/x11/client.rs
 +++ b/src/linux/x11/client.rs
 @@ -1870,7 +1870,9 @@
@@ -39,10 +65,11 @@
                  visual_set.inherit
              }
          };
-@@ -1305,6 +1309,20 @@
+@@ -1304,6 +1308,20 @@
+                 state.bounds.size = bounds.size;
              } else {
                  state.bounds = bounds;
-             }
++            }
 +            // MigPad: where the window is on the screen, from the server. A real ConfigureNotify
 +            // of a window the window manager has framed is relative to the frame, and a resize
 +            // that moves the window (maximizing, tiling) comes without the synthetic one in
@@ -56,7 +83,6 @@
 +                    x: px(origin.dst_x as f32 / state.scale_factor),
 +                    y: px(origin.dst_y as f32 / state.scale_factor),
 +                };
-+            }
+             }
  
              let gpu_size = query_render_extent(&self.xcb, self.x_window)?;
-             state.renderer.update_drawable_size(gpu_size);

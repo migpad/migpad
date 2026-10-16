@@ -123,7 +123,7 @@ fn write(cx: &mut App) {
     }
 }
 
-/// Quits as the user asks — File ▸ Exit, Cmd+Q, the last window on Windows and Linux — asking
+/// Quits as the user asks — File ▸ Exit, Cmd+Q, the last window — asking
 /// nothing, since the journals bring everything back at the next start ([ADR 0020]). Documents
 /// whose changes no journal can keep — an error stopped it, or there is no folder of data — are
 /// asked about first, in one question in the window of the first of them. Call it once what is

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use gpui::{
     App, AppContext, Bounds, Context, DragMoveEvent, Entity, EntityId, ExternalPaths, FocusHandle, Focusable,
     MouseButton, MouseDownEvent, MouseUpEvent, PathPromptOptions, Pixels, Point, PromptButton, PromptLevel, Render,
-    ScrollHandle, SharedString, Subscription, Task, Window, WindowBounds, WindowHandle, WindowId, canvas, div, point,
+    ScrollHandle, SharedString, Subscription, Task, Window, WindowBounds, WindowHandle, WindowId, canvas, div,
     prelude::*, px, rgb,
 };
 use migpad_core::document::{Document, Fingerprint, Format, OpenAs, Opened, open};
@@ -36,7 +36,7 @@ use crate::status::{self, COUNT_STEP, Loading, SelectionCount, count_chars};
 use crate::strings::{Key, fill, mnemonic, tr};
 use crate::tabs::Tabs;
 use crate::view_options;
-use crate::windows::{self, Closed, ClosedTab, ForTab, Opening, Reopening};
+use crate::windows::{self, Closed, ClosedTab, ForTab, Opening, Reopening, TabDrop};
 
 /// The dialog of the system that opens files: several at once.
 pub fn open_options() -> PathPromptOptions {
@@ -107,6 +107,8 @@ pub struct Workspace {
     next_notice: u64,
     /// The files dragged over the window from another program, to open once they are dropped.
     dragged_files: Option<Vec<PathBuf>>,
+    /// Where a tab of the window was dragged last, in the window.
+    tab_dragged_at: Option<Point<Pixels>>,
     /// Whether a question is open over the window: one at a time — a second one would wait behind
     /// it on macOS, and take its place on Linux.
     asking: bool,
@@ -205,6 +207,7 @@ impl Workspace {
             drawn: false,
             next_notice: 0,
             dragged_files: None,
+            tab_dragged_at: None,
             asking: false,
             place: session::place(window, cx),
             file_check: None,
@@ -1061,10 +1064,10 @@ impl Workspace {
     /// Closes the window; its tabs go among the closed ones. Changes to save are asked about
     /// first, in one question for all the documents that have them ([ADR 0020]).
     pub fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // The last window on Windows and Linux: closing it is quitting, which keeps the window for
-        // the next start, as its button does — once this window is done with the action. The
-        // settings window does not count: it closes with the program.
-        if !cfg!(target_os = "macos") && windows::document_windows(cx) == 1 {
+        // The last window: closing it is quitting, which keeps the window for the next start, as
+        // its button does — once this window is done with the action. The settings window does
+        // not count: it closes with the program.
+        if windows::document_windows(cx) == 1 {
             cx.defer(session::quit);
             return;
         }
@@ -1401,39 +1404,80 @@ impl Workspace {
         !self.asking && !window.has_active_prompt()
     }
 
-    /// A tab let go of outside the window. On macOS the drag goes on in the window under the
-    /// pointer; on Windows and Linux the button comes back to this window, which finds that window
-    /// itself: the tab goes to its bar, or to a window of its own where no window of MigPad is. The
-    /// windows of Wayland do not know where they are: there it is always a window of its own.
+    /// A tab of this window dragged on: outside of it, the window under the pointer shows where the
+    /// tab would go, and on macOS the tab follows the pointer where letting it go does something —
+    /// GPUI draws it only in its window.
+    fn tab_dragged(&mut self, event: &DragMoveEvent<DraggedTab>, window: &mut Window, cx: &mut Context<Self>) {
+        let dragged = event.drag(cx).clone();
+        if dragged.source_window() != self.window_id {
+            return;
+        }
+        // The button went up where the window did not see it: the drag is over.
+        if event.event.pressed_button != Some(MouseButton::Left) {
+            migpad_ui::show_tab_drop(None, cx);
+            #[cfg(target_os = "macos")]
+            crate::native_window::end_dragged_tab();
+            return;
+        }
+        // GPUI repeats the last move while the pointer rests.
+        let position = event.event.position;
+        if self.tab_dragged_at.replace(position) == Some(position) {
+            return;
+        }
+        let outside = !Bounds::new(Point::default(), window.viewport_size()).contains(&position);
+        // The title bar of the window is outside of its content, but the tab is still over the
+        // window: let go of there, it tears off as over its text, and GPUI draws it.
+        #[cfg(target_os = "macos")]
+        let outside = outside && crate::native_window::pointer_in(window).is_none();
+        let drop = outside.then(|| windows::tab_drop(position, window, cx));
+        let over = match &drop {
+            Some(TabDrop::Into(target, index)) => Some((target.window_id(), *index)),
+            _ => None,
+        };
+        migpad_ui::show_tab_drop(over, cx);
+        #[cfg(target_os = "macos")]
+        match drop {
+            Some(TabDrop::Into(..)) => crate::native_window::show_dragged_tab(dragged.title(), cx),
+            Some(TabDrop::Apart(_)) if self.tabs.len() > 1 => {
+                crate::native_window::show_dragged_tab(dragged.title(), cx)
+            }
+            _ => crate::native_window::hide_dragged_tab(),
+        }
+    }
+
+    /// A tab let go of outside the window. The button comes back to this window wherever it is let
+    /// go of — AppKit, X11 and Windows give it to the window it was pressed in — which finds the
+    /// window under the pointer itself: the tab goes to its bar, or to a window of its own where no
+    /// window of MigPad is.
     fn tab_released_outside(&mut self, event: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
         // Outside of the root, a release may still be in the window: over a menu or a question.
         let inside = Bounds::new(Point::default(), window.viewport_size()).contains(&event.position);
-        if cfg!(target_os = "macos") || inside || !cx.has_active_drag() {
+        if inside || !cx.has_active_drag() {
             return;
         }
         let Some(dragged) = migpad_ui::take_dragged_tab(cx) else { return };
         if dragged.source_window() != self.window_id {
             return;
         }
-        let at = window.bounds().origin + event.position;
-        let target = (cx.compositor_name() != "Wayland").then(|| windows::workspace_at(at, self.window_id, cx));
-        if let Some((target, index)) = target.flatten() {
-            // Once this window is done with the event: the other one takes the tab from it, and the
-            // keyboard, which the button never went to.
-            cx.defer(move |cx| {
-                let _ = target.update(cx, |workspace, window, cx| {
-                    workspace.receive_tab(&dragged, index, window, cx);
-                    window.activate_window();
+        match windows::tab_drop(event.position, window, cx) {
+            TabDrop::Into(target, index) => {
+                // Once this window is done with the event: the other one takes the tab from it, and
+                // the keyboard, which the button never went to.
+                cx.defer(move |cx| {
+                    let _ = target.update(cx, |workspace, window, cx| {
+                        workspace.receive_tab(&dragged, index, window, cx);
+                        window.activate_window();
+                    });
                 });
-            });
-        } else if self.tabs.len() > 1
-            && let Some(tab) = self.extract_tab_by_document(dragged.document_id(), window, cx)
-        {
-            // Where it was let go of, the pointer over the new tab.
-            let bounds = Bounds::new(at - point(px(60.), px(40.)), window.viewport_size());
-            cx.defer(move |cx| {
-                windows::open_window_with(vec![tab], Vec::new(), Some((WindowBounds::Windowed(bounds), None)), cx);
-            });
+            }
+            TabDrop::Apart(at) if self.tabs.len() > 1 => {
+                let Some(tab) = self.extract_tab_by_document(dragged.document_id(), window, cx) else { return };
+                let bounds = Bounds::new(windows::apart_origin(at, cx), window.viewport_size());
+                cx.defer(move |cx| {
+                    windows::open_window_with(vec![tab], Vec::new(), Some((WindowBounds::Windowed(bounds), None)), cx);
+                });
+            }
+            TabDrop::Apart(_) | TabDrop::Stays => {}
         }
     }
 
@@ -2122,6 +2166,7 @@ impl Render for Workspace {
             .on_drag_move(
                 cx.listener(|workspace, event: &DragMoveEvent<ExternalPaths>, _, cx| workspace.drag_files(event, cx)),
             )
+            .on_drag_move(cx.listener(Self::tab_dragged))
             .on_drop(move |dragged: &DraggedTab, window, cx| {
                 let _ = tab_tearoff.update(cx, |workspace, cx| workspace.tab_dropped_outside_bar(dragged, window, cx));
             })
