@@ -6,9 +6,9 @@
 //! advances of its glyphs. resvg shapes text too, with kerning, which makes it a little narrower
 //! than measured: a label has room on its background.
 //!
-//! What is found is kept: the font of each list of families, the glyphs of each font, the fonts
-//! found for characters — merman measures a label again for each place it could wrap at, and
-//! reading a font means mapping its file and parsing it.
+//! What is found is kept: the font of each list of families, the glyphs of each font, the
+//! characters of every font of the system — merman measures a label again for each place it could
+//! wrap at, and reading a font means mapping its file and parsing it.
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex, PoisonError};
@@ -44,10 +44,19 @@ struct Found {
     /// The glyphs of the characters looked up in each font.
     glyphs: HashMap<ID, Glyphs>,
     /// The fonts found for characters their fonts lack, by the character and the fonts tried
-    /// before; and those fonts in the order they were found.
+    /// before.
     fallbacks: HashMap<(char, Vec<ID>), Option<ID>>,
-    found: Vec<ID>,
+    /// The characters of every font of the system, as ranges, in the order of the fonts: read the
+    /// first time a character is missing, rather than every font for each character missing.
+    characters: Option<Vec<(ID, Ranges)>>,
 }
+
+/// Characters, as ranges in order: the first and the last of each.
+type Ranges = Vec<(u32, u32)>;
+
+/// How many of each kind of what was found are kept at most: a document chooses the families of
+/// its diagrams, and the characters of its labels.
+const MOST_FOUND: usize = 4096;
 
 /// The glyphs of a font: of each character, its number — 0 if the font lacks it — and its advance.
 #[derive(Default)]
@@ -61,6 +70,13 @@ struct Glyphs {
 pub(super) fn width(text: &str, families: &str, size: f64, weight: u16, italic: bool) -> Option<f64> {
     let fonts = &*FONTS;
     let mut found = FOUND.lock().unwrap_or_else(PoisonError::into_inner);
+    if found.fonts.len() > MOST_FOUND || found.fallbacks.len() > MOST_FOUND * 16 {
+        found.fonts.clear();
+        found.fallbacks.clear();
+    }
+    if found.glyphs.values().map(|glyphs| glyphs.of.len()).sum::<usize>() > MOST_FOUND * 64 {
+        found.glyphs.clear();
+    }
     let font = found.font(fonts, families, weight, italic)?;
     let glyphs = found.glyphs_with_fallbacks(fonts, text, font);
     Some(glyphs.iter().map(|glyph| f64::from(glyph.advance) * size / f64::from(glyph.units_per_em.max(1))).sum())
@@ -143,54 +159,73 @@ impl Found {
             .collect()
     }
 
-    /// The font to draw `c` in, not one of `used`: for an emoji, one of emoji; else a font found
-    /// before for another character, if it has `c`; else, as usvg finds it, the first font of the
-    /// system that has it and is of the style of the first of `used`, its weight or its width. The
-    /// fonts of a script come one after another: without the fonts found before, each character of
-    /// Chinese a label starts with would go through every font of the system.
+    /// The font to draw `c` in, not one of `used`: for an emoji, one of emoji; else, as usvg finds
+    /// it, the first font of the system that has it and is of the style of the first of `used`,
+    /// its weight or its width.
     fn fallback(&mut self, fonts: &Database, c: char, used: &[ID]) -> Option<ID> {
         let key = (c, used.to_vec());
         if let Some(found) = self.fallbacks.get(&key) {
             return *found;
         }
+        let characters = self.characters.get_or_insert_with(|| characters(fonts));
+        let has =
+            |id: ID| characters.iter().find(|(font, _)| *font == id).is_some_and(|(_, ranges)| contains(ranges, c));
         let base = fonts.face(*used.first()?)?;
-        let fits = |face: &fontdb::FaceInfo| {
-            let other_style = base.style != face.style && base.weight != face.weight && base.stretch != face.stretch;
-            !used.contains(&face.id) && !other_style
-        };
         let emoji = EMOJI_PRESENTATION.as_ref().is_some_and(|emoji| emoji.is_match(c.encode_utf8(&mut [0; 4])));
         let emoji_font = || {
             EMOJI.iter().find_map(|family| {
                 let families = [Family::Name(family)];
                 let query =
                     Query { families: &families, weight: Weight(400), stretch: Stretch::Normal, style: Style::Normal };
-                fonts.query(&query).filter(|id| !used.contains(id) && self.has(fonts, *id, c))
+                fonts.query(&query).filter(|id| !used.contains(id) && has(*id))
             })
         };
-        let found = emoji
-            .then(emoji_font)
-            .flatten()
-            .or_else(|| {
-                let before = self.found.iter().rev().copied();
-                before.filter(|id| fonts.face(*id).is_some_and(fits)).find(|id| self.has(fonts, *id, c))
-            })
-            .or_else(|| fonts.faces().find(|face| fits(face) && self.has(fonts, face.id, c)).map(|face| face.id));
-        if let Some(found) = found
-            && !self.found.contains(&found)
-        {
-            self.found.push(found);
-        }
+        let found = emoji.then(emoji_font).flatten().or_else(|| {
+            characters.iter().filter(|(id, ranges)| !used.contains(id) && contains(ranges, c)).map(|(id, _)| *id).find(
+                |id| {
+                    fonts.face(*id).is_some_and(|face| {
+                        face.style == base.style || face.weight == base.weight || face.stretch == base.stretch
+                    })
+                },
+            )
+        });
         self.fallbacks.insert(key, found);
         found
     }
+}
 
-    /// Whether `font` has a glyph for `c`: as looked up before, or in the font.
-    fn has(&self, fonts: &Database, font: ID, c: char) -> bool {
-        if let Some(&(id, _)) = self.glyphs.get(&font).and_then(|glyphs| glyphs.of.get(&c)) {
-            return id != 0;
-        }
-        fonts.with_face_data(font, |data, index| Face::parse(data, index).ok()?.glyph_index(c)).flatten().is_some()
-    }
+/// The characters of every font of the system, as ranges, in the order of the fonts.
+fn characters(fonts: &Database) -> Vec<(ID, Ranges)> {
+    fonts
+        .faces()
+        .map(|face| {
+            let ranges = fonts.with_face_data(face.id, |data, index| {
+                let face = Face::parse(data, index).ok()?;
+                let mut points = Vec::new();
+                for table in face.tables().cmap?.subtables.into_iter().filter(|table| table.is_unicode()) {
+                    table.codepoints(|point| points.push(point));
+                }
+                points.sort_unstable();
+                points.dedup();
+                let mut ranges = Ranges::new();
+                for point in points {
+                    match ranges.last_mut() {
+                        Some((_, end)) if *end + 1 == point => *end = point,
+                        _ => ranges.push((point, point)),
+                    }
+                }
+                Some(ranges)
+            });
+            (face.id, ranges.flatten().unwrap_or_default())
+        })
+        .collect()
+}
+
+/// Whether the ranges `ranges`, in order, have `c`.
+fn contains(ranges: &[(u32, u32)], c: char) -> bool {
+    let point = u32::from(c);
+    let at = ranges.partition_point(|(_, end)| *end < point);
+    ranges.get(at).is_some_and(|(start, _)| *start <= point)
 }
 
 /// The families of a list as CSS writes them: names, quoted or not, and generic families.
@@ -226,6 +261,13 @@ mod tests {
             families,
             [Family::Name("Trebuchet MS"), Family::Name("Verdana"), Family::Name("Arial"), Family::SansSerif]
         );
+    }
+
+    #[test]
+    fn characters_of_a_font_by_their_ranges() {
+        let ranges = [(32, 126), (0x400, 0x4FF)];
+        assert!(contains(&ranges, 'a') && contains(&ranges, ' ') && contains(&ranges, 'ж'));
+        assert!(!contains(&ranges, '\u{7F}') && !contains(&ranges, '①') && !contains(&[], 'a'));
     }
 
     #[test]
