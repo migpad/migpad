@@ -5,7 +5,7 @@
 //! by `file:` in the file manager; an anchor goes to its heading. The page loads nothing from the
 //! network.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::io::Read as _;
 use std::ops::Range;
@@ -19,7 +19,7 @@ use gpui::{
     AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, EventEmitter, FocusHandle, Focusable, Font, FontStyle,
     FontWeight, HighlightStyle, Hsla, Image, ImageFormat, ImageSource, InteractiveText, IntoElement, IsZero,
     KeyBinding, ListAlignment, ListOffset, ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    OngoingScroll, PinchEvent, Pixels, Point, Render, ScrollHandle, ScrollWheelEvent, SharedString, Size,
+    OngoingScroll, PinchEvent, Pixels, Point, Render, ScrollHandle, ScrollWheelEvent, ShapedLine, SharedString, Size,
     StrikethroughStyle, StyledImage, StyledText, Task, TextLayout, TextRun, UnderlineStyle, Window, canvas, div, fill,
     img, list, point, prelude::*, px, relative, rgb, size,
 };
@@ -50,6 +50,16 @@ const AREA_BAR: f32 = 10.;
 /// The room on each side of the text of a cell of a table.
 const CELL_PADDING: f32 = 12.;
 
+/// The least width an image of a cell of a table shrinks to, and the width taken for one of a size
+/// unknown.
+const PICTURE_LEAST: f32 = 48.;
+const PICTURE_UNKNOWN: f32 = 320.;
+
+/// Up to how many blocks every block of the page is measured, for a thumb of the scroll bar as long
+/// as the page is: when the width of the window changes, they are laid out again in one frame. A
+/// longer document measures those in view.
+const MEASURED_BLOCKS: usize = 1000;
+
 /// The keys of the preview: copying, selecting all.
 pub fn init(cx: &mut App) {
     cx.bind_keys([
@@ -77,6 +87,18 @@ struct Place {
     offset: usize,
 }
 
+/// A diagram of the page: its source, and the block it is in. The same diagram in two blocks is laid
+/// out, enlarged and found apart.
+type DiagramKey = (String, usize);
+
+/// The widths of the columns of a table — least and most — and the fonts they were measured in.
+struct ColumnWidths {
+    size: Pixels,
+    font: SharedString,
+    code: SharedString,
+    widths: Vec<(Pixels, Pixels)>,
+}
+
 /// Where a diagram was painted, and how far below the top of its block: it grows down from there.
 #[derive(Clone, Copy)]
 struct DiagramPlace {
@@ -96,7 +118,8 @@ enum Diagram {
 /// An image of the page, read from its file in the background, and when the file was changed then.
 enum Picture {
     Reading,
-    Read(Arc<Image>, Option<SystemTime>),
+    /// The image, its size if its kind tells it, and when its file was changed.
+    Read(Arc<Image>, Option<Size<f32>>, Option<SystemTime>),
     /// Not one the page shows: not a plain file, too large, of a kind unknown, an SVG that refers to
     /// other files.
     Refused(Option<SystemTime>),
@@ -127,12 +150,19 @@ pub struct MarkdownPreview {
     /// number in it; and the next of the block being laid out.
     areas: HashMap<(usize, usize), ScrollHandle>,
     area: (usize, usize),
-    /// How many times each diagram is enlarged over its width on the page, by its source.
-    zooms: HashMap<String, f32>,
-    /// The width the page gives each diagram, by its source, as the last frame laid it out; and
-    /// where the diagrams were painted, which a press does not select text over.
-    diagram_widths: Rc<RefCell<HashMap<String, Pixels>>>,
-    diagram_places: Rc<RefCell<HashMap<String, DiagramPlace>>>,
+    /// How many times each diagram is enlarged over its width on the page.
+    zooms: HashMap<DiagramKey, f32>,
+    /// The width the page gives each diagram, as the last frame laid it out; and where the
+    /// diagrams were painted, which a press does not select text over.
+    diagram_widths: Rc<RefCell<HashMap<DiagramKey, Pixels>>>,
+    diagram_places: Rc<RefCell<HashMap<DiagramKey, DiagramPlace>>>,
+    /// Whether a diagram was enlarged since the last frame: the list scrolls from where it was
+    /// painted, which the zoom moved.
+    zoomed: Rc<Cell<bool>>,
+    /// Whether every block is measured, or those in view.
+    measure_all: bool,
+    /// The widths of the columns of the tables, by their areas: measuring them takes a while.
+    table_widths: HashMap<(usize, usize), ColumnWidths>,
     /// A scroll bar being dragged.
     dragging: Option<Drag>,
     /// The direction a gesture of the trackpad started in, which it keeps to over an area.
@@ -153,8 +183,7 @@ impl MarkdownPreview {
     pub fn new(diagram_error: SharedString, cx: &mut Context<Self>) -> Self {
         MarkdownPreview {
             focus: cx.focus_handle(),
-            // Every block measured: the thumb of the scroll bar is as long as the page is.
-            list: ListState::new(0, ListAlignment::Top, px(600.)).measure_all(),
+            list: list_state(true),
             blocks: Rc::new(Vec::new()),
             starts: Vec::new(),
             segments: Vec::new(),
@@ -171,6 +200,9 @@ impl MarkdownPreview {
             zooms: HashMap::new(),
             diagram_widths: Rc::default(),
             diagram_places: Rc::default(),
+            zoomed: Rc::default(),
+            measure_all: true,
+            table_widths: HashMap::new(),
             dragging: None,
             gesture: OngoingScroll::default(),
             followed: None,
@@ -200,6 +232,11 @@ impl MarkdownPreview {
             let _ = preview.update(cx, |preview, cx| {
                 let scrolled = preview.list.logical_scroll_top();
                 let same = preview.segments == segments && preview.folder == folder;
+                let measure_all = blocks.len() <= MEASURED_BLOCKS;
+                if measure_all != preview.measure_all {
+                    preview.list = list_state(measure_all);
+                    preview.measure_all = measure_all;
+                }
                 preview.list.reset(blocks.len());
                 preview.list.scroll_to(scrolled);
                 preview.forget_unused(&blocks, folder.as_deref(), cx);
@@ -207,9 +244,12 @@ impl MarkdownPreview {
                 (preview.blocks, preview.starts, preview.segments) = (Rc::new(blocks), starts, segments);
                 if !same {
                     preview.selection = None;
-                    // The areas are numbered by their blocks, which are others now.
+                    // The areas and the diagrams are found by their blocks, which are others now.
                     preview.areas.clear();
+                    preview.zooms.clear();
+                    preview.diagram_widths.borrow_mut().clear();
                 }
+                preview.table_widths.clear();
                 // What was painted was of the text before: the mouse finds nothing until the next frame.
                 preview.layouts.borrow_mut().clear();
                 preview.reading = None;
@@ -239,8 +279,8 @@ impl MarkdownPreview {
         self.pictures.retain(|path, picture| {
             let keep = files.contains(path);
             match (keep, &picture) {
-                (false, Picture::Read(image, _)) => gone.push(image.clone()),
-                (true, Picture::Read(_, modified) | Picture::Refused(modified)) => {
+                (false, Picture::Read(image, ..)) => gone.push(image.clone()),
+                (true, Picture::Read(_, _, modified) | Picture::Refused(modified)) => {
                     changed.push((path.clone(), *modified));
                 }
                 _ => {}
@@ -479,32 +519,32 @@ impl MarkdownPreview {
         cx.notify();
     }
 
-    /// The diagram `source` of the block `block`, of the size `natural` at 100%, `zoom` times as
-    /// wide as the page gives it — not narrower — the point under `position` staying where it is.
-    #[allow(clippy::too_many_arguments)]
+    /// The diagram `key`, of the size `natural` at 100%, `zoom` times as wide as the page gives it
+    /// — not narrower — the point under `position` staying where it is.
     fn zoom(
         &mut self,
-        source: &str,
-        block: usize,
+        key: &DiagramKey,
         natural: Size<f32>,
         zoom: f32,
         position: Point<Pixels>,
         handle: &ScrollHandle,
         cx: &mut Context<Self>,
     ) {
-        let old = self.zooms.get(source).copied().unwrap_or(1.);
+        let block = key.1;
+        let old = self.zooms.get(key).copied().unwrap_or(1.);
         let new = zoom.clamp(1., MAX_ZOOM);
-        let given = self.diagram_widths.borrow().get(source).copied();
-        let place = self.diagram_places.borrow().get(source).copied();
+        let given = self.diagram_widths.borrow().get(key).copied();
+        let place = self.diagram_places.borrow().get(key).copied();
         let (Some(given), Some(place)) = (given, place) else { return };
         if (new - old).abs() < 0.001 || natural.width <= 0. || given <= px(0.) {
             return;
         }
         if new > 1. {
-            self.zooms.insert(source.to_owned(), new);
+            self.zooms.insert(key.clone(), new);
         } else {
-            self.zooms.remove(source);
+            self.zooms.remove(key);
         }
+        self.zoomed.set(true);
         let fit = px(natural.width).min(given);
         let (before, after) = (fit * old, fit * new);
         // Sideways the point under the pointer stays; a diagram that fits is centred.
@@ -571,6 +611,10 @@ impl MarkdownPreview {
         let thumb = canvas(
             |_, _, _| {},
             move |bounds, _, window, _| {
+                // Wider than the page or no longer: the room for the bar comes, or goes, at once.
+                if (painted.max_offset().x > px(0.)) != wide {
+                    window.request_animation_frame();
+                }
                 if let Some((left, width)) = area_thumb(&painted, bounds.size.width) {
                     let thumb = Bounds::new(point(bounds.left() + left, bounds.top() + px(2.)), size(width, px(6.)));
                     window.paint_quad(fill(thumb, rgb(thumb_color)).corner_radii(px(3.)));
@@ -725,8 +769,8 @@ impl MarkdownPreview {
     }
 
     /// A table as tables of the web are laid out: each column as wide as its text on one line if
-    /// the page has room, else no narrower than its widest word, the room there is going to the
-    /// columns that need it most; narrower than its words, the table scrolls sideways. The text is
+    /// the page has room, else no narrower than its widest word, the room there is shared by the
+    /// columns that need it; narrower than its words, the table scrolls sideways. The text is
     /// measured here, as GPUI knows no least width of text that wraps: every cell of a column
     /// has the same least, most and share of the room, which keeps the columns straight.
     fn table(
@@ -744,19 +788,35 @@ impl MarkdownPreview {
         let style = window.text_style();
         let size = style.font_size.to_pixels(window.rem_size());
         let code = monospace(cx);
-        let mut widths = vec![(px(0.), px(0.)); count];
-        for (row, is_header) in all_rows() {
-            let font =
-                Font { weight: if is_header { FontWeight::SEMIBOLD } else { style.font_weight }, ..style.font() };
-            for (width, cell) in widths.iter_mut().zip(row) {
-                let (least, most) = cell_widths(cell, &font, &code, size, window);
-                *width = (width.0.max(least), width.1.max(most));
+        // Measured once for the text as it is, in these fonts: the table is laid out every frame.
+        let key = self.area;
+        let measured = self
+            .table_widths
+            .get(&key)
+            .filter(|measured| measured.size == size && measured.font == style.font_family && measured.code == code);
+        let widths = match measured {
+            Some(measured) => measured.widths.clone(),
+            None => {
+                let mut widths = vec![(px(0.), px(0.)); count];
+                for (row, is_header) in all_rows() {
+                    let weight = if is_header { FontWeight::SEMIBOLD } else { style.font_weight };
+                    let font = Font { weight, ..style.font() };
+                    for (width, cell) in widths.iter_mut().zip(row) {
+                        let (least, most) = self.cell_widths(cell, &font, &code, size, window);
+                        *width = (width.0.max(least), width.1.max(most));
+                    }
+                }
+                // The padding and the border of a cell, and a pixel for rounding.
+                let room = px(2. * CELL_PADDING + 2.);
+                let widths: Vec<(Pixels, Pixels)> = widths
+                    .into_iter()
+                    .map(|(least, most)| (least.ceil() + room, most.max(least).ceil() + room))
+                    .collect();
+                let measured = ColumnWidths { size, font: style.font_family.clone(), code, widths: widths.clone() };
+                self.table_widths.insert(key, measured);
+                widths
             }
-        }
-        // The padding and the border of a cell, and a pixel for rounding.
-        let room = px(2. * CELL_PADDING + 2.);
-        let widths: Vec<(Pixels, Pixels)> =
-            widths.into_iter().map(|(least, most)| (least.ceil() + room, most.max(least).ceil() + room)).collect();
+        };
         let mut lines = Vec::with_capacity(rows.len() + 1);
         for (row, is_header) in all_rows() {
             let mut cells = Vec::with_capacity(count);
@@ -764,7 +824,9 @@ impl MarkdownPreview {
                 let content = row.get(column).map(|content| self.inlines(content, segment, cx));
                 let cell = div()
                     .flex_basis(least)
-                    .flex_grow(f32::from(most - least))
+                    // The room is shared alike, which a column of short text has all it needs of
+                    // first: it stays on its lines, and the long text of the others wraps.
+                    .flex_grow(if most > least { 1. } else { 0. })
                     .flex_shrink_0()
                     .min_w(least)
                     .max_w(most)
@@ -805,6 +867,54 @@ impl MarkdownPreview {
             .children(lines)
             .into_any_element();
         self.area(table, false, cx).0
+    }
+
+    /// The least width the cell `content` takes — its widest word, which does not break; an image
+    /// shrinks, but not much — and the most: its lines unwrapped, an image as large as it is. Text
+    /// is in `font`, code in `code`, at `size`.
+    fn cell_widths(
+        &self,
+        content: &[Inline],
+        font: &Font,
+        code: &SharedString,
+        size: Pixels,
+        window: &Window,
+    ) -> (Pixels, Pixels) {
+        let (mut least, mut most) = (px(0.), px(0.));
+        for inline in content {
+            let shown;
+            let (text, styled) = match inline {
+                Inline::Text(text) => (text.text.as_str(), Some(text)),
+                Inline::Image { url, alt } => {
+                    let path = markdown::local_file(url, self.folder.as_deref());
+                    if let Some(Picture::Read(_, natural, _)) = path.and_then(|path| self.pictures.get(&path)) {
+                        let width = natural.map_or(px(PICTURE_UNKNOWN), |natural| px(natural.width));
+                        least = least.max(width.min(px(PICTURE_LEAST)));
+                        most = most.max(width);
+                        continue;
+                    }
+                    // Its text, as the page shows an image it does not draw.
+                    shown = format!("[{}]", if alt.is_empty() { url } else { alt });
+                    (shown.as_str(), None)
+                }
+            };
+            let mut start = 0;
+            for line in text.split('\n') {
+                let range = start..start + line.len();
+                start = range.end + 1;
+                if line.is_empty() {
+                    continue;
+                }
+                let runs = match styled {
+                    Some(styled) => text_runs(styled, range, font, code),
+                    None => vec![text_run(line.len(), font.clone())],
+                };
+                let shaped = window.text_system().shape_line(SharedString::from(line.to_owned()), size, &runs, None);
+                most = most.max(shaped.width);
+                least = least.max(widest_word(line, &shaped));
+            }
+        }
+        (least, most)
     }
 
     /// Text with images among it: the images on lines of their own.
@@ -920,7 +1030,7 @@ impl MarkdownPreview {
         let missing = move || div().text_color(rgb(theme.text_muted)).child(format!("[{alt}]")).into_any_element();
         let Some(path) = markdown::local_file(url, self.folder.as_deref()) else { return missing() };
         match self.pictures.get(&path) {
-            Some(Picture::Read(image, _)) => img(image.clone()).max_w_full().with_fallback(missing).into_any_element(),
+            Some(Picture::Read(image, ..)) => img(image.clone()).max_w_full().with_fallback(missing).into_any_element(),
             Some(Picture::Refused(_)) => missing(),
             Some(Picture::Reading) => div().into_any_element(),
             None => {
@@ -932,7 +1042,7 @@ impl MarkdownPreview {
 
     /// Reads the image of the file `path` in the background.
     fn read_picture(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        if let Some(Picture::Read(image, _)) = self.pictures.insert(path.clone(), Picture::Reading) {
+        if let Some(Picture::Read(image, ..)) = self.pictures.insert(path.clone(), Picture::Reading) {
             ImageSource::Image(image).remove_asset(cx);
         }
         let read = cx.background_spawn({
@@ -945,6 +1055,8 @@ impl MarkdownPreview {
                 // Unless the document has no such image any more.
                 if let Some(reading) = preview.pictures.get_mut(&path) {
                     *reading = picture;
+                    // A table with it in a cell is as wide as the image now.
+                    preview.table_widths.clear();
                     cx.notify();
                 }
             });
@@ -1001,8 +1113,10 @@ impl MarkdownPreview {
     /// the wheel with Cmd — Ctrl on Windows and Linux — and back by a double click; enlarged past
     /// the page it scrolls sideways.
     fn zoomable(&mut self, source: &str, image: Arc<Image>, natural: Size<f32>, cx: &mut Context<Self>) -> AnyElement {
-        let zoom = self.zooms.get(source).copied().unwrap_or(1.);
-        let given = self.diagram_widths.borrow().get(source).copied();
+        let (block, id) = (self.area.0, self.area.0 * 1024 + self.area.1);
+        let key: DiagramKey = (source.to_owned(), block);
+        let zoom = self.zooms.get(&key).copied().unwrap_or(1.);
+        let given = self.diagram_widths.borrow().get(&key).copied();
         // Laid out once, the width the page gives is known; the first time, the image just fits.
         let shown = given.map(|given| px(natural.width).min(given) * zoom);
         let picture = match shown {
@@ -1013,21 +1127,21 @@ impl MarkdownPreview {
             (Some(shown), Some(given)) => shown <= given + px(0.5),
             _ => true,
         };
-        let (block, id) = (self.area.0, self.area.0 * 1024 + self.area.1);
-        let (widths, places, key) = (self.diagram_widths.clone(), self.diagram_places.clone(), source.to_owned());
+        let (widths, places, measured) = (self.diagram_widths.clone(), self.diagram_places.clone(), key.clone());
         let list = self.list.clone();
         let measure = canvas(
             move |area, window, _| {
                 let width = area.size.width;
-                if widths.borrow_mut().insert(key.clone(), width) != Some(width) {
-                    // The width changed: the image takes the new one in the next frame.
-                    window.refresh();
+                if widths.borrow_mut().insert(measured.clone(), width) != Some(width) {
+                    // The width changed: the image takes the new one in the next frame, which
+                    // nothing else may ask for.
+                    window.request_animation_frame();
                 }
-                (key, area)
+                (measured, area)
             },
-            move |_, (key, area), _, _| {
+            move |_, (measured, area), _, _| {
                 let below = list.bounds_for_item(block).map_or(px(0.), |item| area.top() - item.top());
-                places.borrow_mut().insert(key, DiagramPlace { bounds: area, below });
+                places.borrow_mut().insert(measured, DiagramPlace { bounds: area, below });
             },
         )
         // Over the diagram: with no place given, it would be below it, where the flow puts it.
@@ -1037,7 +1151,7 @@ impl MarkdownPreview {
         .size_full();
         let (area, handle) = self.area(picture, fits, cx);
         let (wheel, pinch, click) = (handle.clone(), handle.clone(), handle);
-        let (wheel_source, pinch_source, click_source) = (source.to_owned(), source.to_owned(), source.to_owned());
+        let (wheel_key, pinch_key, click_key) = (key.clone(), key.clone(), key);
         div()
             .id(("diagram", id))
             .relative()
@@ -1045,21 +1159,28 @@ impl MarkdownPreview {
             .child(area)
             .child(measure)
             .on_scroll_wheel(cx.listener(move |preview, event: &ScrollWheelEvent, _, cx| {
+                let delta = event.delta.pixel_delta(px(20.));
                 if zooming(event) {
-                    let delta = f32::from(event.delta.pixel_delta(px(20.)).y);
-                    let zoom = preview.zooms.get(&wheel_source).copied().unwrap_or(1.) * (delta * 0.005).exp();
-                    preview.zoom(&wheel_source, block, natural, zoom, event.position, &wheel, cx);
+                    let zoom =
+                        preview.zooms.get(&wheel_key).copied().unwrap_or(1.) * (f32::from(delta.y) * 0.005).exp();
+                    preview.zoom(&wheel_key, natural, zoom, event.position, &wheel, cx);
+                    cx.stop_propagation();
+                } else if preview.zoomed.get() {
+                    // The list would scroll from where it was painted, as if the zoom had not
+                    // moved the page.
+                    preview.list.scroll_by(-delta.y);
+                    cx.notify();
                     cx.stop_propagation();
                 }
             }))
             .on_pinch(cx.listener(move |preview, event: &PinchEvent, _, cx| {
-                let zoom = preview.zooms.get(&pinch_source).copied().unwrap_or(1.) * (1. + event.delta);
-                preview.zoom(&pinch_source, block, natural, zoom, event.position, &pinch, cx);
+                let zoom = preview.zooms.get(&pinch_key).copied().unwrap_or(1.) * (1. + event.delta);
+                preview.zoom(&pinch_key, natural, zoom, event.position, &pinch, cx);
                 cx.stop_propagation();
             }))
             .on_click(cx.listener(move |preview, event: &ClickEvent, _, cx| {
                 if event.click_count() == 2 {
-                    preview.zoom(&click_source, block, natural, 1., event.position(), &click, cx);
+                    preview.zoom(&click_key, natural, 1., event.position(), &click, cx);
                 }
             }))
             .into_any_element()
@@ -1080,12 +1201,13 @@ impl Render for MarkdownPreview {
         let theme = theme(cx);
         // Painted before the blocks: the segments and diagrams of the last frame go, those painted now
         // come.
-        let (layouts, diagrams) = (self.layouts.clone(), self.diagram_places.clone());
+        let (layouts, diagrams, zoomed) = (self.layouts.clone(), self.diagram_places.clone(), self.zoomed.clone());
         let forget = canvas(
             |_, _, _| {},
             move |_, _, _, _| {
                 layouts.borrow_mut().clear();
                 diagrams.borrow_mut().clear();
+                zoomed.set(false);
             },
         )
         .absolute()
@@ -1140,53 +1262,27 @@ impl Render for MarkdownPreview {
     }
 }
 
-/// The least width the cell `content` takes — its widest word, which does not break — and the
-/// most, its lines unwrapped: in `font`, and in `code` for code, at `size`.
-fn cell_widths(
-    content: &[Inline],
-    font: &Font,
-    code: &SharedString,
-    size: Pixels,
-    window: &Window,
-) -> (Pixels, Pixels) {
-    let (mut least, mut most) = (px(0.), px(0.));
-    for inline in content {
-        let alt;
-        let (text, styled) = match inline {
-            Inline::Text(text) => (text.text.as_str(), Some(text)),
-            Inline::Image { alt: text, .. } => {
-                alt = format!("[{text}]");
-                (alt.as_str(), None)
-            }
-        };
-        let mut start = 0;
-        for line in text.split('\n') {
-            let range = start..start + line.len();
-            start = range.end + 1;
-            if line.is_empty() {
-                continue;
-            }
-            let runs = match styled {
-                Some(styled) => text_runs(styled, range, font, code),
-                None => vec![text_run(line.len(), font.clone())],
-            };
-            let shaped = window.text_system().shape_line(SharedString::from(line.to_owned()), size, &runs, None);
-            most = most.max(shaped.width);
-            // A line breaks before a word after a space, the space staying with the word before;
-            // and around the characters of Chinese, Japanese and Korean, which have no spaces.
-            let mut word = 0;
-            let mut previous = '\0';
-            for (at, c) in line.char_indices() {
-                if at > 0 && ((previous == ' ' && c != ' ') || wide(c) || wide(previous)) {
-                    least = least.max(shaped.x_for_index(at) - shaped.x_for_index(word));
-                    word = at;
-                }
-                previous = c;
-            }
-            least = least.max(shaped.width - shaped.x_for_index(word));
+/// The widest word of `line`, as `shaped`: a line breaks before a word after a space, the space
+/// staying with the word before, and around the characters of Chinese, Japanese and Korean. A
+/// word is as wide as its glyphs, in whatever order they are laid: right to left, the first glyph
+/// is of the end of the text.
+fn widest_word(line: &str, shaped: &ShapedLine) -> Pixels {
+    let mut breaks = Vec::new();
+    let mut previous = '\0';
+    for (at, c) in line.char_indices() {
+        if at > 0 && ((previous == ' ' && c != ' ') || wide(c) || wide(previous)) {
+            breaks.push(at);
         }
+        previous = c;
     }
-    (least, most)
+    let glyphs: Vec<(usize, Pixels)> =
+        shaped.runs.iter().flat_map(|run| &run.glyphs).map(|glyph| (glyph.index, glyph.position.x)).collect();
+    let mut words = vec![px(0.); breaks.len() + 1];
+    for (i, &(index, x)) in glyphs.iter().enumerate() {
+        let next = glyphs.get(i + 1).map_or(shaped.width, |&(_, x)| x);
+        words[breaks.partition_point(|&at| at <= index)] += (next - x).max(px(0.));
+    }
+    words.into_iter().fold(px(0.), Pixels::max)
 }
 
 /// The runs of the part `range` of `text`: in `font`, bold, italic or code as its styles say.
@@ -1365,12 +1461,88 @@ fn read_picture(path: &Path) -> Picture {
         if format == ImageFormat::Svg && !self_contained(&String::from_utf8_lossy(&bytes)) {
             return None;
         }
-        Some(Arc::new(Image::from_bytes(format, bytes)))
+        let size = picture_size(format, &bytes);
+        Some((Arc::new(Image::from_bytes(format, bytes)), size))
     };
     match read() {
-        Some(image) => Picture::Read(image, modified),
+        Some((image, size)) => Picture::Read(image, size, modified),
         None => Picture::Refused(modified),
     }
+}
+
+/// The size of the image `bytes` are, of the kind `format`, in pixels, as its header tells it: a
+/// table gives an image in a cell the room it takes.
+fn picture_size(format: ImageFormat, bytes: &[u8]) -> Option<Size<f32>> {
+    let u16_be = |at: usize| Some(u16::from_be_bytes(bytes.get(at..at + 2)?.try_into().ok()?) as f32);
+    let u16_le = |at: usize| Some(u16::from_le_bytes(bytes.get(at..at + 2)?.try_into().ok()?) as f32);
+    let u24_le = |at: usize| {
+        let b = bytes.get(at..at + 3)?;
+        Some((u32::from(b[0]) | u32::from(b[1]) << 8 | u32::from(b[2]) << 16) as f32)
+    };
+    let u32_be = |at: usize| Some(u32::from_be_bytes(bytes.get(at..at + 4)?.try_into().ok()?) as f32);
+    let i32_le = |at: usize| Some(i32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?).unsigned_abs() as f32);
+    let (width, height) = match format {
+        ImageFormat::Png => (u32_be(16)?, u32_be(20)?),
+        ImageFormat::Gif => (u16_le(6)?, u16_le(8)?),
+        ImageFormat::Bmp => (i32_le(18)?, i32_le(22)?),
+        ImageFormat::Webp => match bytes.get(12..16)? {
+            b"VP8 " => (u16_le(26)? % 16384., u16_le(28)? % 16384.),
+            b"VP8L" => {
+                let bits = u32::from_le_bytes(bytes.get(21..25)?.try_into().ok()?);
+                ((bits & 0x3FFF) as f32 + 1., (bits >> 14 & 0x3FFF) as f32 + 1.)
+            }
+            b"VP8X" => (u24_le(24)? + 1., u24_le(27)? + 1.),
+            _ => return None,
+        },
+        ImageFormat::Jpeg => {
+            // The frame says it, after the segments before it.
+            let mut at = 2;
+            loop {
+                let (marker, length) = (*bytes.get(at + 1)?, u16_be(at + 2)? as usize);
+                if bytes[at] != 0xFF {
+                    return None;
+                }
+                if matches!(marker, 0xC0..=0xCF) && !matches!(marker, 0xC4 | 0xC8 | 0xCC) {
+                    break (u16_be(at + 7)?, u16_be(at + 5)?);
+                }
+                at += 2 + length;
+            }
+        }
+        ImageFormat::Svg => svg_size(&String::from_utf8_lossy(&bytes[..bytes.len().min(8192)]))?,
+        _ => return None,
+    };
+    (width > 0. && height > 0.).then(|| size(width, height))
+}
+
+/// The size of an SVG image, as its tag tells it: its width and its height in pixels, else those of
+/// its view box.
+fn svg_size(svg: &str) -> Option<(f32, f32)> {
+    let start = svg.find("<svg")?;
+    let tag = &svg[start..start + svg[start..].find('>')?];
+    let attribute = |name: &str| {
+        let at = tag.find(&format!(" {name}=\""))? + name.len() + 3;
+        Some(&tag[at..at + tag[at..].find('"')?])
+    };
+    let pixels = |name: &str| attribute(name)?.trim().trim_end_matches("px").parse::<f32>().ok();
+    match (pixels("width"), pixels("height")) {
+        (Some(width), Some(height)) => Some((width, height)),
+        _ => {
+            let numbers: Vec<f32> = attribute("viewBox")?
+                .split(|c: char| c.is_whitespace() || c == ',')
+                .filter_map(|number| number.parse().ok())
+                .collect();
+            match numbers[..] {
+                [_, _, width, height] => Some((width, height)),
+                _ => None,
+            }
+        }
+    }
+}
+
+/// The list of the blocks of a page: every block measured, or those in view.
+fn list_state(measure_all: bool) -> ListState {
+    let list = ListState::new(0, ListAlignment::Top, px(600.));
+    if measure_all { list.measure_all() } else { list }
 }
 
 /// The kind of the image `bytes` are, by how they start.
@@ -1510,6 +1682,30 @@ mod tests {
         assert_eq!(picture_format(b"\xef\xbb\xbf<?xml version=\"1.0\"?>\n<svg xmlns=\"\"/>"), Some(ImageFormat::Svg));
         assert_eq!(picture_format(b"not an image"), None);
         assert_eq!(picture_format(b""), None);
+    }
+
+    #[test]
+    fn pictures_tell_their_size() {
+        let png =
+            [b"\x89PNG\r\n\x1a\n".as_slice(), &[0, 0, 0, 13], b"IHDR", &640u32.to_be_bytes(), &480u32.to_be_bytes()]
+                .concat();
+        assert_eq!(picture_size(ImageFormat::Png, &png), Some(size(640., 480.)));
+        let gif = [b"GIF89a".as_slice(), &32u16.to_le_bytes(), &16u16.to_le_bytes()].concat();
+        assert_eq!(picture_size(ImageFormat::Gif, &gif), Some(size(32., 16.)));
+        // A segment of JPEG before its frame.
+        let jpeg = [
+            &[0xFF, 0xD8, 0xFF, 0xE0, 0, 4, 0, 0][..],
+            &[0xFF, 0xC0, 0, 17, 8],
+            &200u16.to_be_bytes(),
+            &300u16.to_be_bytes(),
+        ]
+        .concat();
+        assert_eq!(picture_size(ImageFormat::Jpeg, &jpeg), Some(size(300., 200.)));
+        assert_eq!(svg_size(r#"<svg xmlns="x" width="120px" height="40">"#), Some((120., 40.)));
+        assert_eq!(svg_size(r#"<?xml?><svg viewBox="0 0 64,32">"#), Some((64., 32.)));
+        assert_eq!(svg_size("<svg>"), None);
+        assert_eq!(picture_size(ImageFormat::Png, b"\x89PNG"), None);
+        assert_eq!(picture_size(ImageFormat::Jpeg, &[0xFF, 0xD8, 0xFF, 0xE0, 0, 0]), None);
     }
 
     #[test]
