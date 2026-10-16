@@ -60,8 +60,8 @@ pub fn detect(sample: &[u8], complete: bool, tld: Option<&str>) -> Detected {
 /// must look like text: no unpaired surrogates, no control characters but tabs, line and page
 /// breaks. Binary files have plenty of those.
 ///
-/// Text in scripts with thousands of characters, as Chinese, has no such high bytes and is not
-/// told from other encodings without others among it.
+/// Text in scripts with thousands of characters, as Chinese and Japanese, has no such high bytes,
+/// and many of its units are two printable ASCII bytes: it is told only with much Latin among it.
 fn utf16_without_bom(sample: &[u8]) -> Option<Encoding> {
     // High bytes come second in little-endian code units.
     [(Encoding::UTF_16LE, 1), (Encoding::UTF_16BE, 0)]
@@ -98,7 +98,8 @@ fn has_utf16_high_bytes(sample: &[u8], high: usize) -> bool {
 }
 
 /// Whether `sample` in `encoding`, UTF-16, is text. A sample may cut a character: an odd byte or
-/// the first half of a surrogate pair at its end do not count, nor NUL characters that end a file.
+/// the first half of a surrogate pair at its end do not count. NUL characters do: text that zero
+/// bytes pad to a size, after a crash or in records, would read as UTF-16 without them.
 fn reads_as_text(sample: &[u8], encoding: Encoding) -> bool {
     let (pairs, _) = sample.as_chunks::<2>();
     let from_bytes = if encoding == Encoding::UTF_16LE { u16::from_le_bytes } else { u16::from_be_bytes };
@@ -106,15 +107,11 @@ fn reads_as_text(sample: &[u8], encoding: Encoding) -> bool {
     if units.last().is_some_and(|unit| (0xD800..0xDC00).contains(unit)) {
         units.pop();
     }
-    while units.last() == Some(&0) {
-        units.pop();
-    }
-    !units.is_empty()
-        && char::decode_utf16(units).all(|c| {
-            c.is_ok_and(|c| {
-                !(c.is_control() && !matches!(c, '\t' | '\n' | '\r' | '\x0C')) && !matches!(c, '\u{FFFE}' | '\u{FFFF}')
-            })
+    char::decode_utf16(units).all(|c| {
+        c.is_ok_and(|c| {
+            !(c.is_control() && !matches!(c, '\t' | '\n' | '\r' | '\x0C')) && !matches!(c, '\u{FFFE}' | '\u{FFFF}')
         })
+    })
 }
 
 /// Whether `sample` is UTF-8 with a few broken places: its valid non-ASCII characters outnumber
@@ -332,11 +329,10 @@ mod tests {
     }
 
     #[test]
-    fn utf16_in_other_scripts_and_with_a_nul_at_the_end() {
+    fn utf16_in_other_scripts() {
         let texts = [
             "नमस्ते दुनिया, यह एक परीक्षण है।\n",
             "// 这是一个中文注释\nfn main() {\n    println!(\"你好, {}\", name);\n}\n",
-            "A string that a NUL character ends\0\0",
         ];
         for text in texts {
             for encoding in [Encoding::UTF_16LE, Encoding::UTF_16BE] {
@@ -344,8 +340,24 @@ mod tests {
                 assert_eq!(detect(&bytes, true, None), Detected { encoding, bom: false }, "{text:?} {encoding:?}");
             }
         }
-        // Not only NUL characters.
-        assert_eq!(detect(&[0; 8], true, None).encoding, Encoding::UTF_8);
+    }
+
+    #[test]
+    fn text_that_zero_bytes_pad_is_not_utf16() {
+        let pad = |text: &[u8], size: usize| [text, &vec![0; size - text.len()]].concat();
+        let samples = [
+            pad("2026-10-16 21:45:00 INFO started\n".repeat(30).as_bytes(), 16 << 10),
+            pad(b"hello world\n", 128),
+            pad(b"key=value\n", 4096),
+            pad("Привет, мир!\n".as_bytes(), 128),
+            pad(b"a", 4),
+            pad(b"ok", 22),
+            vec![0; 8],
+        ];
+        for bytes in samples {
+            let encoding = detect(&bytes, true, None).encoding;
+            assert!(![Encoding::UTF_16LE, Encoding::UTF_16BE].contains(&encoding), "{bytes:?}: {encoding:?}");
+        }
     }
 
     #[test]
