@@ -10,6 +10,7 @@ A fast cross-platform text editor for macOS, Linux and Windows, inspired by [Ake
 - **Careful with text** — Unicode and legacy encodings (Windows-1251, KOI8-R, CP866 and more), encoding auto-detection (UTF-16 without a BOM too), BOM, LF / CRLF / CR line endings.
 - **Powerful editing** — column selection, find and replace with regular expressions, case changes, multi-level undo.
 - **Nothing is lost** — edits are saved continuously and survive quitting or a crash, so quitting never asks "Save changes?"; closing a tab with unsaved changes asks whether to save them.
+- **Logs as they grow** — Follow File, in the View menu and the menu of a tab, shows what another program adds to a file, as `tail -f` does: the view stays at the end, rotated logs are read anew, and the file is never written meanwhile.
 - **Markdown as a page** — Markdown documents open rendered, with tables, task lists, images from files and Mermaid diagrams, all drawn on the spot; links, web and mail addresses written plainly among them, open with a click; a diagram enlarges with a pinch or with the wheel and Cmd/Ctrl. The switch at the end of the tab bar, or Cmd/Ctrl+Shift+M, shows the text.
 - **Offline** — no telemetry, accounts or online services.
 - **Everything built in** — no plugins: features ship with the editor, and the modular architecture lets new ones be added without reworking the core.
