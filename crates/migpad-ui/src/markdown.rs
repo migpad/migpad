@@ -5,16 +5,19 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::io::Read as _;
 use std::ops::Range;
-use std::path::PathBuf;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use gpui::{
     AnyElement, App, ClipboardItem, Context, FocusHandle, Focusable, FontStyle, FontWeight, HighlightStyle, Hsla,
-    Image, ImageFormat, IntoElement, KeyBinding, ListAlignment, ListState, MouseButton, MouseDownEvent, MouseMoveEvent,
-    Pixels, Point, Render, SharedString, StrikethroughStyle, StyledImage, StyledText, Task, TextLayout, UnderlineStyle,
-    Window, canvas, div, img, list, prelude::*, px, relative, rgb,
+    Image, ImageFormat, ImageSource, IntoElement, KeyBinding, ListAlignment, ListState, MouseButton, MouseDownEvent,
+    MouseMoveEvent, Pixels, Point, Render, SharedString, StrikethroughStyle, StyledImage, StyledText, Task, TextLayout,
+    UnderlineStyle, Window, canvas, div, img, list, prelude::*, px, relative, rgb,
 };
 use migpad_core::markdown::{self, Align, Block, Inline, Item, Style, Text, mermaid};
 use migpad_editor::actions::{Copy, SelectAll};
@@ -26,6 +29,13 @@ const CONTEXT: &str = "MarkdownPreview";
 
 /// The widest the text of the page gets: lines longer than that are hard to read.
 const PAGE_WIDTH: f32 = 860.;
+
+/// The most lines of a block of code the page lays out: a log pasted whole would take seconds a
+/// frame. Copying takes it whole.
+const CODE_LINES: usize = 2000;
+
+/// The largest file an image is read from.
+const PICTURE_SIZE: u64 = 32 << 20;
 
 /// The keys of the preview: copying, selecting all.
 pub fn init(cx: &mut App) {
@@ -53,6 +63,15 @@ enum Diagram {
     Failed(SharedString),
 }
 
+/// An image of the page, read from its file in the background, and when the file was changed then.
+enum Picture {
+    Reading,
+    Read(Arc<Image>, Option<SystemTime>),
+    /// Not one the page shows: not a plain file, too large, of a kind unknown, an SVG that refers to
+    /// other files.
+    Refused(Option<SystemTime>),
+}
+
 pub struct MarkdownPreview {
     focus: FocusHandle,
     list: ListState,
@@ -64,6 +83,7 @@ pub struct MarkdownPreview {
     /// The folder of the document: images with a relative path are there.
     folder: Option<PathBuf>,
     diagrams: HashMap<(String, bool), Diagram>,
+    pictures: HashMap<PathBuf, Picture>,
     /// What comes before what is wrong with a diagram, in the language of the interface.
     diagram_error: SharedString,
     /// Where the selection started and where it ends now.
@@ -87,6 +107,7 @@ impl MarkdownPreview {
             segments: Vec::new(),
             folder: None,
             diagrams: HashMap::new(),
+            pictures: HashMap::new(),
             diagram_error,
             selection: None,
             selecting: false,
@@ -99,9 +120,9 @@ impl MarkdownPreview {
     /// Shows the document `markdown`, whose images with a relative path are in `folder`. It is read
     /// in the background: what showed before stays until then, and where the page was scrolled.
     pub fn set_markdown(&mut self, markdown: String, folder: Option<PathBuf>, cx: &mut Context<Self>) {
-        self.folder = folder;
         let read = cx.background_spawn(async move {
-            let blocks = markdown::parse(&markdown);
+            // What cannot be read shows nothing rather than ending the program.
+            let blocks = catch_unwind(|| markdown::parse(&markdown)).unwrap_or_default();
             let mut segments = Vec::new();
             let starts = blocks
                 .iter()
@@ -117,20 +138,68 @@ impl MarkdownPreview {
             let (blocks, starts, segments) = read.await;
             let _ = preview.update(cx, |preview, cx| {
                 let scrolled = preview.list.logical_scroll_top();
-                let same = preview.segments == segments;
+                let same = preview.segments == segments && preview.folder == folder;
                 preview.list.reset(blocks.len());
                 preview.list.scroll_to(scrolled);
-                // Diagrams no longer in the document go.
-                let sources: Vec<&str> = blocks.iter().flat_map(diagram_sources).collect();
-                preview.diagrams.retain(|(source, _), _| sources.contains(&source.as_str()));
+                preview.forget_unused(&blocks, folder.as_deref(), cx);
+                preview.folder = folder;
                 (preview.blocks, preview.starts, preview.segments) = (Rc::new(blocks), starts, segments);
                 if !same {
                     preview.selection = None;
                 }
+                // What was painted was of the text before: the mouse finds nothing until the next frame.
+                preview.layouts.borrow_mut().clear();
                 preview.reading = None;
                 cx.notify();
             });
         }));
+    }
+
+    /// Lets go of the diagrams and images no longer in `blocks`, and reads again those whose
+    /// files changed.
+    fn forget_unused(&mut self, blocks: &[Block], folder: Option<&Path>, cx: &mut Context<Self>) {
+        let mut sources = Vec::new();
+        let mut urls = Vec::new();
+        for block in blocks {
+            block_resources(block, &mut sources, &mut urls);
+        }
+        let mut gone = Vec::new();
+        self.diagrams.retain(|(source, _), diagram| {
+            let keep = sources.contains(&source.as_str());
+            if let (false, Diagram::Drawn(image)) = (keep, &diagram) {
+                gone.push(image.clone());
+            }
+            keep
+        });
+        let files: Vec<PathBuf> = urls.iter().filter_map(|url| markdown::image_file(url, folder)).collect();
+        let mut changed = Vec::new();
+        self.pictures.retain(|path, picture| {
+            let keep = files.contains(path);
+            match (keep, &picture) {
+                (false, Picture::Read(image, _)) => gone.push(image.clone()),
+                (true, Picture::Read(_, modified) | Picture::Refused(modified)) => {
+                    changed.push((path.clone(), *modified));
+                }
+                _ => {}
+            }
+            keep
+        });
+        for image in gone {
+            ImageSource::Image(image).remove_asset(cx);
+        }
+        // Images changed by another program show as they are now.
+        for (path, modified) in changed {
+            let check = cx.background_spawn({
+                let path = path.clone();
+                async move { std::fs::metadata(&path).ok().and_then(|metadata| metadata.modified().ok()) }
+            });
+            cx.spawn(async move |preview, cx| {
+                if check.await != modified {
+                    let _ = preview.update(cx, |preview, cx| preview.read_picture(path, cx));
+                }
+            })
+            .detach();
+        }
     }
 
     /// The text selected, segments on lines of their own.
@@ -154,15 +223,17 @@ impl MarkdownPreview {
         (anchor != head).then(|| if anchor < head { (anchor, head) } else { (head, anchor) })
     }
 
-    /// The part of the segment `segment`, `len` bytes long, that is selected.
-    fn selected_in(&self, segment: usize, len: usize) -> Option<Range<usize>> {
+    /// The part of the segment `segment` drawn as `text` that is selected, on the boundaries of its
+    /// characters.
+    fn selected_in(&self, segment: usize, text: &str) -> Option<Range<usize>> {
         let (start, end) = self.ordered_selection()?;
         if segment < start.segment || segment > end.segment {
             return None;
         }
         let from = if segment == start.segment { start.offset } else { 0 };
-        let to = if segment == end.segment { end.offset } else { len };
-        (from < to).then_some(from..to.min(len))
+        let to = if segment == end.segment { end.offset } else { text.len() };
+        let (from, to) = (char_boundary(text, from), char_boundary(text, to));
+        (from < to).then_some(from..to)
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
@@ -178,22 +249,20 @@ impl MarkdownPreview {
         }
     }
 
-    /// The place of the text under `position`, or the nearest one: before a segment above it,
-    /// after one below it.
+    /// The place of the text under `position`, or the nearest one: the segment nearest above or
+    /// below, then nearest beside — of the cells of a row of a table — and before a segment the
+    /// place is above, after one it is below.
     fn place_at(&self, position: Point<Pixels>) -> Option<Place> {
         let layouts = self.layouts.borrow();
         let distance = |layout: &TextLayout| {
             let bounds = layout.bounds();
-            if position.y < bounds.top() {
-                bounds.top() - position.y
-            } else if position.y > bounds.bottom() {
-                position.y - bounds.bottom()
-            } else {
-                px(0.)
-            }
+            let apart = |at: Pixels, from: Pixels, to: Pixels| f32::from((from - at).max(at - to).max(px(0.)));
+            (apart(position.y, bounds.top(), bounds.bottom()), apart(position.x, bounds.left(), bounds.right()))
         };
-        let (segment, layout) =
-            layouts.iter().min_by(|(_, a), (_, b)| f32::from(distance(a)).total_cmp(&f32::from(distance(b))))?;
+        let (segment, layout) = layouts.iter().min_by(|(_, a), (_, b)| {
+            let (a, b) = (distance(a), distance(b));
+            a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1))
+        })?;
         let bounds = layout.bounds();
         let offset = if position.y < bounds.top() {
             0
@@ -251,7 +320,8 @@ impl MarkdownPreview {
     }
 
     /// The element of `block`, `depth` lists deep; `segment` is its first segment, and after it the
-    /// first of the next block.
+    /// first of the next block. Nested blocks take the whole width given them: laid out to the
+    /// width of their content, each level would lay out those below it twice.
     fn block(&mut self, block: &Block, depth: usize, segment: &mut usize, cx: &mut Context<Self>) -> AnyElement {
         let theme = theme(cx);
         let size = text_size(cx);
@@ -266,6 +336,7 @@ impl MarkdownPreview {
                     _ => 0.85,
                 };
                 div()
+                    .w_full()
                     .text_size(size * scale)
                     .line_height(relative(1.25))
                     .font_weight(FontWeight::SEMIBOLD)
@@ -276,26 +347,31 @@ impl MarkdownPreview {
                     .into_any_element()
             }
             Block::Paragraph(content) => self.inlines(content, segment, cx),
-            Block::Code { code, .. } => self.code_block(&plain(code), None, Some(segment), cx),
-            Block::Html(html) => self.code_block(&plain(html), None, Some(segment), cx),
+            Block::Code { code, .. } => self.code_block(code, None, Some(segment), cx),
+            Block::Html(html) => self.code_block(html, None, Some(segment), cx),
             Block::Mermaid(source) => self.diagram(source, cx),
-            Block::Quote(blocks) => div()
-                .border_l(px(3.))
-                .border_color(rgb(theme.border))
-                .pl(px(14.))
-                .text_color(rgb(theme.text_muted))
-                .flex()
-                .flex_col()
-                .gap(px(10.))
-                .children(blocks.iter().map(|block| self.block(block, depth, segment, cx)).collect::<Vec<_>>())
-                .into_any_element(),
+            Block::Quote(blocks) => {
+                let blocks: Vec<AnyElement> =
+                    blocks.iter().map(|block| self.block(block, depth, segment, cx)).collect();
+                div()
+                    .w_full()
+                    .border_l(px(3.))
+                    .border_color(rgb(theme.border))
+                    .pl(px(14.))
+                    .text_color(rgb(theme.text_muted))
+                    .flex()
+                    .flex_col()
+                    .gap(px(10.))
+                    .children(blocks)
+                    .into_any_element()
+            }
             Block::List { start, items } => {
                 let items: Vec<AnyElement> = items
                     .iter()
                     .enumerate()
                     .map(|(i, item)| self.item(item, start.map(|start| start + i as u64), depth, segment, cx))
                     .collect();
-                div().flex().flex_col().gap(px(4.)).children(items).into_any_element()
+                div().w_full().flex().flex_col().gap(px(4.)).children(items).into_any_element()
             }
             Block::Table { columns, header, rows } => self.table(columns, header, rows, segment, cx),
             Block::Rule => div().my(px(6.)).h(px(2.)).w_full().bg(rgb(theme.border)).into_any_element(),
@@ -319,9 +395,10 @@ impl MarkdownPreview {
         let blocks: Vec<AnyElement> =
             item.blocks.iter().map(|block| self.block(block, depth + 1, segment, cx)).collect();
         div()
+            .w_full()
             .flex()
             .gap(px(6.))
-            .child(div().flex_none().min_w(px(22.)).flex().justify_end().child(marker))
+            .child(div().flex_none().w(px(22.)).flex().justify_end().child(marker))
             .child(div().flex_1().min_w_0().flex().flex_col().gap(px(4.)).children(blocks))
             .into_any_element()
     }
@@ -347,9 +424,12 @@ impl MarkdownPreview {
                     .border_r_1()
                     .border_color(rgb(theme.border))
                     .when(is_header, |cell| cell.font_weight(FontWeight::SEMIBOLD).bg(rgb(theme.bar)))
+                    // The text goes to its place, rather than its lines in its box: GPUI finds the
+                    // characters under the mouse as if lines were to the left.
+                    .flex()
                     .map(|cell| match columns.get(column) {
-                        Some(Align::Center) => cell.text_center(),
-                        Some(Align::Right) => cell.text_right(),
+                        Some(Align::Center) => cell.justify_center(),
+                        Some(Align::Right) => cell.justify_end(),
                         _ => cell,
                     })
                     .children(content);
@@ -380,7 +460,7 @@ impl MarkdownPreview {
         }
         match children.len() {
             1 => children.pop().unwrap_or_else(|| div().into_any_element()),
-            _ => div().flex().flex_col().gap(px(4.)).children(children).into_any_element(),
+            _ => div().w_full().flex().flex_col().gap(px(4.)).children(children).into_any_element(),
         }
     }
 
@@ -388,7 +468,7 @@ impl MarkdownPreview {
     /// in it, which the mouse can find once it is painted.
     fn text(&self, text: &Text, segment: Option<usize>, cx: &App) -> AnyElement {
         let theme = theme(cx);
-        let selected = segment.and_then(|segment| self.selected_in(segment, text.text.len()));
+        let selected = segment.and_then(|segment| self.selected_in(segment, &text.text));
         let selection = if self.focused { theme.editor.selection } else { theme.editor.selection_inactive };
         let mut highlights = Vec::with_capacity(text.runs.len() + 2);
         let mut fonts = Vec::new();
@@ -415,11 +495,16 @@ impl MarkdownPreview {
         div().relative().child(styled).child(found.absolute().size_0()).into_any_element()
     }
 
-    /// Code on a background of its own, with what is wrong with it if `error` tells; its text a
-    /// segment if `segment` is its number, and then the next.
-    fn code_block(&self, text: &Text, error: Option<&str>, segment: Option<&mut usize>, cx: &App) -> AnyElement {
+    /// Code on a background of its own — the first lines of a long one — with what is wrong with
+    /// it if `error` tells; its text a segment if `segment` is its number, and then the next.
+    fn code_block(&self, code: &str, error: Option<&str>, segment: Option<&mut usize>, cx: &App) -> AnyElement {
         let theme = theme(cx);
-        let code = self.text(text, segment.as_deref().copied(), cx);
+        let code = code.strip_suffix('\n').unwrap_or(code);
+        let shown = match code.match_indices('\n').nth(CODE_LINES - 1) {
+            Some((end, _)) => &code[..end],
+            None => code,
+        };
+        let text = self.text(&plain(shown), segment.as_deref().copied(), cx);
         if let Some(segment) = segment {
             *segment += 1;
         }
@@ -431,29 +516,56 @@ impl MarkdownPreview {
             .font_family(monospace(cx))
             .text_size(text_size(cx) * 0.9)
             .line_height(relative(1.45))
-            .child(code)
-            .when_some(error, |code, error| {
-                code.child(div().pt(px(8.)).text_color(rgb(theme.error_edge)).child(error.to_owned()))
+            .child(text)
+            .when(shown.len() < code.len(), |block| block.child(div().text_color(rgb(theme.text_muted)).child("…")))
+            .when_some(error, |block, error| {
+                block.child(div().pt(px(8.)).text_color(rgb(theme.error_edge)).child(error.to_owned()))
             })
             .into_any_element()
     }
 
-    /// An image from a file; one from anywhere else shows as its text.
-    fn image(&self, url: &str, alt: &str, cx: &App) -> AnyElement {
+    /// An image from a file, read in the background the first time it shows; one from anywhere
+    /// else, or not an image the page shows, shows as its text.
+    fn image(&mut self, url: &str, alt: &str, cx: &mut Context<Self>) -> AnyElement {
         let theme = theme(cx);
         let alt = SharedString::from(if alt.is_empty() { url.to_owned() } else { alt.to_owned() });
-        let missing = {
-            let alt = alt.clone();
-            move || div().text_color(rgb(theme.text_muted)).child(format!("[{alt}]")).into_any_element()
-        };
-        match markdown::image_file(url, self.folder.as_deref()) {
-            Some(path) => img(path).max_w_full().with_fallback(missing).into_any_element(),
-            None => missing(),
+        let missing = move || div().text_color(rgb(theme.text_muted)).child(format!("[{alt}]")).into_any_element();
+        let Some(path) = markdown::image_file(url, self.folder.as_deref()) else { return missing() };
+        match self.pictures.get(&path) {
+            Some(Picture::Read(image, _)) => img(image.clone()).max_w_full().with_fallback(missing).into_any_element(),
+            Some(Picture::Refused(_)) => missing(),
+            Some(Picture::Reading) => div().into_any_element(),
+            None => {
+                self.read_picture(path, cx);
+                div().into_any_element()
+            }
         }
     }
 
-    /// A Mermaid diagram, drawn in the background the first time it shows in a theme; until then its
-    /// source, and the source with what is wrong if it cannot be drawn.
+    /// Reads the image of the file `path` in the background.
+    fn read_picture(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if let Some(Picture::Read(image, _)) = self.pictures.insert(path.clone(), Picture::Reading) {
+            ImageSource::Image(image).remove_asset(cx);
+        }
+        let read = cx.background_spawn({
+            let path = path.clone();
+            async move { read_picture(&path) }
+        });
+        cx.spawn(async move |preview, cx| {
+            let picture = read.await;
+            let _ = preview.update(cx, |preview, cx| {
+                // Unless the document has no such image any more.
+                if let Some(reading) = preview.pictures.get_mut(&path) {
+                    *reading = picture;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// A Mermaid diagram, drawn in the background the first time it shows in a theme; until then a
+    /// place for it, and its source with what is wrong if it cannot be drawn.
     fn diagram(&mut self, source: &str, cx: &mut Context<Self>) -> AnyElement {
         let dark = theme(cx).appearance == Appearance::Dark;
         let key = (source.to_owned(), dark);
@@ -468,13 +580,17 @@ impl MarkdownPreview {
             }
             Some(Diagram::Failed(error)) => {
                 let error = format!("{} {error}", self.diagram_error);
-                return self.code_block(&plain(source), Some(&error), None, cx);
+                return self.code_block(source, Some(&error), None, cx);
             }
             Some(Diagram::Drawing) => {}
             None => {
                 self.diagrams.insert(key.clone(), Diagram::Drawing);
                 let source = source.to_owned();
-                let draw = cx.background_spawn(async move { mermaid::render(&source, dark) });
+                // A diagram that cannot be drawn says so rather than ending the program.
+                let draw = cx.background_spawn(async move {
+                    catch_unwind(AssertUnwindSafe(|| mermaid::render(&source, dark)))
+                        .unwrap_or_else(|_| Err("merman stopped".to_owned()))
+                });
                 cx.spawn(async move |preview, cx| {
                     let diagram = match draw.await {
                         Ok(svg) => Diagram::Drawn(Arc::new(Image::from_bytes(ImageFormat::Svg, svg.into_bytes()))),
@@ -541,8 +657,8 @@ fn block_segments(block: &Block, text: &mut impl FnMut(&str)) {
     };
     match block {
         Block::Heading { content, .. } | Block::Paragraph(content) => inlines(content, text),
-        Block::Code { code, .. } => text(code),
-        Block::Html(html) => text(html),
+        Block::Code { code, .. } => text(code.strip_suffix('\n').unwrap_or(code)),
+        Block::Html(html) => text(html.strip_suffix('\n').unwrap_or(html)),
         Block::Mermaid(_) | Block::Rule => {}
         Block::Quote(blocks) => blocks.iter().for_each(|block| block_segments(block, text)),
         Block::List { items, .. } => {
@@ -560,14 +676,96 @@ fn block_segments(block: &Block, text: &mut impl FnMut(&str)) {
     }
 }
 
-/// The sources of the diagrams of `block`.
-fn diagram_sources(block: &Block) -> Vec<&str> {
+/// The sources of the diagrams of `block`, and the URLs of its images.
+fn block_resources<'a>(block: &'a Block, sources: &mut Vec<&'a str>, urls: &mut Vec<&'a str>) {
+    let mut inlines = |content: &'a [Inline]| {
+        for inline in content {
+            if let Inline::Image { url, .. } = inline {
+                urls.push(url);
+            }
+        }
+    };
     match block {
-        Block::Mermaid(source) => vec![source.as_str()],
-        Block::Quote(blocks) => blocks.iter().flat_map(diagram_sources).collect(),
-        Block::List { items, .. } => items.iter().flat_map(|item| &item.blocks).flat_map(diagram_sources).collect(),
-        _ => Vec::new(),
+        Block::Mermaid(source) => sources.push(source),
+        Block::Heading { content, .. } | Block::Paragraph(content) => inlines(content),
+        Block::Table { header, rows, .. } => {
+            std::iter::once(header).chain(rows).flatten().for_each(|cell| inlines(cell))
+        }
+        Block::Quote(blocks) => blocks.iter().for_each(|block| block_resources(block, sources, urls)),
+        Block::List { items, .. } => {
+            items.iter().flat_map(|item| &item.blocks).for_each(|block| block_resources(block, sources, urls))
+        }
+        Block::Code { .. } | Block::Html(_) | Block::Rule => {}
     }
+}
+
+/// The image of the file `path`, if it is one the page shows: a plain file, not too large, of a
+/// kind GPUI draws; an SVG that refers to no other file.
+fn read_picture(path: &Path) -> Picture {
+    let modified = std::fs::metadata(path).ok().and_then(|metadata| metadata.modified().ok());
+    let read = || {
+        // Not a device, nor a pipe, which would be read forever or wait for a writer.
+        if !std::fs::metadata(path).ok()?.is_file() {
+            return None;
+        }
+        let file = std::fs::File::open(path).ok()?;
+        let metadata = file.metadata().ok()?;
+        if !metadata.is_file() || metadata.len() > PICTURE_SIZE {
+            return None;
+        }
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        file.take(PICTURE_SIZE).read_to_end(&mut bytes).ok()?;
+        let format = picture_format(&bytes)?;
+        if format == ImageFormat::Svg && !self_contained(&String::from_utf8_lossy(&bytes)) {
+            return None;
+        }
+        Some(Arc::new(Image::from_bytes(format, bytes)))
+    };
+    match read() {
+        Some(image) => Picture::Read(image, modified),
+        None => Picture::Refused(modified),
+    }
+}
+
+/// The kind of the image `bytes` are, by how they start.
+fn picture_format(bytes: &[u8]) -> Option<ImageFormat> {
+    let format = match bytes {
+        [0x89, b'P', b'N', b'G', ..] => ImageFormat::Png,
+        [0xff, 0xd8, 0xff, ..] => ImageFormat::Jpeg,
+        [b'G', b'I', b'F', b'8', ..] => ImageFormat::Gif,
+        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => ImageFormat::Webp,
+        [b'B', b'M', ..] => ImageFormat::Bmp,
+        [b'I', b'I', 0x2a, 0, ..] | [b'M', b'M', 0, 0x2a, ..] => ImageFormat::Tiff,
+        [0, 0, 1, 0, ..] => ImageFormat::Ico,
+        _ => {
+            let head = String::from_utf8_lossy(&bytes[..bytes.len().min(4096)]);
+            let head = head.trim_start_matches('\u{feff}').trim_start();
+            if head.starts_with('<') && head.contains("<svg") {
+                ImageFormat::Svg
+            } else {
+                return None;
+            }
+        }
+    };
+    Some(format)
+}
+
+/// Whether the SVG `svg` refers to no file and no address: drawing it, resvg reads what it refers
+/// to, on the network too.
+fn self_contained(svg: &str) -> bool {
+    let local = |reference: &str| {
+        let reference = reference.trim().trim_matches(['"', '\'']).trim();
+        reference.is_empty() || reference.starts_with('#') || reference.starts_with("data:")
+    };
+    let hrefs = svg.match_indices("href").all(|(at, _)| {
+        let rest = svg[at + 4..].trim_start();
+        let Some(rest) = rest.strip_prefix('=') else { return true };
+        let rest = rest.trim_start();
+        let Some(quote) = rest.chars().next().filter(|c| *c == '"' || *c == '\'') else { return true };
+        rest[1..].split(quote).next().is_none_or(local)
+    });
+    let urls = svg.match_indices("url(").all(|(at, _)| svg[at + 4..].split(')').next().is_none_or(local));
+    hrefs && urls && !svg.contains("@import")
 }
 
 /// `range` cut by `selected` into parts, each with whether it is selected.
@@ -578,6 +776,15 @@ fn split(range: Range<usize>, selected: Option<Range<usize>>) -> Vec<(Range<usiz
         .into_iter()
         .filter(|(part, _)| !part.is_empty())
         .collect()
+}
+
+/// The boundary of a character of `text` at or before `offset`.
+fn char_boundary(text: &str, offset: usize) -> usize {
+    let mut offset = offset.min(text.len());
+    while !text.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    offset
 }
 
 fn highlight(style: Style, theme: &Theme) -> HighlightStyle {
@@ -594,7 +801,6 @@ fn highlight(style: Style, theme: &Theme) -> HighlightStyle {
 
 /// Text of one style, as code is.
 fn plain(text: &str) -> Text {
-    let text = text.strip_suffix('\n').unwrap_or(text);
     Text { text: text.to_owned(), runs: vec![markdown::Run { range: 0..text.len(), style: Style::default() }] }
 }
 
@@ -623,6 +829,10 @@ mod tests {
         assert_eq!(split(4..8, Some(0..6)), [(4..6, true), (6..8, false)]);
         assert_eq!(split(4..8, Some(8..9)), [(4..8, false)]);
         assert_eq!(split(4..8, Some(0..20)), [(4..8, true)]);
+        // Inside a character a cut goes back to where it starts.
+        assert_eq!(char_boundary("аб", 1), 0);
+        assert_eq!(char_boundary("аб", 3), 2);
+        assert_eq!(char_boundary("аб", 9), 4);
     }
 
     #[test]
@@ -635,5 +845,49 @@ mod tests {
             block_segments(block, &mut |text| segments.push(text.to_owned()));
         }
         assert_eq!(segments, ["a", "b ", " c", "d", "e", "f", "g", "h", "i"]);
+        let (mut sources, mut urls) = (Vec::new(), Vec::new());
+        for block in &blocks {
+            block_resources(block, &mut sources, &mut urls);
+        }
+        assert_eq!((sources, urls), (vec!["x\n"], vec!["x.png"]));
+    }
+
+    #[test]
+    fn pictures_by_their_kind() {
+        assert_eq!(picture_format(b"\x89PNG\r\n\x1a\n"), Some(ImageFormat::Png));
+        assert_eq!(picture_format(b"\xff\xd8\xff\xe0"), Some(ImageFormat::Jpeg));
+        assert_eq!(picture_format(b"RIFF\0\0\0\0WEBPVP8 "), Some(ImageFormat::Webp));
+        assert_eq!(picture_format(b"\xef\xbb\xbf<?xml version=\"1.0\"?>\n<svg xmlns=\"\"/>"), Some(ImageFormat::Svg));
+        assert_eq!(picture_format(b"not an image"), None);
+        assert_eq!(picture_format(b""), None);
+    }
+
+    #[test]
+    fn svg_that_refers_elsewhere_is_not_drawn() {
+        assert!(self_contained(
+            r##"<svg><use href="#a"/><rect fill="url(#g)"/><image href="data:image/png;base64,AA"/></svg>"##
+        ));
+        assert!(!self_contained(r#"<svg><image href="file:///etc/x.png"/></svg>"#));
+        assert!(!self_contained(r#"<svg><image xlink:href = 'https://a/b.png'/></svg>"#));
+        assert!(!self_contained(r#"<svg><image href="//host/share/a.png"/></svg>"#));
+        assert!(!self_contained(r#"<svg><rect style="fill: url(other.svg#g)"/></svg>"#));
+        assert!(!self_contained(r#"<svg><style>@import "a.css";</style></svg>"#));
+    }
+
+    #[test]
+    fn only_plain_files_are_read() {
+        let dir = std::env::temp_dir().join(format!("migpad-pictures-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = dir.join("a.png");
+        std::fs::write(&png, b"\x89PNG\r\n\x1a\nrest").unwrap();
+        assert!(matches!(read_picture(&png), Picture::Read(..)));
+        let text = dir.join("a.txt");
+        std::fs::write(&text, b"text").unwrap();
+        assert!(matches!(read_picture(&text), Picture::Refused(_)));
+        assert!(matches!(read_picture(&dir), Picture::Refused(_)));
+        assert!(matches!(read_picture(&dir.join("none.png")), Picture::Refused(None)));
+        #[cfg(unix)]
+        assert!(matches!(read_picture(Path::new("/dev/zero")), Picture::Refused(_)));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
