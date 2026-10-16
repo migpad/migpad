@@ -330,12 +330,15 @@ pub struct ForTab {
     pub encoding_chosen: bool,
     /// Whether the tab is pinned: restored from the session.
     pub pinned: bool,
+    /// Whether a Markdown document shows as a page or as its text, as it showed before; `None` for
+    /// as a new tab shows it.
+    pub previewing: Option<bool>,
 }
 
 impl ForTab {
     /// A tab for `document`, which tells nothing.
     pub fn new(document: Entity<Document>, loading: Option<Loading>, selection: Option<Selection>) -> Self {
-        ForTab { document, loading, selection, notice: None, encoding_chosen: false, pinned: false }
+        ForTab { document, loading, selection, notice: None, encoding_chosen: false, pinned: false, previewing: None }
     }
 }
 
@@ -445,7 +448,12 @@ pub fn reopening(closed: ClosedTab, cx: &mut App) -> Reopening {
     if let Some(id) = closed.journal {
         match session::recover(id, closed.path.as_deref(), cx) {
             Recovery::Document(document, notice) => {
-                return Reopening::Tab(ForTab { document, loading: None, selection, notice, encoding_chosen, pinned });
+                return Reopening::Tab(ForTab {
+                    pinned,
+                    notice,
+                    encoding_chosen,
+                    ..ForTab::new(document, None, selection)
+                });
             }
             Recovery::Failed(notice) => failure = Some(notice),
             Recovery::FromFile => {}
@@ -454,9 +462,12 @@ pub fn reopening(closed: ClosedTab, cx: &mut App) -> Reopening {
     let Some(path) = closed.path else { return failure.map_or(Reopening::Nothing, Reopening::Failed) };
     let open_as = closed.encoding.map_or(OpenAs::Detect { tld: None }, OpenAs::Encoding);
     match open_file_as(&path, open_as, cx) {
-        Opening::Document(document, loading) => {
-            Reopening::Tab(ForTab { document, loading, selection, notice: failure, encoding_chosen, pinned })
-        }
+        Opening::Document(document, loading) => Reopening::Tab(ForTab {
+            notice: failure,
+            encoding_chosen,
+            pinned,
+            ..ForTab::new(document, loading, selection)
+        }),
         Opening::Failed(notice) => Reopening::Failed(notice),
     }
 }

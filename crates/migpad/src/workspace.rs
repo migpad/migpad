@@ -81,6 +81,8 @@ pub struct Tab {
     /// text.
     preview: Option<Entity<MarkdownPreview>>,
     previewing: bool,
+    /// Whether the page waits for the file to load to be made.
+    preview_pending: bool,
     _observe: Subscription,
     /// Shows the progress of the loading in the status bar.
     _progress: Option<Task<()>>,
@@ -201,7 +203,8 @@ impl Workspace {
         });
         let window_id = window.window_handle().window_id();
         let untitled = Self::untitled_for(&first.document, [], window_id, cx);
-        let mut tab = Tab::new(first.document, untitled, first.loading, first.encoding_chosen, window, cx);
+        let mut tab =
+            Tab::new(first.document, untitled, first.loading, first.encoding_chosen, first.previewing, window, cx);
         tab.pinned = first.pinned;
         let menu_bar = view_options::menu_bar(cx).then(|| Self::make_menu_bar(window, cx));
         let mut workspace = Workspace {
@@ -323,8 +326,8 @@ impl Workspace {
         cx.notify();
     }
 
-    /// The active tab shows its text, if it showed its page.
-    fn show_text(&mut self, cx: &mut Context<Self>) {
+    /// The active tab shows its text, if it showed its page: what acts on the text shows it.
+    pub fn show_text(&mut self, cx: &mut Context<Self>) {
         let index = self.tabs.active_index();
         if let Some(tab) = self.tabs.get_mut(index)
             && std::mem::take(&mut tab.previewing)
@@ -349,19 +352,18 @@ impl Workspace {
         Some(preview)
     }
 
-    /// Makes the page of the tab at `index` of its text as it is now, if it shows its page and the
-    /// file has loaded.
+    /// Makes the page of the tab at `index` of its text as it is now, if it shows its Markdown
+    /// document as a page; one still loading is made once it has loaded.
     fn refresh_preview(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(tab) = self.tabs.get(index) else { return };
-        let Some(preview) = tab.preview.clone().filter(|_| tab.previewing) else { return };
-        if tab.document.read(cx).is_preview() {
+        if !tab.previewing || !is_markdown(tab.document.read(cx).path.as_deref()) {
             return;
         }
-        let (text, folder) = tab.document.update(cx, |doc, _| {
-            let folder = doc.path.as_deref().and_then(Path::parent).map(Path::to_path_buf);
-            (String::from_utf8_lossy(doc.contiguous_text()).into_owned(), folder)
-        });
-        preview.update(cx, |preview, cx| preview.set_markdown(text, folder, cx));
+        let (Some(preview), document) = (tab.preview.clone(), tab.document.clone()) else { return };
+        let pending = !fill_preview(&preview, &document, cx);
+        if let Some(tab) = self.tabs.get_mut(index) {
+            tab.preview_pending = pending;
+        }
     }
 
     /// Gives the keyboard to what the active tab shows: its page or its text.
@@ -562,7 +564,8 @@ impl Workspace {
             !only.pinned && doc.path.is_none() && doc.text().is_empty() && !doc.can_undo() && only.notices.is_empty()
         };
         if unused && tab.document.read(cx).path.is_some() {
-            let mut replaced = Tab::new(tab.document, None, tab.loading, tab.encoding_chosen, window, cx);
+            let mut replaced =
+                Tab::new(tab.document, None, tab.loading, tab.encoding_chosen, tab.previewing, window, cx);
             replaced.pinned = tab.pinned;
             let gone = self.tabs.replace(0, replaced);
             gone.document.update(cx, |doc, _| doc.remove_journal());
@@ -576,7 +579,8 @@ impl Workspace {
         }
         let numbers: Vec<u32> = self.untitled_numbers().collect();
         let untitled = Self::untitled_for(&tab.document, numbers, self.window_id, cx);
-        let mut new_tab = Tab::new(tab.document, untitled, tab.loading, tab.encoding_chosen, window, cx);
+        let mut new_tab =
+            Tab::new(tab.document, untitled, tab.loading, tab.encoding_chosen, tab.previewing, window, cx);
         new_tab.pinned = tab.pinned;
         // Counted before the tab joins them.
         let pinned = self.pinned_count();
@@ -966,6 +970,11 @@ impl Workspace {
             return;
         }
         self.reveal_tab = true;
+        // The bars act on the text: a page hides them.
+        if self.previewing(cx) {
+            self.hide_find_bar(cx);
+            self.hide_go_to_bar(cx);
+        }
         self.focus_content(window, cx);
         self.update_title(window, cx);
         refresh_menus(cx);
@@ -1529,11 +1538,19 @@ impl Workspace {
         let tab = self.tabs.get(index)?;
         let doc = tab.document.clone();
         let encoding_chosen = tab.encoding_chosen;
-        let pinned = tab.pinned;
+        let (pinned, previewing) = (tab.pinned, Some(tab.previewing));
         let selection = Some(tab.editor.read(cx).selection());
         if self.tabs.len() == 1 {
             window.remove_window();
-            return Some(ForTab { document: doc, loading: None, selection, notice: None, encoding_chosen, pinned });
+            return Some(ForTab {
+                document: doc,
+                loading: None,
+                selection,
+                notice: None,
+                encoding_chosen,
+                pinned,
+                previewing,
+            });
         }
         let was_active = index == self.tabs.active_index();
         self.tabs.remove(index);
@@ -1543,7 +1560,7 @@ impl Workspace {
         } else {
             cx.notify();
         }
-        Some(ForTab { document: doc, loading: None, selection, notice: None, encoding_chosen, pinned })
+        Some(ForTab { document: doc, loading: None, selection, notice: None, encoding_chosen, pinned, previewing })
     }
 
     /// A tab dropped on the window outside the tab bar: if from this window, tear it off into a new
@@ -1728,9 +1745,11 @@ impl Workspace {
         if open_has_changes {
             return self.add_tab(tab, window, cx);
         }
-        let mut replaced = Tab::new(tab.document, None, tab.loading, tab.encoding_chosen, window, cx);
-        // In its place, pinned as it was.
-        replaced.pinned = self.tabs.get(index).is_some_and(|open| open.pinned);
+        // In its place, pinned and showing its page or its text as it was.
+        let open = self.tabs.get(index).map(|open| (open.pinned, open.previewing));
+        let previewing = open.map(|(_, previewing)| previewing);
+        let mut replaced = Tab::new(tab.document, None, tab.loading, tab.encoding_chosen, previewing, window, cx);
+        replaced.pinned = open.is_some_and(|(pinned, _)| pinned);
         // The document replaced had no changes: it goes with its journal.
         let gone = self.tabs.replace(index, replaced);
         gone.document.update(cx, |doc, _| doc.remove_journal());
@@ -1752,7 +1771,7 @@ impl Workspace {
             return self.notify_tab(index, notice, cx);
         }
         let chosen = encoding.is_some() || tab.encoding_chosen;
-        let pinned = tab.pinned;
+        let (pinned, previewing) = (tab.pinned, tab.previewing);
         let open_as = match encoding.or(tab.encoding_chosen.then_some(doc.format.encoding)) {
             Some(encoding) => OpenAs::Encoding(encoding),
             None => OpenAs::Detect { tld: None },
@@ -1766,7 +1785,7 @@ impl Workspace {
         let told = (changes && encoding.is_some()).then(|| notices::changes_kept(&Self::tab_title(tab, cx)));
         match windows::open_file_as(&path, open_as, cx) {
             Opening::Document(document, loading) => {
-                let mut replaced = Tab::new(document, None, loading, chosen, window, cx);
+                let mut replaced = Tab::new(document, None, loading, chosen, Some(previewing), window, cx);
                 replaced.pinned = pinned;
                 self.tabs.replace(index, replaced);
                 windows::remember_tab(mine, cx);
@@ -2004,9 +2023,19 @@ impl Workspace {
             }
             self.check_losses(index, cx);
             self.journal_changed(index, cx);
+            // A document saved as another kind of file shows its text, which has the keyboard.
+            let tab = self.tabs.get_mut(index).expect("found above");
+            if tab.previewing && !is_markdown(tab.document.read(cx).path.as_deref()) {
+                tab.previewing = false;
+                if index == self.tabs.active_index() {
+                    self.focus_content(window, cx);
+                    refresh_menus(cx);
+                }
+            }
             // The page follows the text: loaded, read again, changed by another program — but that
-            // of a large file, which is made again only when asked.
-            if !self.tabs.get(index).is_some_and(|tab| tab.document.read(cx).is_large()) {
+            // of a large file, which is made again only when asked, or once it has loaded.
+            let tab = self.tabs.get(index).expect("found above");
+            if !tab.document.read(cx).is_large() || tab.preview_pending {
                 self.refresh_preview(index, cx);
             }
         }
@@ -2207,7 +2236,7 @@ impl Workspace {
         let workspace = cx.entity().downgrade();
         let (select, close, moved, new, context, receive) =
             (workspace.clone(), workspace.clone(), workspace.clone(), workspace.clone(), workspace.clone(), workspace);
-        let new_keys = keys::for_action(&NewTab, &self.editor().focus_handle(cx), window).map(SharedString::from);
+        let new_keys = keys::for_action(&NewTab, &self.focus_handle(cx), window).map(SharedString::from);
         TabBar::new(cx.entity_id(), self.window_id, tabs, self.tabs.active_index(), self.tab_scroll.clone())
             .close_label(tr(Key::FileCloseTab))
             .new_label(tr(Key::FileNew), new_keys)
@@ -2235,11 +2264,14 @@ impl Workspace {
 }
 
 impl Tab {
+    /// A tab of `document`; a Markdown document shows as a page or as its text as `previewing` tells,
+    /// or as a page unless it is large.
     fn new(
         document: Entity<Document>,
         untitled: Option<u32>,
         loading: Option<Loading>,
         encoding_chosen: bool,
+        previewing: Option<bool>,
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) -> Tab {
@@ -2270,8 +2302,12 @@ impl Tab {
                 }
             })
         });
-        // A Markdown document shows as a page; a large one as its text, its page only when asked.
-        let previewing = is_markdown(document.read(cx).path.as_deref()) && !document.read(cx).is_large();
+        // A Markdown document shows as a page; a large one as its text, its page only when asked. The
+        // page is made at once, so that it has the keyboard of a new window.
+        let markdown = is_markdown(document.read(cx).path.as_deref());
+        let previewing = markdown && previewing.unwrap_or_else(|| !document.read(cx).is_large());
+        let preview = previewing.then(|| cx.new(|cx| MarkdownPreview::new(tr(Key::MarkdownDiagramError).into(), cx)));
+        let preview_pending = preview.as_ref().is_some_and(|preview| !fill_preview(preview, &document, cx));
         Tab {
             document,
             editor,
@@ -2286,8 +2322,9 @@ impl Tab {
             journal_sync: None,
             missing: false,
             encoding_chosen,
-            preview: None,
+            preview,
             previewing,
+            preview_pending,
             _observe: observe,
             _progress: progress,
             _context_menu: context_menu,
@@ -2333,7 +2370,7 @@ impl Focusable for Workspace {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
         let tab = self.tabs.active();
         match &tab.preview {
-            Some(preview) if tab.previewing => preview.focus_handle(cx),
+            Some(preview) if self.previewing(cx) => preview.focus_handle(cx),
             _ => self.editor().focus_handle(cx),
         }
     }
@@ -2453,6 +2490,19 @@ impl Render for Workspace {
             .child(status_bar)
             .child(drops)
     }
+}
+
+/// Makes `preview` of the text of `document` as it is now; false if the file is still loading.
+fn fill_preview(preview: &Entity<MarkdownPreview>, document: &Entity<Document>, cx: &mut App) -> bool {
+    if document.read(cx).is_preview() {
+        return false;
+    }
+    let (text, folder) = document.update(cx, |doc, _| {
+        let folder = doc.path.as_deref().and_then(Path::parent).map(Path::to_path_buf);
+        (String::from_utf8_lossy(doc.contiguous_text()).into_owned(), folder)
+    });
+    preview.update(cx, |preview, cx| preview.set_markdown(text, folder, cx));
+    true
 }
 
 /// Whether the file `path` is Markdown, by its extension.

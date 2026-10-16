@@ -331,7 +331,8 @@ impl Registry {
         window: &Window,
         cx: &App,
     ) -> Vec<MenuSpec> {
-        let focus = workspace.editor().focus_handle(cx);
+        // The keys of what the active tab shows: its text or its page.
+        let focus = workspace.focus_handle(cx);
         let menu = |id: MenuId| {
             let mut placements: Vec<&Placement> =
                 self.placements.iter().filter(|placement| placement.menu == id).collect();
