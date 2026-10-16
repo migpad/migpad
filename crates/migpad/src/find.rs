@@ -488,6 +488,8 @@ fn reason(message: &str) -> String {
 /// the one before it, round the ends of the text.
 pub fn find(workspace: &mut Workspace, backwards: bool, window: &mut Window, cx: &mut Context<Workspace>) {
     let Some(search) = search(workspace, window, cx) else { return };
+    // The match is selected in the text, which shows.
+    workspace.show_text(cx);
     let (document, editor) = (workspace.document().clone(), workspace.editor().clone());
     let selection = editor.read(cx).selection();
     let selected = selection.anchor.min(selection.head)..selection.anchor.max(selection.head);
@@ -525,6 +527,7 @@ pub fn replace_one(workspace: &mut Workspace, window: &mut Window, cx: &mut Cont
         return;
     }
     let Some(search) = search(workspace, window, cx) else { return };
+    workspace.show_text(cx);
     let (document, editor) = (workspace.document().clone(), workspace.editor().clone());
     if document.read(cx).is_preview() {
         return;

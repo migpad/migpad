@@ -343,7 +343,12 @@ fn restore_tab(tab: &TabState, cx: &mut App) -> Restored {
         match recover(id, tab.path.as_deref(), cx) {
             Recovery::Document(document, notice) => {
                 let encoding_chosen = tab.encoding.is_some();
-                return Restored::Tab(ForTab { document, loading: None, selection, notice, encoding_chosen, pinned });
+                return Restored::Tab(ForTab {
+                    notice,
+                    encoding_chosen,
+                    pinned,
+                    ..ForTab::new(document, None, selection)
+                });
             }
             Recovery::Failed(notice) => failure = Some(notice),
             Recovery::FromFile => {}
@@ -358,7 +363,12 @@ fn restore_tab(tab: &TabState, cx: &mut App) -> Restored {
     match windows::open_document_as(path, open_as, cx) {
         Opening::Document(document, loading) => {
             let encoding_chosen = tab.encoding.is_some();
-            Restored::Tab(ForTab { document, loading, selection, notice: failure, encoding_chosen, pinned })
+            Restored::Tab(ForTab {
+                notice: failure,
+                encoding_chosen,
+                pinned,
+                ..ForTab::new(document, loading, selection)
+            })
         }
         Opening::Failed(notice) => Restored::Notice(notice),
     }
@@ -372,12 +382,10 @@ fn restore_changes(tab: &TabState, cx: &mut App) -> Restored {
         Recovery::Document(document, notice) if document.read(cx).is_modified() => {
             let encoding_chosen = tab.encoding.is_some();
             Restored::Tab(ForTab {
-                document,
-                loading: None,
-                selection: Some(tab.selection),
                 notice,
                 encoding_chosen,
                 pinned: tab.pinned,
+                ..ForTab::new(document, None, Some(tab.selection))
             })
         }
         // What happened to changes set aside is still told.
@@ -410,14 +418,7 @@ fn orphans(dir: &Path, known: &HashSet<DocumentId>, cx: &mut App) -> Vec<ForTab>
         match recover(id, None, cx) {
             Recovery::Document(document, notice) => {
                 if document.read(cx).is_modified() {
-                    tabs.push(ForTab {
-                        document,
-                        loading: None,
-                        selection: None,
-                        notice,
-                        encoding_chosen: false,
-                        pinned: false,
-                    });
+                    tabs.push(ForTab { notice, ..ForTab::new(document, None, None) });
                 } else {
                     document.update(cx, |doc, _| doc.remove_journal());
                 }

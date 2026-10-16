@@ -143,8 +143,18 @@ menu = "&View"
 word_wrap = "&Word Wrap"
 invisibles = "&Invisibles"
 indent_guides = "Indent &Guides"
+# A Markdown document shows as a page, or as its text.
+markdown_preview = "Markdown &Preview"
 # On macOS: the menu bar of Windows and Linux in each window.
 menu_bar = "&Menu Bar in Window"
+
+[markdown]
+# Over what is wrong with a Mermaid diagram, as merman tells it, in English.
+diagram_error = "The diagram cannot be drawn:"
+# The switch at the end of the tab bar: a Markdown document as its page, or as its text.
+preview = "Preview"
+text = "Text"
+switch_tip = "Show the page of the Markdown document, or its text"
 
 [window]
 menu = "&Window"

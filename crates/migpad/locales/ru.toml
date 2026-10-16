@@ -126,7 +126,14 @@ menu = "&Вид"
 word_wrap = "&Перенос строк"
 invisibles = "&Спецсимволы"
 indent_guides = "&Направляющие отступов"
+markdown_preview = "Просмот&р Markdown"
 menu_bar = "&Меню в окне"
+
+[markdown]
+diagram_error = "Диаграмму не нарисовать:"
+preview = "Просмотр"
+text = "Текст"
+switch_tip = "Показать страницу документа Markdown или его текст"
 
 [window]
 menu = "&Окно"

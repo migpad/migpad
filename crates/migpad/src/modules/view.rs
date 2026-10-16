@@ -1,15 +1,16 @@
-//! How documents show: word wrap, invisible characters, indent guides. Each toggle is a setting,
-//! the same in every tab and window, and acts even while an input field has the focus.
+//! How documents show: word wrap, invisible characters, indent guides — each a setting, the same
+//! in every tab and window, which acts even while an input field has the focus — and a Markdown
+//! document as a page or as its text, each tab apart.
 
 use gpui::actions;
 use migpad_core::settings::Setting;
 
-use crate::commands::{Command, MenuId, Module, Registry};
+use crate::commands::{Command, MenuId, Module, Registry, by_os};
 use crate::settings;
 use crate::strings::Key;
 use crate::view_options;
 
-actions!(view, [ToggleWordWrap, ToggleInvisibles, ToggleIndentGuides, ToggleMenuBarInWindow]);
+actions!(view, [ToggleWordWrap, ToggleInvisibles, ToggleIndentGuides, ToggleMenuBarInWindow, ToggleMarkdownPreview]);
 
 pub struct ViewModule;
 
@@ -31,6 +32,11 @@ impl Module for ViewModule {
         let indent_guides = Command::new("view.indent_guides", Key::ViewIndentGuides, ToggleIndentGuides)
             .checked(|_, cx| settings::get(cx).indent_guides);
         registry.add(indent_guides, menu(1));
+        let preview = Command::new("view.markdown_preview", Key::ViewMarkdownPreview, ToggleMarkdownPreview)
+            .keys(by_os(&["cmd-shift-m"], &["ctrl-shift-m"], &["ctrl-shift-m"]))
+            .checked(|workspace, cx| workspace.previewing(cx))
+            .enabled(|workspace, cx| workspace.is_markdown(cx));
+        registry.add(preview, menu(2));
         // The menu bar of Windows and Linux in each window, besides that of the system.
         if cfg!(target_os = "macos") {
             let menu_bar = Command::new("view.menu_bar", Key::ViewMenuBar, ToggleMenuBarInWindow)
@@ -46,6 +52,9 @@ impl Module for ViewModule {
                 let wrap = settings::get(cx).word_wrap;
                 cx.defer(move |cx| settings::set(Setting::WordWrap(!wrap), cx));
             }
+        });
+        registry.on_window_action(|workspace, _: &ToggleMarkdownPreview, window, cx| {
+            workspace.toggle_markdown_preview(window, cx);
         });
         registry.on_window_action(|_, _: &ToggleInvisibles, _, cx| {
             let shown = settings::get(cx).invisibles;

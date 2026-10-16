@@ -115,6 +115,7 @@ fn main() {
         }
         recent::init(cx);
         migpad_editor::init(cx);
+        migpad_ui::markdown::init(cx);
         own_settings::init(cx);
         prompt::init(cx);
         commands::init(&modules::all(), cx);

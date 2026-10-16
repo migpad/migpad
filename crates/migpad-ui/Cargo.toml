@@ -8,4 +8,5 @@ publish.workspace = true
 
 [dependencies]
 gpui.workspace = true
+migpad-core.workspace = true
 migpad-editor.workspace = true
