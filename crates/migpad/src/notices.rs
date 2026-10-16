@@ -146,7 +146,8 @@ pub fn save_failed(doc: &Document, path: &Path, format: Format, error: &SaveErro
             actions: vec![NoticeAction::SaveAs],
             target: None,
         },
-        SaveError::Preview => return None,
+        // Nothing is written then, and nothing asks to be.
+        SaveError::Preview | SaveError::ReadOnly => return None,
     };
     Some(Notice { target: Some(SaveTarget { path: path.to_owned(), format }), ..notice })
 }
@@ -454,6 +455,7 @@ mod tests {
         let notice = save_failed(&doc, path, format("UTF-8"), &denied).unwrap();
         assert_eq!((notice.severity, notice.actions), (Severity::Error, vec![NoticeAction::SaveAs]));
         assert_eq!(save_failed(&doc, path, format("UTF-8"), &SaveError::Preview), None);
+        assert_eq!(save_failed(&doc, path, format("UTF-8"), &SaveError::ReadOnly), None);
         set_language(Language::Russian);
         let error = SaveError::Losses { encoding: Losses::default(), decoding: lost };
         let notice = save_failed(&doc, path, format("UTF-16LE"), &error).unwrap();

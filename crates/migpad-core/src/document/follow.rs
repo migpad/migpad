@@ -18,8 +18,13 @@ use crate::text::{MAX_LEN, TextStore};
 const TAIL: usize = 4096;
 
 /// How many looks in a row must not find the file for it to be taken for removed: a log rotated
-/// is renamed, and the program that writes it makes another a moment later.
-const MISSING_LOOKS: u32 = 4;
+/// is renamed, and the program that writes it may make another only when it writes next.
+const MISSING_LOOKS: u32 = 20;
+
+/// How many bytes added a look reads at most: a file that grew by much goes on the document a
+/// part at a time, read at looks that come at once, which keeps the window alive and the memory
+/// low.
+const CHUNK: usize = 16 << 20;
 
 /// What a look at a followed file found.
 #[derive(Debug)]
@@ -41,12 +46,17 @@ pub enum Change {
 pub struct Appended {
     /// The file as the document has it: the text goes on from there.
     pub from: Fingerprint,
-    /// The file now.
+    /// The file as the document has it then: as it is now, or as much of it as was read.
     pub disk: Fingerprint,
     /// The text, in UTF-8; empty if the bytes added do not make a whole character yet.
     pub text: Vec<u8>,
     /// Bytes that could not be decoded, as offsets in `text`.
     pub losses: Losses,
+    /// Whether more of the file is to be read at once: it grew by more than a look reads.
+    pub more: bool,
+    /// Whether bytes read wait for those after them — the end of a character, a CR that a LF may
+    /// follow: the text lacks them until those come.
+    pub held: bool,
 }
 
 /// Reads what is added to the file that a document was read from.
@@ -60,9 +70,11 @@ pub struct Follower {
     /// The last of them, up to [`TAIL`]; at first, those of the text of the document as the file
     /// has them — not known where it lost bytes in reading.
     tail: Option<Vec<u8>>,
-    /// Whether the text ends with a character lost in reading: the file may have ended with one cut
-    /// off, which what is added finishes — then it is to be read anew.
-    cut: bool,
+    /// Whether the file is to be read anew once it changes, rather than followed on: the text ends
+    /// with a character lost in reading — the file may have ended with one cut off, which what is
+    /// added finishes — or the file was empty, its encoding a guess, or the encoding keeps a state
+    /// that the end of the text does not tell.
+    reread: bool,
     /// Bytes of UTF-8 read that do not make a whole character yet, and a CR that a LF may
     /// follow: they wait for those after them, and go on the text with them.
     held: Vec<u8>,
@@ -94,9 +106,10 @@ impl Follower {
         let lost = !doc.decode_losses.is_empty();
         let tail = (!lost && encoder.losses().is_empty() && tail.len() as u64 <= disk.len).then_some(tail);
         let cut = lost && doc.text.to_vec(len.saturating_sub(3)..len) == "\u{FFFD}".as_bytes();
+        let reread = cut || disk.len == 0 || format.encoding.is_stateful();
         let decoder = (!format.encoding.is_utf8()).then(|| Decoder::new(format.encoding));
         let held = Vec::new();
-        Some(Follower { path, format, disk, read: disk.len, tail, cut, held, decoder, held_cr: false, missing: 0 })
+        Some(Follower { path, format, disk, read: disk.len, tail, reread, held, decoder, held_cr: false, missing: 0 })
     }
 
     /// Whether it follows the file `path` that a document has in `format` as `disk`: what it reads
@@ -132,7 +145,7 @@ impl Follower {
         if now.len > MAX_LEN as u64 {
             return Ok(Change::TooLong);
         }
-        if now.id != self.disk.id || now.len < self.read || (self.cut && now != self.disk) {
+        if now.id != self.disk.id || now.len < self.read || (self.reread && now != self.disk) {
             return Ok(Change::Replaced);
         }
         // What was read is still there, or the file was written anew. Of a text that lost bytes in
@@ -149,20 +162,19 @@ impl Follower {
             self.tail = Some(tail);
             return Ok(Change::None);
         }
-        let added = match usize::try_from(now.len - self.read) {
-            Ok(added) if added <= MAX_LEN => added,
-            _ => return Ok(Change::TooLong),
-        };
+        // No more than a part: the file is not longer than a document can be.
+        let added = (now.len - self.read).min(CHUNK as u64) as usize;
         let Some(bytes) = read_at(&mut file, self.read, added)? else { return Ok(Change::Replaced) };
         let from = self.disk;
-        self.read = now.len;
-        self.disk = now;
+        self.read += added as u64;
+        self.disk = Fingerprint { len: self.read, ..now };
         let kept = tail.len().min(TAIL.saturating_sub(bytes.len()));
         tail.drain(..tail.len() - kept);
         tail.extend_from_slice(&bytes[bytes.len().saturating_sub(TAIL)..]);
         self.tail = Some(tail);
         let (text, losses) = self.decode(&bytes);
-        Ok(Change::Appended(Appended { from, disk: now, text, losses }))
+        let (more, held) = (self.read < now.len, !self.held.is_empty() || self.held_cr);
+        Ok(Change::Appended(Appended { from, disk: self.disk, text, losses, more, held }))
     }
 
     /// The text of `bytes`, which follow those read before; the end of a character cut off, and a
@@ -407,6 +419,66 @@ mod tests {
     }
 
     #[test]
+    fn a_file_that_grew_by_much_is_read_a_part_at_a_time() {
+        let (_dir, path, mut doc, mut follower) = followed("follow-much", b"start\n");
+        let line = "a line of the log that another program writes\n";
+        let added = line.repeat(CHUNK / line.len() + 3);
+        add(&path, added.as_bytes());
+        let Change::Appended(first) = follower.poll().unwrap() else { panic!("added") };
+        assert!(first.more && first.text.len() == CHUNK);
+        doc.append_from_file(&first).unwrap();
+        assert_eq!(doc.disk.unwrap().len, 6 + CHUNK as u64);
+        let Change::Appended(rest) = follower.poll().unwrap() else { panic!("the rest") };
+        assert!(!rest.more);
+        doc.append_from_file(&rest).unwrap();
+        assert_eq!(text(&doc), "start\n".to_owned() + &added);
+        assert_eq!(doc.disk, Some(Fingerprint::of_path(&path).unwrap()));
+        assert!(matches!(follower.poll().unwrap(), Change::None));
+    }
+
+    #[test]
+    fn bytes_held_back_are_told() {
+        let (_dir, path, _doc, mut follower) = followed("follow-held", b"a\n");
+        for (bytes, held) in [(&b"b\r"[..], true), (b"\n", false), ("ж".as_bytes().get(..1).unwrap(), true)] {
+            add(&path, bytes);
+            let Change::Appended(appended) = follower.poll().unwrap() else { panic!("added") };
+            assert_eq!(appended.held, held, "{bytes:?}");
+        }
+    }
+
+    #[test]
+    fn an_empty_file_or_a_stateful_encoding_is_read_anew() {
+        // The encoding of an empty file is a guess, which its first text may tell better.
+        let (_dir, path, _doc, mut follower) = followed("follow-empty", b"");
+        add(&path, b"\xFF\xFEa\0");
+        assert!(matches!(follower.poll().unwrap(), Change::Replaced));
+        // ISO-2022-JP: whether the bytes after the text are in JIS mode, its end does not tell.
+        let dir = TempDir::new("follow-iso-2022-jp");
+        let path = dir.0.join("log.txt");
+        fs::write(&path, b"\x1B$BF|K\\\x1B(B\n").unwrap();
+        let Opened::Complete(doc) = open(&path, OpenAs::Encoding(Encoding::for_name("ISO-2022-JP").unwrap())).unwrap()
+        else {
+            panic!("small")
+        };
+        assert_eq!(text(&doc), "日本\n");
+        let mut follower = Follower::for_document(&doc).unwrap();
+        assert!(matches!(follower.poll().unwrap(), Change::None));
+        add(&path, b"\x1B$B8l\x1B(B\n");
+        assert!(matches!(follower.poll().unwrap(), Change::Replaced));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pipe_in_place_of_the_file_is_as_gone() {
+        let (_dir, path, _doc, mut follower) = followed("follow-pipe", b"one\n");
+        fs::remove_file(&path).unwrap();
+        assert!(std::process::Command::new("mkfifo").arg(&path).status().unwrap().success());
+        // Opening it would wait for a program to write it.
+        assert!(matches!(follower.poll().unwrap(), Change::Deleted));
+        assert_eq!(Fingerprint::of_path(&path).unwrap_err().kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
     fn a_folder_in_place_of_the_file_is_as_gone() {
         let (_dir, path, _doc, mut follower) = followed("follow-folder", b"one\n");
         fs::remove_file(&path).unwrap();
@@ -525,6 +597,10 @@ mod tests {
             doc.edit(&[(0..0, b"y")], Selection::default(), Selection::caret(1), EditKind::Typing, Instant::now());
         assert_eq!(typed, Err(EditError::ReadOnly));
         assert_eq!(text(&doc), "xone\n");
+        // Nor is it written: the file may have more than the document.
+        let format = doc.format;
+        assert!(matches!(doc.save(&path, format, false), Err(crate::document::SaveError::ReadOnly)));
+        assert_eq!(fs::read(&path).unwrap(), b"one\n");
         // What is added still goes on a document without changes.
         doc.set_read_only(false);
         doc.undo();

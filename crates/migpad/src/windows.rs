@@ -411,11 +411,13 @@ pub fn open_document_as(path: &Path, open_as: OpenAs, cx: &mut App) -> Opening {
             cx.spawn(async move |cx| {
                 match loading.await {
                     Ok(mut loaded) => {
-                        // The preview could not be edited; the whole text can, with a journal.
+                        // The preview could not be edited; the whole text can, with a journal —
+                        // unless its file is followed.
                         if let Some(dir) = journals {
                             loaded.journal_in(dir);
                         }
                         let _ = target.update(cx, |doc, cx| {
+                            loaded.set_read_only(doc.is_read_only());
                             *doc = loaded;
                             cx.notify();
                         });

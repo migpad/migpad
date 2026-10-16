@@ -8,7 +8,7 @@ mod load;
 mod save;
 
 use std::fmt;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -405,7 +405,12 @@ impl Fingerprint {
         Ok(Fingerprint { len: metadata.len(), modified: metadata.modified().ok(), id: crate::platform::file_id(file) })
     }
 
+    /// The fingerprint of the file at `path`. A folder or a pipe there — which opening would wait
+    /// on — is not found: there is no file to read.
     pub fn of_path(path: &Path) -> io::Result<Self> {
+        if !fs::metadata(path)?.is_file() {
+            return Err(io::ErrorKind::NotFound.into());
+        }
         Self::of_file(&File::open(path)?)
     }
 }

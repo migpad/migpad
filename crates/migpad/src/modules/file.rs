@@ -98,9 +98,10 @@ impl Module for FileModule {
             .keys(by_os(&["cmd-s"], &["ctrl-s"], &["ctrl-s"]))
             .enabled(|workspace, cx| !workspace.document().read(cx).is_preview());
         registry.add(save, menu(2));
+        // Nor a file followed: the tab would follow the copy.
         let save_as = Command::new("file.save_as", Key::FileSaveAs, SaveAs)
             .keys(by_os(&["cmd-shift-s"], &["ctrl-shift-s"], &["ctrl-shift-s"]))
-            .enabled(|workspace, cx| !workspace.document().read(cx).is_preview());
+            .enabled(|workspace, cx| workspace.editable(cx));
         registry.add(save_as, menu(2));
         let close_tab = Command::new("file.close_tab", Key::FileCloseTab, CloseTab).keys(by_os(
             &["cmd-w"],
@@ -123,7 +124,7 @@ impl Module for FileModule {
             }
         });
         registry.on_window_action(|workspace, _: &SaveAs, window, cx| {
-            if !workspace.document().read(cx).is_preview() {
+            if workspace.editable(cx) {
                 workspace.save_as_active(window, cx);
             }
         });
