@@ -4,6 +4,7 @@
 //! draw, and the SVG reads no files.
 
 use std::sync::LazyLock;
+use std::time::Duration;
 
 use merman::svg::SvgPipeline;
 use merman::{Engine, MermaidConfig, OperationControl, RenderOutput, RenderRequest, Renderer, SvgRequest};
@@ -29,12 +30,16 @@ fn renderer(theme: &str) -> Renderer {
     Renderer::new().with_engine(Engine::new().with_site_config(MermaidConfig::from_value(config)))
 }
 
+/// The longest a diagram is drawn: one that takes longer is told as too large.
+const DEADLINE: Duration = Duration::from_secs(10);
+
 /// The SVG of the diagram `source`, in the dark theme or the light one; or what is wrong with the
 /// source.
 pub fn render(source: &str, dark: bool) -> Result<String, String> {
     let renderer = if dark { &*DARK } else { &*LIGHT };
     let svg = SvgRequest { pipeline: Some(SvgPipeline::resvg_safe()), ..SvgRequest::default() };
-    match renderer.render(RenderRequest::svg(source, OperationControl::new(), svg)) {
+    let control = OperationControl::new().with_deadline(DEADLINE);
+    match renderer.render(RenderRequest::svg(source, control, svg)) {
         Ok(RenderOutput::Svg(Some(svg))) => Ok(widen(svg.svg(), MARGIN)),
         Ok(_) => Err("no Mermaid diagram".to_owned()),
         Err(error) => Err(error.to_string()),

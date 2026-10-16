@@ -111,6 +111,10 @@ impl Text {
     }
 }
 
+/// How deep quotes and lists nest at most: deeper ones go on at that depth. Laying out nested
+/// blocks costs more the deeper they are, and so does the stack of what walks them.
+pub const MAX_NESTING: usize = 16;
+
 /// The blocks of the Markdown document `markdown`.
 pub fn parse(markdown: &str) -> Vec<Block> {
     let options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
@@ -197,6 +201,9 @@ enum Target {
 #[derive(Default)]
 struct Builder {
     stack: Vec<Container>,
+    /// How many quotes, lists and items are open past [`MAX_NESTING`]: their blocks go into the
+    /// deepest container there is.
+    flat: usize,
     inlines: Option<(Target, Inlines)>,
     /// A block of code being read: its language and its text.
     code: Option<(Option<String>, String)>,
@@ -233,7 +240,9 @@ impl Builder {
                 self.push_block(Block::Rule);
             }
             Event::TaskListMarker(checked) => {
-                if let Some(Container::Item(item)) = self.stack.last_mut() {
+                if self.flat == 0
+                    && let Some(Container::Item(item)) = self.stack.last_mut()
+                {
                     item.checked = Some(checked);
                 }
             }
@@ -252,7 +261,9 @@ impl Builder {
             }
             Tag::BlockQuote(_) => {
                 self.end_loose();
-                self.stack.push(Container::Blocks(Vec::new()));
+                if !self.flattens() {
+                    self.stack.push(Container::Blocks(Vec::new()));
+                }
             }
             Tag::CodeBlock(kind) => {
                 self.end_loose();
@@ -268,9 +279,16 @@ impl Builder {
             }
             Tag::List(start) => {
                 self.end_loose();
-                self.stack.push(Container::List { start, items: Vec::new() });
+                if !self.flattens() {
+                    self.stack.push(Container::List { start, items: Vec::new() });
+                }
             }
-            Tag::Item => self.stack.push(Container::Item(Item::default())),
+            Tag::Item => {
+                self.end_loose();
+                if !self.flattens() {
+                    self.stack.push(Container::Item(Item::default()));
+                }
+            }
             Tag::Table(alignments) => {
                 self.end_loose();
                 let columns = alignments.into_iter().map(align).collect();
@@ -309,6 +327,9 @@ impl Builder {
             }
             TagEnd::BlockQuote(_) => {
                 self.end_loose();
+                if self.unflattens() {
+                    return;
+                }
                 if let Some(Container::Blocks(blocks)) = self.stack.pop() {
                     self.push_block(Block::Quote(blocks));
                 }
@@ -328,12 +349,18 @@ impl Builder {
                 }
             }
             TagEnd::List(_) => {
+                if self.unflattens() {
+                    return;
+                }
                 if let Some(Container::List { start, items }) = self.stack.pop() {
                     self.push_block(Block::List { start, items });
                 }
             }
             TagEnd::Item => {
                 self.end_loose();
+                if self.unflattens() {
+                    return;
+                }
                 if let Some(Container::Item(item)) = self.stack.pop()
                     && let Some(Container::List { items, .. }) = self.stack.last_mut()
                 {
@@ -390,7 +417,7 @@ impl Builder {
         } else if let Some(html) = &mut self.html {
             html.push_str(text);
         } else {
-            if self.inlines.is_none() && matches!(self.stack.last(), Some(Container::Item(_))) {
+            if self.inlines.is_none() && self.in_item() {
                 self.inlines = Some((Target::Loose, Inlines::default()));
             }
             if let Some((_, inlines)) = &mut self.inlines {
@@ -400,12 +427,38 @@ impl Builder {
     }
 
     fn with_inlines(&mut self, change: impl FnOnce(&mut Inlines)) {
-        if self.inlines.is_none() && matches!(self.stack.last(), Some(Container::Item(_))) {
+        if self.inlines.is_none() && self.in_item() {
             self.inlines = Some((Target::Loose, Inlines::default()));
         }
         if let Some((_, inlines)) = &mut self.inlines {
             change(inlines);
         }
+    }
+
+    /// Whether text goes into a list item, which has no paragraph of its own when the list is
+    /// tight: one too deep counts, whatever the container it goes on in.
+    fn in_item(&self) -> bool {
+        self.flat > 0 || matches!(self.stack.last(), Some(Container::Item(_)))
+    }
+
+    /// Whether a quote, a list or an item starting now is too deep: then it is not a container of
+    /// its own, and it is counted.
+    fn flattens(&mut self) -> bool {
+        // The document is not a level.
+        let deep = self.flat > 0 || self.stack.len() > MAX_NESTING;
+        if deep {
+            self.flat += 1;
+        }
+        deep
+    }
+
+    /// Whether the quote, list or item ending now was too deep: then it is uncounted.
+    fn unflattens(&mut self) -> bool {
+        let deep = self.flat > 0;
+        if deep {
+            self.flat -= 1;
+        }
+        deep
     }
 
     /// Ends the text of a tight list item as a paragraph, before a block that follows it.
@@ -445,6 +498,10 @@ pub fn image_file(url: &str, folder: Option<&Path>) -> Option<PathBuf> {
     let path = match url.strip_prefix("file://") {
         Some(rest) => {
             let rest = rest.strip_prefix("localhost").unwrap_or(rest);
+            // A file of another computer: on the network.
+            if !rest.starts_with('/') {
+                return None;
+            }
             // file:///C:/a.png on Windows.
             let rest = match rest.as_bytes() {
                 [b'/', drive, b':', ..] if cfg!(windows) && drive.is_ascii_alphabetic() => &rest[1..],
@@ -456,7 +513,8 @@ pub fn image_file(url: &str, folder: Option<&Path>) -> Option<PathBuf> {
         // What follows `?` or `#` is not of the file: `logo.png?raw=true`.
         None => decode_percent(url.split(['?', '#']).next()?)?,
     };
-    if path.is_empty() {
+    // A path of the network, as `\\host\share` or `//host/share`, which Windows reads over it.
+    if path.is_empty() || path.starts_with("//") || path.starts_with("\\\\") || path.starts_with("/\\") {
         return None;
     }
     let path = PathBuf::from(path);
@@ -673,7 +731,17 @@ mod tests {
         assert_eq!(file("./my%20logo.png?raw=true#top"), Some(folder.join("./my logo.png")));
         assert_eq!(file("%D0%BB%D0%BE%D0%B3%D0%BE.png"), Some(folder.join("лого.png")));
         assert_eq!(image_file("a.png", None), None);
-        for url in ["https://example.com/a.png", "http://a/b.png", "data:image/png;base64,AAAA", "mailto:a@b", ""] {
+        for url in [
+            "https://example.com/a.png",
+            "http://a/b.png",
+            "data:image/png;base64,AAAA",
+            "mailto:a@b",
+            "",
+            "//host/share/a.png",
+            r"\\host\share\a.png",
+            "file://host/share/a.png",
+            "file:////host/share/a.png",
+        ] {
             assert_eq!(file(url), None, "{url}");
         }
         if cfg!(windows) {
@@ -684,6 +752,53 @@ mod tests {
             assert_eq!(file("file:///pics/a%20b.png"), Some(PathBuf::from("/pics/a b.png")));
             assert_eq!(file("file://localhost/pics/a.png"), Some(PathBuf::from("/pics/a.png")));
         }
+    }
+
+    #[test]
+    fn nesting_stops_deep_but_keeps_the_text() {
+        let depth = |blocks: &[Block]| {
+            fn depth(block: &Block) -> usize {
+                match block {
+                    Block::Quote(blocks) => 1 + blocks.iter().map(depth).max().unwrap_or(0),
+                    Block::List { items, .. } => {
+                        1 + items.iter().flat_map(|item| &item.blocks).map(depth).max().unwrap_or(0)
+                    }
+                    _ => 0,
+                }
+            }
+            blocks.iter().map(depth).max().unwrap_or(0)
+        };
+        let text = |blocks: &[Block]| {
+            let mut all = String::new();
+            fn walk(block: &Block, all: &mut String) {
+                match block {
+                    Block::Paragraph(content) => content.iter().for_each(|inline| {
+                        if let Inline::Text(text) = inline {
+                            all.push_str(&text.text);
+                            all.push('|');
+                        }
+                    }),
+                    Block::Quote(blocks) => blocks.iter().for_each(|block| walk(block, all)),
+                    Block::List { items, .. } => {
+                        items.iter().flat_map(|item| &item.blocks).for_each(|block| walk(block, all))
+                    }
+                    _ => {}
+                }
+            }
+            blocks.iter().for_each(|block| walk(block, &mut all));
+            all
+        };
+        let quotes = parse(&format!("{} deep\n\nafter", ">".repeat(40)));
+        assert_eq!(depth(&quotes), MAX_NESTING);
+        assert_eq!(text(&quotes), "deep|after|");
+        let lists: String = (0..30).map(|level| format!("{}- {level}\n", "  ".repeat(level))).collect();
+        let lists = parse(&lists);
+        // A list and its item make two levels.
+        assert!(depth(&lists) <= MAX_NESTING, "{}", depth(&lists));
+        assert_eq!(text(&lists), (0..30).map(|level| format!("{level}|")).collect::<String>());
+        // Thousands of levels do not overflow the stack of whatever walks them.
+        let blocks = parse(&">".repeat(20_000));
+        assert!(depth(&blocks) <= MAX_NESTING);
     }
 
     #[test]
