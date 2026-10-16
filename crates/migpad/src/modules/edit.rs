@@ -4,7 +4,9 @@
 //! of the text has them too.
 
 use gpui::OsAction;
-use migpad_editor::actions::{Copy, Cut, Delete, LowerCase, Paste, Redo, SelectAll, Undo, UpperCase};
+use migpad_editor::actions::{
+    Copy, Cut, Delete, InvertCase, LowerCase, Paste, Redo, SelectAll, SentenceCase, TitleCase, Undo, UpperCase,
+};
 
 use crate::commands::{Command, MenuId, Module, Registry, by_os};
 use crate::strings::Key;
@@ -32,10 +34,11 @@ impl Module for EditModule {
         registry.add(Command::new("edit.delete", Key::EditDelete, Delete), menu(1));
         let select_all = Command::new("edit.select_all", Key::EditSelectAll, SelectAll).os_action(OsAction::SelectAll);
         registry.add(select_all, menu(1));
+        // A page shows no selection of the text: what would change is not seen.
         let has_selection = |workspace: &crate::workspace::Workspace, cx: &gpui::App| {
             let editor = workspace.editor();
             let sel = editor.read(cx).selection();
-            sel.anchor != sel.head || editor.read(cx).is_block_selection()
+            !workspace.previewing(cx) && (sel.anchor != sel.head || editor.read(cx).is_block_selection())
         };
         let upper = Command::new("edit.upper_case", Key::EditUpperCase, UpperCase)
             .keys(by_os(&["cmd-shift-u"], &["ctrl-shift-u"], &["ctrl-shift-u"]))
@@ -43,6 +46,9 @@ impl Module for EditModule {
         let lower = Command::new("edit.lower_case", Key::EditLowerCase, LowerCase)
             .keys(by_os(&["cmd-shift-l"], &["ctrl-shift-l"], &["ctrl-shift-l"]))
             .enabled(has_selection);
-        registry.add_group(Key::EditCaseMenu, vec![upper, lower], MenuId::Edit, 2);
+        let title = Command::new("edit.title_case", Key::EditTitleCase, TitleCase).enabled(has_selection);
+        let sentence = Command::new("edit.sentence_case", Key::EditSentenceCase, SentenceCase).enabled(has_selection);
+        let invert = Command::new("edit.invert_case", Key::EditInvertCase, InvertCase).enabled(has_selection);
+        registry.add_group(Key::EditCaseMenu, vec![upper, lower, title, sentence, invert], MenuId::Edit, 2);
     }
 }

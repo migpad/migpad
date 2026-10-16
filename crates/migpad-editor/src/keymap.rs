@@ -2,6 +2,7 @@
 //! macOS, Ctrl on Windows and Linux.
 
 use gpui::{Action, Context, Div, InteractiveElement, KeyBinding, KeyContext, actions};
+use migpad_core::case::Case;
 
 use crate::view::{Deletion, EditorView, Motion};
 
@@ -77,6 +78,9 @@ actions!(
         Paste,
         UpperCase,
         LowerCase,
+        TitleCase,
+        SentenceCase,
+        InvertCase,
         ShowContextMenu
     ]
 );
@@ -94,8 +98,11 @@ pub(crate) fn on_edits(div: Div, cx: &mut Context<EditorView>) -> Div {
         .on_action(cx.listener(|view, _: &Copy, _, cx| view.copy(cx)))
         .on_action(cx.listener(|view, _: &Cut, window, cx| view.cut(window, cx)))
         .on_action(cx.listener(|view, _: &Paste, window, cx| view.paste(window, cx)))
-        .on_action(cx.listener(|view, _: &UpperCase, window, cx| view.change_case(true, window, cx)))
-        .on_action(cx.listener(|view, _: &LowerCase, window, cx| view.change_case(false, window, cx)))
+        .on_action(cx.listener(|view, _: &UpperCase, window, cx| view.change_case(Case::Upper, window, cx)))
+        .on_action(cx.listener(|view, _: &LowerCase, window, cx| view.change_case(Case::Lower, window, cx)))
+        .on_action(cx.listener(|view, _: &TitleCase, window, cx| view.change_case(Case::Title, window, cx)))
+        .on_action(cx.listener(|view, _: &SentenceCase, window, cx| view.change_case(Case::Sentence, window, cx)))
+        .on_action(cx.listener(|view, _: &InvertCase, window, cx| view.change_case(Case::Invert, window, cx)))
         .on_action(cx.listener(|view, _: &ShowContextMenu, _, cx| view.context_menu_at_caret(cx)))
 }
 

@@ -5,6 +5,7 @@ use std::ops::Range;
 use std::time::Instant;
 
 use gpui::{App, ClipboardItem, Context, Window};
+use migpad_core::case::{Case, change_case};
 use migpad_core::history::{EditKind, Selection};
 use migpad_core::text::TextStore;
 
@@ -201,14 +202,14 @@ impl EditorView {
         self.replace(range, b"", EditKind::Other, after, window, cx);
     }
 
-    /// Changes the case of the selected text: `upper` for uppercase, `false` for lowercase.
-    /// Does nothing without a selection or on a read-only document.
-    pub(crate) fn change_case(&mut self, upper: bool, window: &mut Window, cx: &mut Context<Self>) {
+    /// Changes the case of the selected text as `case` tells; in a block selection, of every line
+    /// of the block on its own. Does nothing without a selection or on a read-only document.
+    pub(crate) fn change_case(&mut self, case: Case, window: &mut Window, cx: &mut Context<Self>) {
         if self.read_only(cx) {
             return;
         }
         if self.block_columns.is_some() {
-            self.change_case_block(upper, window, cx);
+            self.change_case_block(case, window, cx);
             return;
         }
         let range = self.selected_range();
@@ -217,12 +218,12 @@ impl EditorView {
         }
         let bytes = self.document.read(cx).text().to_vec(range.clone());
         let text = String::from_utf8_lossy(&bytes);
-        let changed: String = if upper { text.to_uppercase() } else { text.to_lowercase() };
+        let changed = change_case(&text, case);
         let after = Selection { anchor: range.start, head: range.start + changed.len() };
         self.replace(range, changed.as_bytes(), EditKind::Other, after, window, cx);
     }
 
-    fn change_case_block(&mut self, upper: bool, window: &mut Window, cx: &mut Context<Self>) {
+    fn change_case_block(&mut self, case: Case, window: &mut Window, cx: &mut Context<Self>) {
         let (anchor_line, head_line) = {
             let doc = self.document.read(cx);
             let (txt, lns) = (doc.text(), doc.lines());
@@ -238,7 +239,7 @@ impl EditorView {
             }
             let bytes = text.to_vec(range.clone());
             let s = String::from_utf8_lossy(&bytes);
-            let changed: String = if upper { s.to_uppercase() } else { s.to_lowercase() };
+            let changed = change_case(&s, case);
             let start = (range.start as isize + shift) as usize;
             let end = (range.end as isize + shift) as usize;
             shift += changed.len() as isize - range.len() as isize;

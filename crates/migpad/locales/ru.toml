@@ -52,6 +52,9 @@ select_all = "Выбрать &все"
 case_menu = "Ре&гистр"
 upper_case = "В &верхний"
 lower_case = "В &нижний"
+title_case = "Каждое &слово с заглавной"
+sentence_case = "Как в &предложении"
+invert_case = "&Инвертировать"
 
 [transform]
 menu = "Преобразоват&ь"
