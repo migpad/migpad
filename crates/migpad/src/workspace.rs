@@ -1117,8 +1117,9 @@ impl Workspace {
         }
     }
 
-    /// Closes the window; its tabs go among the closed ones. Changes to save are asked about
-    /// first, in one question for all the documents that have them ([ADR 0020]).
+    /// Closes the window; its tabs go among the closed ones. Changes to save in unpinned tabs are
+    /// asked about first ([ADR 0020]); pinned tabs go to the session silently — their changes are
+    /// kept in the journal and come back at the next start.
     pub fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // The last window: closing it is quitting, which keeps the window for the next start, as
         // its button does — once this window is done with the action. The settings window does
@@ -1160,8 +1161,6 @@ impl Workspace {
         cx.spawn_in(window, async move |workspace, cx| {
             match answer.await {
                 SaveAnswer::Save => {
-                    // Each in turn, its tab shown: the dialog of an untitled one and what went
-                    // wrong are about the document in view. One not saved keeps the window open.
                     for (document, _) in changed {
                         let save = workspace.update_in(cx, |workspace, window, cx| {
                             if let Some(index) = workspace.tab_of(document) {

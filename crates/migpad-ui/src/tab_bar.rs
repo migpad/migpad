@@ -211,19 +211,47 @@ impl RenderOnce for TabBar {
                 (self.on_select.clone(), self.on_close.clone(), self.on_close.clone(), self.on_move.clone());
             let (on_context_menu, on_receive) = (self.on_context_menu.clone(), self.on_receive.clone());
             let dragged = DraggedTab { owner, window, document: tab.document, index: i, title: tab.title.clone() };
-            // Pinned tabs show a pin icon (and ● for changes); unpinned show ● or × to close.
+            // Pinned tabs show a pin icon (● over it for changes); unpinned show ● or × to close.
+            let pin_color = if tab.modified { theme.text } else { theme.text_muted };
             let trailing = if pinned {
                 div()
                     .id(("close", i))
                     .relative()
                     .flex_none()
                     .size(px(18.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_size(px(11.))
-                    .text_color(rgb(if tab.modified { theme.text } else { theme.text_muted }))
-                    .child(if tab.modified { "●" } else { "📌" })
+                    .child(
+                        div()
+                            .absolute()
+                            .left(px(6.5))
+                            .top(px(3.))
+                            .size(px(5.))
+                            .rounded(px(2.5))
+                            .border_1()
+                            .border_color(rgb(pin_color)),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .left(px(8.25))
+                            .top(px(8.))
+                            .w(px(1.5))
+                            .h(px(7.))
+                            .rounded(px(0.75))
+                            .bg(rgb(pin_color)),
+                    )
+                    .when(tab.modified, |pin| {
+                        pin.child(
+                            div()
+                                .absolute()
+                                .size_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_size(px(10.))
+                                .text_color(rgb(pin_color))
+                                .child("●"),
+                        )
+                    })
             } else {
                 let close_label = self.close_label.clone();
                 div()
@@ -275,8 +303,10 @@ impl RenderOnce for TabBar {
                 .items_center()
                 .gap(px(4.))
                 .h_full()
-                .when(pinned, |tab| tab.min_w(px(36.)).max_w(px(36.)).justify_center().pl(px(4.)).pr(px(4.)))
-                .when(!pinned, |tab| tab.min_w(px(64.)).max_w(px(220.)).pl(px(12.)).pr(px(5.)))
+                .min_w(px(64.))
+                .max_w(px(220.))
+                .pl(px(12.))
+                .pr(px(5.))
                 .border_r_1()
                 .border_color(rgb(theme.border))
                 .when(active, |tab| tab.bg(rgb(theme.tab_active)).text_color(rgb(theme.text)))
@@ -316,18 +346,16 @@ impl RenderOnce for TabBar {
                 })
                 .when(drop_at == Some(i), |tab| tab.child(marker().left_0()))
                 .when(drop_at == Some(count) && i + 1 == count, |tab| tab.child(marker().right_0()))
-                .when(!pinned, |tab| {
-                    tab.child(
-                        div()
-                            .flex_shrink(1.)
-                            .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .when(tab_missing, |title| title.line_through())
-                            .child(tab_title.clone()),
-                    )
-                })
+                .child(
+                    div()
+                        .flex_shrink(1.)
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .when(tab_missing, |title| title.line_through())
+                        .child(tab_title.clone()),
+                )
                 .child(trailing)
         });
         let (on_move, on_new, on_plus, on_receive_end) =
