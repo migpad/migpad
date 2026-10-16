@@ -2,6 +2,18 @@
 
 What changed in each version of MigPad. MigPad follows [Semantic Versioning](https://semver.org/).
 
+## [0.1.2] — 2026-10-16
+
+### Features
+
+- Pinned tabs ([#34](https://github.com/migpad/migpad/pull/34))
+- Markdown preview with Mermaid diagrams ([#35](https://github.com/migpad/migpad/pull/35))
+
+### Fixes
+
+- Defer menu rebuild to prevent panic on entity read ([#32](https://github.com/migpad/migpad/pull/32))
+- Tabs between windows and the last window on macOS, the default extension on Linux and Windows, SHA hashes ([#33](https://github.com/migpad/migpad/pull/33))
+
 ## [0.1.1] — 2026-10-10
 
 ### Features
