@@ -18,7 +18,8 @@ const KOI8_U_UKRAINIAN: [u8; 8] = [0xA4, 0xA6, 0xA7, 0xAD, 0xB4, 0xB6, 0xB7, 0xB
 /// Detects the encoding of a file from its first bytes.
 ///
 /// `complete` tells whether `sample` is the whole file: a sample cut off in the middle of a UTF-8
-/// sequence is still UTF-8. `tld` is the lower-case country-code top-level domain of the region
+/// sequence is still UTF-8, and so is a whole file with UTF-8 before the cut — another program may
+/// be writing it. `tld` is the lower-case country-code top-level domain of the region
 /// whose legacy encodings are likely, like `"ru"`; it improves the guess, other values are ignored.
 pub fn detect(sample: &[u8], complete: bool, tld: Option<&str>) -> Detected {
     for encoding in [Encoding::UTF_8, Encoding::UTF_16LE, Encoding::UTF_16BE] {
@@ -30,9 +31,11 @@ pub fn detect(sample: &[u8], complete: bool, tld: Option<&str>) -> Detected {
     if let Some(encoding) = utf16_without_bom(sample) {
         return Detected { encoding, bom: false };
     }
+    // Cut off in the middle of a sequence: the end of a sample, or of a file another program is
+    // writing — then UTF-8 before the cut tells it.
     let utf8 = match std::str::from_utf8(sample) {
         Ok(_) => true,
-        Err(error) => !complete && error.error_len().is_none(),
+        Err(error) => error.error_len().is_none() && (!complete || !sample[..error.valid_up_to()].is_ascii()),
     };
     if utf8 || mostly_utf8(sample) {
         return Detected { encoding: Encoding::UTF_8, bom: false };
@@ -166,6 +169,19 @@ mod tests {
         assert_eq!(detect(cut, false, None).encoding, Encoding::UTF_8);
         // A whole file cut off like this is still mostly UTF-8.
         assert_eq!(detect(cut, true, None).encoding, Encoding::UTF_8);
+    }
+
+    #[test]
+    fn a_file_cut_in_a_utf8_sequence_is_utf8_with_utf8_before() {
+        // A log that another program writes, caught in the middle of "→": too few characters
+        // before it to be mostly UTF-8.
+        let log = "start ✓\nnext ✓\nthen → done\n".as_bytes();
+        let arrow = log.windows(3).position(|bytes| bytes == "→".as_bytes()).unwrap();
+        for cut in [arrow + 1, arrow + 2] {
+            assert_eq!(detect(&log[..cut], true, Some("ru")).encoding, Encoding::UTF_8, "{cut}");
+        }
+        // Without UTF-8 before, the last byte is a character of another encoding: "café" in Latin-1.
+        assert_ne!(detect(b"caf\xe9", true, None).encoding, Encoding::UTF_8);
     }
 
     #[test]
