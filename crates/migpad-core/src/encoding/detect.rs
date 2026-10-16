@@ -55,12 +55,13 @@ pub fn detect(sample: &[u8], complete: bool, tld: Option<&str>) -> Detected {
 
 /// UTF-16 told by its high bytes, which text in an alphabet keeps few: zero for spaces, digits,
 /// punctuation and Latin letters, `0x04` for Cyrillic ones, `0x03` for Greek ones. Either many of
-/// the high bytes are zero and few of the low ones, or nearly all high bytes are zero or that of
-/// one alphabet; then the sample, read as UTF-16, must look like text: no unpaired surrogates, no
-/// control characters but tabs, line and page breaks. Binary files have plenty of those.
+/// the high bytes are zero, few of the low ones, and few units are two printable ASCII characters;
+/// or nearly all high bytes are zero or that of one alphabet. Then the sample, read as UTF-16,
+/// must look like text: no unpaired surrogates, no control characters but tabs, line and page
+/// breaks. Binary files have plenty of those.
 ///
 /// Text in scripts with thousands of characters, as Chinese, has no such high bytes and is not
-/// told from other encodings.
+/// told from other encodings without others among it.
 fn utf16_without_bom(sample: &[u8]) -> Option<Encoding> {
     // High bytes come second in little-endian code units.
     [(Encoding::UTF_16LE, 1), (Encoding::UTF_16BE, 0)]
@@ -76,24 +77,28 @@ fn has_utf16_high_bytes(sample: &[u8], high: usize) -> bool {
         return false;
     }
     let mut counts = [0usize; 256];
-    let mut low_zeros = 0;
+    let (mut low_zeros, mut ascii) = (0, 0);
     for unit in pairs {
         counts[unit[high] as usize] += 1;
         low_zeros += usize::from(unit[1 - high] == 0);
+        ascii += usize::from(unit.iter().all(|b| (0x20..0x7F).contains(b)));
     }
     let zeros = counts[0];
-    // Latin text and any with spaces: in UTF-8 text with NUL characters they fall on either byte.
-    if zeros * 8 >= units && low_zeros * 8 <= zeros {
+    // Latin text and any with spaces. In UTF-8 text with NUL characters, the zeros fall on either
+    // byte; in a list of words that NUL characters end and in ASCII text that UTF-16 text follows,
+    // as PowerShell appends it, many units are two ASCII characters.
+    if zeros * 8 >= units && low_zeros * 8 <= zeros && ascii * 4 <= zeros {
         return true;
     }
-    // The alphabets up to U+1FFF. Not the high bytes of tabs and line breaks: in UTF-8, lines of
-    // one character would have them every other byte.
-    let alphabet = (0x01..0x20).filter(|b| !(0x09..=0x0D).contains(b)).map(|b| counts[b]).max().unwrap_or(0);
+    // Alphabets from Greek to Arabic, from Thai to Balinese. Not Latin ones, which have ASCII
+    // letters among them, nor the high bytes of tabs and line breaks or of `^A` and other
+    // separators: in UTF-8, lines and fields of one character would have them every other byte.
+    let alphabet = (0x03..=0x08).chain(0x0E..=0x1B).map(|b| counts[b]).max().unwrap_or(0);
     (zeros + alphabet) * 10 >= units * 9
 }
 
 /// Whether `sample` in `encoding`, UTF-16, is text. A sample may cut a character: an odd byte or
-/// the first half of a surrogate pair at its end do not count.
+/// the first half of a surrogate pair at its end do not count, nor NUL characters that end a file.
 fn reads_as_text(sample: &[u8], encoding: Encoding) -> bool {
     let (pairs, _) = sample.as_chunks::<2>();
     let from_bytes = if encoding == Encoding::UTF_16LE { u16::from_le_bytes } else { u16::from_be_bytes };
@@ -101,11 +106,15 @@ fn reads_as_text(sample: &[u8], encoding: Encoding) -> bool {
     if units.last().is_some_and(|unit| (0xD800..0xDC00).contains(unit)) {
         units.pop();
     }
-    char::decode_utf16(units).all(|c| {
-        c.is_ok_and(|c| {
-            !(c.is_control() && !matches!(c, '\t' | '\n' | '\r' | '\x0C')) && !matches!(c, '\u{FFFE}' | '\u{FFFF}')
+    while units.last() == Some(&0) {
+        units.pop();
+    }
+    !units.is_empty()
+        && char::decode_utf16(units).all(|c| {
+            c.is_ok_and(|c| {
+                !(c.is_control() && !matches!(c, '\t' | '\n' | '\r' | '\x0C')) && !matches!(c, '\u{FFFE}' | '\u{FFFF}')
+            })
         })
-    })
 }
 
 /// Whether `sample` is UTF-8 with a few broken places: its valid non-ASCII characters outnumber
@@ -293,6 +302,50 @@ mod tests {
         for text in texts {
             assert_eq!(detect(text, true, Some("ru")), utf8, "{:?}", String::from_utf8_lossy(text));
         }
+    }
+
+    #[test]
+    fn utf8_followed_by_utf16_stays_utf8() {
+        // PowerShell 5.1 appends UTF-16 to a log in another encoding.
+        let log = "2026-10-16 21:45:00 INFO service started, listening on port 8080\r\n".repeat(16);
+        let appended = utf16(&"2026-10-16 21:46:00 ERROR connection refused\r\n".repeat(4), Encoding::UTF_16LE);
+        for odd in ["", "!"] {
+            let bytes = [log.as_bytes(), odd.as_bytes(), &appended].concat();
+            assert_eq!(detect(&bytes, true, None).encoding, Encoding::UTF_8, "{odd:?}");
+        }
+    }
+
+    #[test]
+    fn separated_fields_are_not_utf16() {
+        let texts: [&[u8]; 4] = [
+            b"abc\0def\0ghi\0jkl\0mno\0pqr\0",
+            // `git log --format=%h -z`.
+            b"abc1234\0def5678\0fabcde9\0bcd1234\0",
+            // Fields of one character, as Hive separates them.
+            b"Y\x01N\x01Y\x01N\x01Y\x01N\x01Y\x01N\x01",
+            b"a\x1Fb\x1Fc\x1Fd\x1Fe\x1Ff\x1Fg\x1Fh\x1F",
+        ];
+        for text in texts {
+            let encoding = detect(text, true, None).encoding;
+            assert!(![Encoding::UTF_16LE, Encoding::UTF_16BE].contains(&encoding), "{text:?}: {encoding:?}");
+        }
+    }
+
+    #[test]
+    fn utf16_in_other_scripts_and_with_a_nul_at_the_end() {
+        let texts = [
+            "नमस्ते दुनिया, यह एक परीक्षण है।\n",
+            "// 这是一个中文注释\nfn main() {\n    println!(\"你好, {}\", name);\n}\n",
+            "A string that a NUL character ends\0\0",
+        ];
+        for text in texts {
+            for encoding in [Encoding::UTF_16LE, Encoding::UTF_16BE] {
+                let bytes = utf16(text, encoding);
+                assert_eq!(detect(&bytes, true, None), Detected { encoding, bom: false }, "{text:?} {encoding:?}");
+            }
+        }
+        // Not only NUL characters.
+        assert_eq!(detect(&[0; 8], true, None).encoding, Encoding::UTF_8);
     }
 
     #[test]
