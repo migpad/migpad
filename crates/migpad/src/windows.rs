@@ -204,8 +204,8 @@ pub fn document_windows(cx: &App) -> usize {
 pub enum TabDrop {
     /// Into a window of documents, at a place among its tabs.
     Into(WindowHandle<Workspace>, usize),
-    /// Into a window of its own, its top left corner at a point of the screen: no window of MigPad
-    /// is under the pointer.
+    /// Into a window of its own where it was let go of, at a point of the screen: no window of
+    /// documents is under the pointer.
     Apart(Point<Pixels>),
     /// Nowhere: the window under the pointer asks a question, which the tab would take the keyboard
     /// from.
@@ -213,8 +213,8 @@ pub enum TabDrop {
 }
 
 /// Where a tab let go of at `position` of `window`, outside of it, goes: into the window of
-/// documents under the pointer, or apart where no window of MigPad is. The windows of Wayland do
-/// not know where they are: there it always goes apart, under the window.
+/// documents under the pointer, or apart where no window of documents is. The windows of Wayland
+/// do not know where they are: there it always goes apart, under the window.
 pub fn tab_drop(position: Point<Pixels>, window: &Window, cx: &mut App) -> TabDrop {
     let except = window.window_handle().window_id();
     #[cfg(target_os = "macos")]
@@ -236,36 +236,54 @@ pub fn tab_drop(position: Point<Pixels>, window: &Window, cx: &mut App) -> TabDr
     match into {
         Some((handle, Some(index))) => TabDrop::Into(handle, index),
         Some((_, None)) => TabDrop::Stays,
-        // The pointer over the new tab.
-        None => {
-            let origin = at - point(px(60.), px(40.));
-            #[cfg(target_os = "macos")]
-            let origin = crate::native_window::title_bar_in_sight(origin, cx);
-            TabDrop::Apart(origin)
-        }
+        None => TabDrop::Apart(at),
     }
 }
 
-/// The first window of documents, other than `except`, that `locate` finds the pointer in — the
-/// front one where windows overlap, where the system tells their order — and where a tab goes among
-/// its tabs, unless it takes none now.
+/// Where a window of its own for a tab let go of `at` a point of the screen goes: the pointer over
+/// its tab — and on macOS below the menu bar, where its title bar can be reached.
+pub fn apart_origin(at: Point<Pixels>, cx: &App) -> Point<Pixels> {
+    let origin = at - point(px(60.), px(40.));
+    #[cfg(target_os = "macos")]
+    let origin = crate::native_window::title_bar_in_sight(origin, cx);
+    #[cfg(not(target_os = "macos"))]
+    let _ = cx;
+    origin
+}
+
+/// The window of documents, other than `except`, that `locate` finds the pointer in, and where a
+/// tab goes among its tabs — none while it asks a question. Where the system tells the order of the
+/// windows, the one in front decides, the settings window too, which takes no tab; elsewhere —
+/// Windows — the first window of documents that takes one.
 fn workspace_where(
     except: WindowId,
     cx: &mut App,
     locate: impl Fn(&Window) -> Option<Point<Pixels>>,
 ) -> Option<(WindowHandle<Workspace>, Option<usize>)> {
-    let windows = cx.window_stack().filter(|stack| !stack.is_empty()).unwrap_or_else(|| cx.windows());
-    windows
-        .into_iter()
-        .filter_map(|window| window.downcast::<Workspace>())
-        .filter(|w| w.window_id() != except)
-        .find_map(|handle| {
-            let index = handle.update(cx, |workspace, window, _| {
-                let at = locate(window)?;
-                Some(workspace.takes_tabs(window).then(|| workspace.drop_index(at)))
-            });
-            Some((handle, index.ok()??))
-        })
+    let stack = cx.window_stack().filter(|stack| !stack.is_empty());
+    let ordered = stack.is_some();
+    for window in stack.unwrap_or_else(|| cx.windows()) {
+        if window.window_id() == except {
+            continue;
+        }
+        let Some(handle) = window.downcast::<Workspace>() else {
+            let over = ordered && window.update(cx, |_, window, _| locate(window).is_some()).unwrap_or(false);
+            if over {
+                return None;
+            }
+            continue;
+        };
+        let found = handle.update(cx, |workspace, window, _| {
+            let at = locate(window)?;
+            Some(workspace.takes_tabs(window).then(|| workspace.drop_index(at)))
+        });
+        match found.ok().flatten() {
+            Some(Some(index)) => return Some((handle, Some(index))),
+            Some(None) if ordered => return Some((handle, None)),
+            _ => {}
+        }
+    }
+    None
 }
 
 /// The workspaces of the open windows, except one that is being updated now.

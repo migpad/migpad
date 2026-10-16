@@ -107,6 +107,8 @@ pub struct Workspace {
     next_notice: u64,
     /// The files dragged over the window from another program, to open once they are dropped.
     dragged_files: Option<Vec<PathBuf>>,
+    /// Where a tab of the window was dragged last, in the window.
+    tab_dragged_at: Option<Point<Pixels>>,
     /// Whether a question is open over the window: one at a time — a second one would wait behind
     /// it on macOS, and take its place on Linux.
     asking: bool,
@@ -205,6 +207,7 @@ impl Workspace {
             drawn: false,
             next_notice: 0,
             dragged_files: None,
+            tab_dragged_at: None,
             asking: false,
             place: session::place(window, cx),
             file_check: None,
@@ -1402,24 +1405,43 @@ impl Workspace {
     }
 
     /// A tab of this window dragged on: outside of it, the window under the pointer shows where the
-    /// tab would go, and on macOS the tab follows the pointer — GPUI draws it only in its window.
+    /// tab would go, and on macOS the tab follows the pointer where letting it go does something —
+    /// GPUI draws it only in its window.
     fn tab_dragged(&mut self, event: &DragMoveEvent<DraggedTab>, window: &mut Window, cx: &mut Context<Self>) {
         let dragged = event.drag(cx).clone();
         if dragged.source_window() != self.window_id {
             return;
         }
+        // The button went up where the window did not see it: the drag is over.
+        if event.event.pressed_button != Some(MouseButton::Left) {
+            migpad_ui::show_tab_drop(None, cx);
+            #[cfg(target_os = "macos")]
+            crate::native_window::end_dragged_tab();
+            return;
+        }
+        // GPUI repeats the last move while the pointer rests.
         let position = event.event.position;
+        if self.tab_dragged_at.replace(position) == Some(position) {
+            return;
+        }
         let outside = !Bounds::new(Point::default(), window.viewport_size()).contains(&position);
-        let over = match outside.then(|| windows::tab_drop(position, window, cx)) {
-            Some(TabDrop::Into(target, index)) => Some((target.window_id(), index)),
+        // The title bar of the window is outside of its content, but the tab is still over the
+        // window: let go of there, it tears off as over its text, and GPUI draws it.
+        #[cfg(target_os = "macos")]
+        let outside = outside && crate::native_window::pointer_in(window).is_none();
+        let drop = outside.then(|| windows::tab_drop(position, window, cx));
+        let over = match &drop {
+            Some(TabDrop::Into(target, index)) => Some((target.window_id(), *index)),
             _ => None,
         };
         migpad_ui::show_tab_drop(over, cx);
         #[cfg(target_os = "macos")]
-        if outside {
-            crate::native_window::show_dragged_tab(dragged.title(), cx);
-        } else {
-            crate::native_window::hide_dragged_tab();
+        match drop {
+            Some(TabDrop::Into(..)) => crate::native_window::show_dragged_tab(dragged.title(), cx),
+            Some(TabDrop::Apart(_)) if self.tabs.len() > 1 => {
+                crate::native_window::show_dragged_tab(dragged.title(), cx)
+            }
+            _ => crate::native_window::hide_dragged_tab(),
         }
     }
 
@@ -1448,10 +1470,9 @@ impl Workspace {
                     });
                 });
             }
-            TabDrop::Apart(origin) if self.tabs.len() > 1 => {
+            TabDrop::Apart(at) if self.tabs.len() > 1 => {
                 let Some(tab) = self.extract_tab_by_document(dragged.document_id(), window, cx) else { return };
-                // Where it was let go of.
-                let bounds = Bounds::new(origin, window.viewport_size());
+                let bounds = Bounds::new(windows::apart_origin(at, cx), window.viewport_size());
                 cx.defer(move |cx| {
                     windows::open_window_with(vec![tab], Vec::new(), Some((WindowBounds::Windowed(bounds), None)), cx);
                 });

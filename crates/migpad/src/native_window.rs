@@ -23,8 +23,8 @@ const PADDING: NSSize = NSSize::new(12., 6.);
 const OFFSET: NSPoint = NSPoint::new(10., 14.);
 
 thread_local! {
-    /// The window of the tab dragged outside its window, while it is.
-    static DRAGGED: RefCell<Option<Retained<NSWindow>>> = const { RefCell::new(None) };
+    /// The title of the tab being dragged and its window, shown while the tab is outside its own.
+    static DRAGGED: RefCell<Option<(String, Retained<NSWindow>)>> = const { RefCell::new(None) };
 }
 
 /// Where the pointer is in `window`, from the top left corner of its content, if `window` is the
@@ -64,8 +64,9 @@ pub fn title_bar_in_sight(origin: Point<Pixels>, cx: &App) -> Point<Pixels> {
     let location = NSEvent::mouseLocation();
     let screen = NSScreen::screens(mtm).iter().find(|screen| {
         let frame = screen.frame();
-        (frame.origin.x..frame.origin.x + frame.size.width).contains(&location.x)
-            && (frame.origin.y..frame.origin.y + frame.size.height).contains(&location.y)
+        // The pointer at the top edge is at the top of the frame: the bounds are both in.
+        (frame.origin.x..=frame.origin.x + frame.size.width).contains(&location.x)
+            && (frame.origin.y..=frame.origin.y + frame.size.height).contains(&location.y)
     });
     let Some(screen) = screen else { return origin };
     let visible = screen.visibleFrame();
@@ -79,15 +80,34 @@ pub fn title_bar_in_sight(origin: Point<Pixels>, cx: &App) -> Point<Pixels> {
 pub fn show_dragged_tab(title: &str, cx: &App) {
     let Some(mtm) = MainThreadMarker::new() else { return };
     DRAGGED.with_borrow_mut(|dragged| {
-        let window = dragged.get_or_insert_with(|| dragged_tab(title, cx, mtm));
+        if dragged.as_ref().is_some_and(|(shown, _)| shown != title) {
+            end(dragged);
+        }
+        let (_, window) = dragged.get_or_insert_with(|| (title.to_owned(), dragged_tab(title, cx, mtm)));
         let location = NSEvent::mouseLocation();
         window.setFrameTopLeftPoint(NSPoint::new(location.x + OFFSET.x, location.y - OFFSET.y));
+        if !window.isVisible() {
+            window.orderFrontRegardless();
+        }
     });
 }
 
-/// Hides the tab dragged outside its window: it is back in it, or the drag is over.
+/// Hides the tab dragged outside its window: it is back over it, or letting it go would do nothing.
 pub fn hide_dragged_tab() {
-    if let Some(window) = DRAGGED.take() {
+    DRAGGED.with_borrow(|dragged| {
+        if let Some((_, window)) = dragged {
+            window.orderOut(None);
+        }
+    });
+}
+
+/// The drag of a tab is over: its window goes.
+pub fn end_dragged_tab() {
+    DRAGGED.with_borrow_mut(end);
+}
+
+fn end(dragged: &mut Option<(String, Retained<NSWindow>)>) {
+    if let Some((_, window)) = dragged.take() {
         window.orderOut(None);
     }
 }
@@ -134,7 +154,6 @@ fn dragged_tab(title: &str, cx: &App, mtm: MainThreadMarker) -> Retained<NSWindo
     window.setIgnoresMouseEvents(true);
     window.setLevel(NSPopUpMenuWindowLevel);
     window.setContentView(Some(&plate));
-    window.orderFrontRegardless();
     window
 }
 

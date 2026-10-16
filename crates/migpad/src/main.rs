@@ -120,10 +120,15 @@ fn main() {
         commands::init(&modules::all(), cx);
         // The tab that followed the pointer outside its window goes as the drag ends.
         #[cfg(target_os = "macos")]
-        migpad_ui::on_tab_drag_end(|_| native_window::hide_dragged_tab(), cx);
+        migpad_ui::on_tab_drag_end(|_| native_window::end_dragged_tab(), cx);
         commands::update_menus(None, cx);
         cx.on_window_closed(|cx, closed| {
             session::window_closed(closed, cx);
+            // A drag of a tab whose window closed ends without its button going up there: what
+            // shows the tab and where it would go goes.
+            migpad_ui::show_tab_drop(None, cx);
+            #[cfg(target_os = "macos")]
+            native_window::end_dragged_tab();
             // MigPad quits with its last window of documents, the settings window with it — on
             // macOS too, where applications often stay open without windows: everything comes
             // back at the next start.
