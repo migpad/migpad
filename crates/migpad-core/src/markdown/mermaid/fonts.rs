@@ -2,15 +2,16 @@
 //! guesses a width by the kind of each character — a letter not Latin as wide as a capital, a
 //! circled digit too — and a label wider than the guess outgrew its background. Here the fonts are
 //! those of the system, found as usvg finds them — the first of the families there is, and for a
-//! character the font lacks a font that has it, as GPUI chooses — and the text is shaped by
-//! rustybuzz, which resvg shapes it with.
+//! character the font lacks a font that has it, as GPUI chooses — and a text is as wide as the
+//! advances of its glyphs. resvg shapes text too, with kerning, which makes it a little narrower
+//! than measured: a label has room on its background.
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 
 use fontdb::{Database, Family, ID, Query, Stretch, Style, Weight};
 use regex::Regex;
-use rustybuzz::{Face, UnicodeBuffer, ttf_parser};
+use ttf_parser::Face;
 
 /// The fonts of the system, found once: it takes a while.
 static FONTS: LazyLock<Database> = LazyLock::new(|| {
@@ -50,7 +51,7 @@ pub(super) fn width(text: &str, families: &str, size: f64, weight: u16, italic: 
     let fonts = &*FONTS;
     let style = if italic { Style::Italic } else { Style::Normal };
     let font = font(fonts, families, weight, style)?;
-    let width = shape_with_fallbacks(fonts, text, font)
+    let width = glyphs_with_fallbacks(fonts, text, font)
         .iter()
         .map(|glyph| f64::from(glyph.advance) * size / f64::from(glyph.units_per_em.max(1)))
         .sum();
@@ -89,29 +90,25 @@ fn css_families(list: &str) -> impl Iterator<Item = Family<'_>> {
     )
 }
 
-/// A glyph shaped: missing from its font if its number is 0.
+/// The glyph of a character: missing from its font if its number is 0.
 #[derive(Clone, Copy)]
 struct Glyph {
-    id: u32,
-    /// The byte of the text it starts at.
-    cluster: u32,
-    advance: i32,
-    units_per_em: i32,
+    id: u16,
+    /// The character.
+    c: char,
+    advance: u16,
+    units_per_em: u16,
 }
 
-/// `text` shaped in `font`, and the glyphs it lacks in fonts that have them, as usvg does: the text
-/// is shaped again in the font found for the first character missing, which takes the place of
-/// all the glyphs if it has them all, else of those missing.
-fn shape_with_fallbacks(fonts: &Database, text: &str, font: ID) -> Vec<Glyph> {
-    let mut glyphs = shape(fonts, text, font);
+/// The glyphs of `text` in `font`, and those it lacks in fonts that have them, as usvg finds them:
+/// the font found for the first character missing takes the place of all the glyphs if it has
+/// them all, else of those missing.
+fn glyphs_with_fallbacks(fonts: &Database, text: &str, font: ID) -> Vec<Glyph> {
+    let mut glyphs = glyphs_in(fonts, text, font);
     let mut used = vec![font];
-    loop {
-        let missing = glyphs.iter().find(|glyph| glyph.id == 0);
-        let Some(missing) = missing.and_then(|glyph| text.get(glyph.cluster as usize..)?.chars().next()) else {
-            break;
-        };
+    while let Some(missing) = glyphs.iter().find(|glyph| glyph.id == 0).map(|glyph| glyph.c) {
         let Some(fallback) = fallback(fonts, missing, &used) else { break };
-        let other = shape(fonts, text, fallback);
+        let other = glyphs_in(fonts, text, fallback);
         if !other.is_empty() && other.iter().all(|glyph| glyph.id != 0) {
             return other;
         }
@@ -128,29 +125,30 @@ fn shape_with_fallbacks(fonts: &Database, text: &str, font: ID) -> Vec<Glyph> {
     glyphs
 }
 
-fn shape(fonts: &Database, text: &str, font: ID) -> Vec<Glyph> {
+/// The glyphs of the characters of `text` in `font`, but those no font draws — joiners, selectors
+/// of variants, soft hyphens — which take no room.
+fn glyphs_in(fonts: &Database, text: &str, font: ID) -> Vec<Glyph> {
     fonts
         .with_face_data(font, |data, index| {
-            let face = Face::from_slice(data, index)?;
-            let mut buffer = UnicodeBuffer::new();
-            buffer.push_str(text);
-            buffer.guess_segment_properties();
-            let shaped = rustybuzz::shape(&face, &[], buffer);
+            let face = Face::parse(data, index).ok()?;
             let units_per_em = face.units_per_em();
-            let glyphs = shaped.glyph_infos().iter().zip(shaped.glyph_positions());
-            Some(
-                glyphs
-                    .map(|(info, position)| Glyph {
-                        id: info.glyph_id,
-                        cluster: info.cluster,
-                        advance: position.x_advance,
-                        units_per_em,
-                    })
-                    .collect(),
-            )
+            let glyphs = text.chars().filter(|&c| !invisible(c)).map(|c| {
+                let id = face.glyph_index(c).map_or(0, |id| id.0);
+                let advance = face.glyph_hor_advance(ttf_parser::GlyphId(id)).unwrap_or(0);
+                Glyph { id, c, advance, units_per_em }
+            });
+            Some(glyphs.collect())
         })
         .flatten()
         .unwrap_or_default()
+}
+
+/// Whether `c` takes no room in text and is in no font: a control, a joiner, a selector of a
+/// variant, a soft hyphen, a tag.
+fn invisible(c: char) -> bool {
+    c.is_control()
+        || matches!(c, '\u{00AD}' | '\u{200B}'..='\u{200F}' | '\u{2060}'..='\u{2064}' | '\u{FE00}'..='\u{FE0F}')
+        || matches!(c, '\u{E0000}'..='\u{E0FFF}')
 }
 
 /// The font to draw `c` in, not one of `used`: for an emoji, one of emoji; else, as usvg finds it,
@@ -213,13 +211,17 @@ mod tests {
 
     #[test]
     fn text_is_as_wide_as_its_font_draws_it() {
-        // Systems without fonts, as some of CI, have nothing to measure.
+        // Systems without fonts have nothing to measure; those of some of CI have one font, which
+        // may have letters of one width.
         let Some(narrow) = width("iii", "sans-serif", 16.0, 400, false) else { return };
         let wide = width("WWW", "sans-serif", 16.0, 400, false).unwrap();
-        assert!(narrow > 0.0 && wide > narrow * 2.0, "{narrow} {wide}");
-        // Twice the size, twice the width.
-        let double = width("WWW", "sans-serif", 32.0, 400, false).unwrap();
-        assert!((double - wide * 2.0).abs() < 0.01, "{wide} {double}");
+        assert!(narrow > 0.0 && wide >= narrow, "{narrow} {wide}");
+        // Twice the letters, or twice the size, twice the width.
+        let longer = width("WWWWWW", "sans-serif", 16.0, 400, false).unwrap();
+        let larger = width("WWW", "sans-serif", 32.0, 400, false).unwrap();
+        assert!((longer - wide * 2.0).abs() < 0.01 && (larger - wide * 2.0).abs() < 0.01, "{wide} {longer} {larger}");
         assert_eq!(width("", "sans-serif", 16.0, 400, false), Some(0.0));
+        // A joiner takes no room.
+        assert_eq!(width("W\u{200D}W", "sans-serif", 16.0, 400, false), width("WW", "sans-serif", 16.0, 400, false));
     }
 }

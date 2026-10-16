@@ -27,8 +27,8 @@ chardetng = "1.0"
 # Windows: the resources of migpad.exe, at build time; GPUI has this version too.
 embed-resource = "3.0"
 encoding_rs = "0.8.42"
-# The width of the text of Mermaid diagrams in the fonts of the system, as resvg draws it: the fonts, and the shaping
-# of text. GPUI has these versions too, through resvg: no new packages.
+# The width of the text of Mermaid diagrams in the fonts of the system, as resvg draws it: the fonts found. GPUI has
+# this version too, with these features: no new packages.
 fontdb = "0.23"
 # Linux: the icon of the windows, which X11 takes from the window; GPUI has this version too.
 image = { version = "0.25", default-features = false, features = ["png"] }
@@ -104,7 +104,6 @@ percent-encoding = "2.3"
 # Markdown of the preview: CommonMark, tables, strikethrough, task lists; without the output to HTML.
 pulldown-cmark = { version = "0.13", default-features = false }
 regex = "1.13"
-rustybuzz = "0.20"
 # The settings of the Mermaid diagrams, for merman; GPUI and merman have this version too: no new packages.
 serde_json = "1.0"
 # SHA-256 and SHA-512 of the selected text (RustCrypto).
@@ -114,6 +113,8 @@ sys-locale = "0.3"
 # TOML: the tables of interface strings, at build time and translations of the user; the settings and the state
 # the program keeps between starts.
 toml_edit = { version = "0.25", default-features = false, features = ["parse"] }
+# The glyphs of the fonts that measure the text of Mermaid diagrams; GPUI has this version too, with these features.
+ttf-parser = "0.25"
 windows-sys = "0.61"
 
 # GPUI on Linux and Windows with fixes of MigPad: see vendor/README.md.
