@@ -200,16 +200,21 @@ pub fn document_windows(cx: &App) -> usize {
     cx.windows().iter().filter(|window| window.downcast::<Workspace>().is_some()).count()
 }
 
-/// Where a tab let go of outside its window goes: into a window of documents, at a place among its
-/// tabs, or into a window of its own, opened on the screen at a point.
+/// Where a tab let go of outside its window goes.
 pub enum TabDrop {
+    /// Into a window of documents, at a place among its tabs.
     Into(WindowHandle<Workspace>, usize),
+    /// Into a window of its own, its top left corner at a point of the screen: no window of MigPad
+    /// is under the pointer.
     Apart(Point<Pixels>),
+    /// Nowhere: the window under the pointer asks a question, which the tab would take the keyboard
+    /// from.
+    Stays,
 }
 
 /// Where a tab let go of at `position` of `window`, outside of it, goes: into the window of
-/// documents under the pointer that takes it there, or apart where no window of MigPad is. The
-/// windows of Wayland do not know where they are: there it always goes apart, under the window.
+/// documents under the pointer, or apart where no window of MigPad is. The windows of Wayland do
+/// not know where they are: there it always goes apart, under the window.
 pub fn tab_drop(position: Point<Pixels>, window: &Window, cx: &mut App) -> TabDrop {
     let except = window.window_handle().window_id();
     #[cfg(target_os = "macos")]
@@ -229,19 +234,26 @@ pub fn tab_drop(position: Point<Pixels>, window: &Window, cx: &mut App) -> TabDr
         (into.flatten(), at)
     };
     match into {
-        Some((handle, index)) => TabDrop::Into(handle, index),
-        None => TabDrop::Apart(at),
+        Some((handle, Some(index))) => TabDrop::Into(handle, index),
+        Some((_, None)) => TabDrop::Stays,
+        // The pointer over the new tab.
+        None => {
+            let origin = at - point(px(60.), px(40.));
+            #[cfg(target_os = "macos")]
+            let origin = crate::native_window::title_bar_in_sight(origin, cx);
+            TabDrop::Apart(origin)
+        }
     }
 }
 
 /// The first window of documents, other than `except`, that `locate` finds the pointer in — the
-/// front one where windows overlap, where the system tells their order — and that takes a tab there;
-/// and where the tab goes among its tabs.
+/// front one where windows overlap, where the system tells their order — and where a tab goes among
+/// its tabs, unless it takes none now.
 fn workspace_where(
     except: WindowId,
     cx: &mut App,
     locate: impl Fn(&Window) -> Option<Point<Pixels>>,
-) -> Option<(WindowHandle<Workspace>, usize)> {
+) -> Option<(WindowHandle<Workspace>, Option<usize>)> {
     let windows = cx.window_stack().filter(|stack| !stack.is_empty()).unwrap_or_else(|| cx.windows());
     windows
         .into_iter()
@@ -250,7 +262,7 @@ fn workspace_where(
         .find_map(|handle| {
             let index = handle.update(cx, |workspace, window, _| {
                 let at = locate(window)?;
-                workspace.takes_tabs(window).then(|| workspace.drop_index(at))
+                Some(workspace.takes_tabs(window).then(|| workspace.drop_index(at)))
             });
             Some((handle, index.ok()??))
         })

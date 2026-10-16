@@ -23,7 +23,7 @@ pub use dropdown::Dropdown;
 pub use menu::{ItemSpec, action_at, menu_height};
 pub use menu_bar::MenuBar;
 pub use status_bar::StatusBar;
-pub use tab_bar::{DraggedTab, TabBar, TabInfo, drop_position, take_dragged_tab};
+pub use tab_bar::{DraggedTab, TabBar, TabInfo, drop_position, on_tab_drag_end, show_tab_drop, take_dragged_tab};
 pub use text_field::TextField;
 pub use theme::{Theme, ThemeMode, theme};
 pub use tooltip::Tooltip;
