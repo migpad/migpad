@@ -77,7 +77,12 @@ pub fn window_closed(window: WindowId, cx: &mut App) {
     if writer.done {
         return;
     }
-    writer.windows.retain(|(id, _)| *id != window);
+    if let Some((_, state)) = writer.windows.iter_mut().find(|(id, _)| *id == window) {
+        state.tabs.retain(|tab| tab.pinned);
+        if state.tabs.is_empty() {
+            writer.windows.retain(|(id, _)| *id != window);
+        }
+    }
     schedule(cx);
 }
 
