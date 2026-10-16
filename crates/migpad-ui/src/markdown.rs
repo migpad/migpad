@@ -14,11 +14,12 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use gpui::{
-    AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, FocusHandle, Focusable, FontStyle, FontWeight,
-    HighlightStyle, Hsla, Image, ImageFormat, ImageSource, IntoElement, KeyBinding, ListAlignment, ListState,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PinchEvent, Pixels, Point, Render, ScrollHandle,
-    ScrollWheelEvent, SharedString, Size, StrikethroughStyle, StyledImage, StyledText, Task, TextLayout,
-    UnderlineStyle, Window, canvas, div, fill, img, list, point, prelude::*, px, relative, rgb, size,
+    AnyElement, App, Bounds, ClickEvent, ClipboardItem, Context, FocusHandle, Focusable, Font, FontStyle, FontWeight,
+    HighlightStyle, Hsla, Image, ImageFormat, ImageSource, IntoElement, IsZero, KeyBinding, ListAlignment, ListOffset,
+    ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, OngoingScroll, PinchEvent, Pixels, Point,
+    Render, ScrollHandle, ScrollWheelEvent, SharedString, Size, StrikethroughStyle, StyledImage, StyledText, Task,
+    TextLayout, TextRun, UnderlineStyle, Window, canvas, div, fill, img, list, point, prelude::*, px, relative, rgb,
+    size,
 };
 use migpad_core::markdown::{self, Align, Block, Inline, Item, Style, Text, mermaid};
 use migpad_editor::actions::{Copy, SelectAll};
@@ -43,6 +44,9 @@ const MAX_ZOOM: f32 = 8.;
 const BAR: f32 = 12.;
 const AREA_BAR: f32 = 10.;
 
+/// The room on each side of the text of a cell of a table.
+const CELL_PADDING: f32 = 12.;
+
 /// The keys of the preview: copying, selecting all.
 pub fn init(cx: &mut App) {
     cx.bind_keys([
@@ -59,6 +63,13 @@ pub fn init(cx: &mut App) {
 struct Place {
     segment: usize,
     offset: usize,
+}
+
+/// Where a diagram was painted, and how far below the top of its block: it grows down from there.
+#[derive(Clone, Copy)]
+struct DiagramPlace {
+    bounds: Bounds<Pixels>,
+    below: Pixels,
 }
 
 /// A diagram, by its source and theme.
@@ -109,9 +120,11 @@ pub struct MarkdownPreview {
     /// The width the page gives each diagram, by its source, as the last frame laid it out; and
     /// where the diagrams were painted, which a press does not select text over.
     diagram_widths: Rc<RefCell<HashMap<String, Pixels>>>,
-    diagram_bounds: Rc<RefCell<HashMap<String, Bounds<Pixels>>>>,
+    diagram_places: Rc<RefCell<HashMap<String, DiagramPlace>>>,
     /// A scroll bar being dragged.
     dragging: Option<Drag>,
+    /// The direction a gesture of the trackpad started in, which it keeps to over an area.
+    gesture: OngoingScroll,
     reading: Option<Task<()>>,
 }
 
@@ -143,8 +156,9 @@ impl MarkdownPreview {
             area: (0, 0),
             zooms: HashMap::new(),
             diagram_widths: Rc::default(),
-            diagram_bounds: Rc::default(),
+            diagram_places: Rc::default(),
             dragging: None,
+            gesture: OngoingScroll::default(),
             reading: None,
         }
     }
@@ -311,7 +325,7 @@ impl MarkdownPreview {
     fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
         // A press on a diagram is for enlarging it, not for selecting text.
-        if self.diagram_bounds.borrow().values().any(|bounds| bounds.contains(&event.position)) {
+        if self.diagram_places.borrow().values().any(|place| place.bounds.contains(&event.position)) {
             return;
         }
         let place = self.place_at(event.position);
@@ -402,39 +416,82 @@ impl MarkdownPreview {
         cx.notify();
     }
 
-    /// The diagram `source` enlarged `factor` times more, or less — not under the width the page
-    /// gives it — the point under `position` staying where it is.
+    /// The diagram `source` of the block `block`, of the size `natural` at 100%, `zoom` times as
+    /// wide as the page gives it — not narrower — the point under `position` staying where it is.
+    #[allow(clippy::too_many_arguments)]
     fn zoom(
         &mut self,
         source: &str,
-        factor: f32,
+        block: usize,
+        natural: Size<f32>,
+        zoom: f32,
         position: Point<Pixels>,
         handle: &ScrollHandle,
         cx: &mut Context<Self>,
     ) {
         let old = self.zooms.get(source).copied().unwrap_or(1.);
-        let new = (old * factor).clamp(1., MAX_ZOOM);
-        if (new - old).abs() < 0.001 {
+        let new = zoom.clamp(1., MAX_ZOOM);
+        let given = self.diagram_widths.borrow().get(source).copied();
+        let place = self.diagram_places.borrow().get(source).copied();
+        let (Some(given), Some(place)) = (given, place) else { return };
+        if (new - old).abs() < 0.001 || natural.width <= 0. {
             return;
         }
-        self.zooms.insert(source.to_owned(), new);
-        let ratio = new / old;
-        let (viewport, offset) = (handle.bounds(), handle.offset());
+        if new > 1. {
+            self.zooms.insert(source.to_owned(), new);
+        } else {
+            self.zooms.remove(source);
+        }
+        let fit = px(natural.width).min(given);
+        let (before, after) = (fit * old, fit * new);
+        // Sideways the point under the pointer stays; a diagram that fits is centred.
+        let viewport = handle.bounds();
+        let left = if before <= given { (given - before) / 2. } else { handle.offset().x };
         let x = position.x - viewport.left();
-        handle.set_offset(point((x - (x - offset.x) * ratio).min(px(0.)), offset.y));
-        // The diagram grows down as well: the page scrolls by what grows above the point.
-        let top = self.diagram_bounds.borrow().get(source).map(|bounds| bounds.top());
-        if let Some(top) = top {
-            self.list.scroll_by((position.y - top).max(px(0.)) * (ratio - 1.));
+        let across = ((x - left) / before).clamp(0., 1.);
+        let offset = if after <= given { px(0.) } else { (x - after * across).clamp(given - after, px(0.)) };
+        handle.set_offset(point(offset, px(0.)));
+        // The diagram grows down from its top: the page scrolls by what grows above the point.
+        // Where the block is now comes from the list, which knows how far it was scrolled since
+        // the last frame; the heights it has of the blocks above it are right.
+        let height = natural.height / natural.width;
+        let top = self.list.bounds_for_item(block).map_or(place.bounds.top(), |item| item.top() + place.below);
+        let down = ((position.y - top) / (before * height)).clamp(0., 1.);
+        let block_top = position.y - after * height * down - place.below;
+        let page_top = self.list.viewport_bounds().top();
+        if block_top <= page_top {
+            // The block is as high as it is now: the list does not know it yet.
+            self.list.scroll_to(ListOffset { item_ix: block, offset_in_item: page_top - block_top });
+        } else {
+            self.list.scroll_to(ListOffset { item_ix: block, offset_in_item: px(0.) });
+            self.list.scroll_by(page_top - block_top);
         }
         cx.notify();
     }
 
-    /// The diagram `source` at the width the page gives it again.
-    fn unzoom(&mut self, source: &str, handle: &ScrollHandle, cx: &mut Context<Self>) {
-        if self.zooms.remove(source).is_some() {
-            handle.set_offset(point(px(0.), handle.offset().y));
-            cx.notify();
+    /// The wheel over an area that scrolls sideways: sideways it scrolls the area and not the page;
+    /// up and down, the page. A gesture of the trackpad keeps to the direction it started in, and
+    /// Shift turns the wheel of a mouse sideways.
+    fn area_wheel(&mut self, handle: &ScrollHandle, event: &ScrollWheelEvent, window: &Window, cx: &mut Context<Self>) {
+        // Enlarging a diagram.
+        if zooming(event) {
+            return;
+        }
+        let mut delta = event.delta.pixel_delta(window.line_height());
+        if event.delta.precise() {
+            self.gesture.filter(&mut delta, event.touch_phase);
+        } else if delta.x.is_zero() && event.modifiers.shift {
+            delta = point(delta.y, px(0.));
+        }
+        let max = handle.max_offset().x;
+        if delta.x.is_zero() || max <= px(0.) {
+            return;
+        }
+        let offset = handle.offset();
+        handle.set_offset(point((offset.x + delta.x).clamp(-max, px(0.)), offset.y));
+        cx.notify();
+        if delta.y.is_zero() {
+            cx.stop_propagation();
         }
     }
 
@@ -458,7 +515,7 @@ impl MarkdownPreview {
             },
         )
         .size_full();
-        let pressed = handle.clone();
+        let (pressed, wheeled) = (handle.clone(), handle.clone());
         let id = key.0 * 1024 + key.1;
         let element = div()
             .relative()
@@ -470,8 +527,13 @@ impl MarkdownPreview {
                     .flex()
                     .when(center, |area| area.justify_center())
                     .when(wide, |area| area.pb(px(AREA_BAR + 2.)))
-                    .overflow_x_scroll()
+                    // Scrolled by the wheel here, not as GPUI scrolls: it turns the wheel up and
+                    // down sideways, and the page scrolls with the area.
+                    .overflow_hidden()
                     .track_scroll(&handle)
+                    .on_scroll_wheel(cx.listener(move |preview, event: &ScrollWheelEvent, window, cx| {
+                        preview.area_wheel(&wheeled, event, window, cx)
+                    }))
                     .child(content),
             )
             .child(
@@ -489,12 +551,12 @@ impl MarkdownPreview {
         (element, handle)
     }
 
-    fn block_at(&mut self, index: usize, cx: &mut Context<Self>) -> AnyElement {
+    fn block_at(&mut self, index: usize, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         self.area = (index, 0);
         let blocks = self.blocks.clone();
         let Some(block) = blocks.get(index) else { return div().into_any_element() };
         let mut segment = self.starts.get(index).copied().unwrap_or_default();
-        let content = self.block(block, 0, &mut segment, cx);
+        let content = self.block(block, 0, &mut segment, window, cx);
         let last = index + 1 == blocks.len();
         // The page is as wide as the window, its margins aside; the scroll bar is in the right one.
         div()
@@ -510,7 +572,14 @@ impl MarkdownPreview {
     /// The element of `block`, `depth` lists deep; `segment` is its first segment, and after it the
     /// first of the next block. Nested blocks take the whole width given them: laid out to the
     /// width of their content, each level would lay out those below it twice.
-    fn block(&mut self, block: &Block, depth: usize, segment: &mut usize, cx: &mut Context<Self>) -> AnyElement {
+    fn block(
+        &mut self,
+        block: &Block,
+        depth: usize,
+        segment: &mut usize,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = theme(cx);
         let size = text_size(cx);
         match block {
@@ -540,7 +609,7 @@ impl MarkdownPreview {
             Block::Mermaid(source) => self.diagram(source, cx),
             Block::Quote(blocks) => {
                 let blocks: Vec<AnyElement> =
-                    blocks.iter().map(|block| self.block(block, depth, segment, cx)).collect();
+                    blocks.iter().map(|block| self.block(block, depth, segment, window, cx)).collect();
                 div()
                     .w_full()
                     .border_l(px(3.))
@@ -557,11 +626,11 @@ impl MarkdownPreview {
                 let items: Vec<AnyElement> = items
                     .iter()
                     .enumerate()
-                    .map(|(i, item)| self.item(item, start.map(|start| start + i as u64), depth, segment, cx))
+                    .map(|(i, item)| self.item(item, start.map(|start| start + i as u64), depth, segment, window, cx))
                     .collect();
                 div().w_full().flex().flex_col().gap(px(4.)).children(items).into_any_element()
             }
-            Block::Table { columns, header, rows } => self.table(columns, header, rows, segment, cx),
+            Block::Table { columns, header, rows } => self.table(columns, header, rows, segment, window, cx),
             Block::Rule => div().my(px(6.)).h(px(2.)).w_full().bg(rgb(theme.border)).into_any_element(),
         }
     }
@@ -572,6 +641,7 @@ impl MarkdownPreview {
         number: Option<u64>,
         depth: usize,
         segment: &mut usize,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let marker = match (item.checked, number) {
@@ -581,7 +651,7 @@ impl MarkdownPreview {
             (None, None) => ["•", "◦", "▪"][depth % 3].to_owned(),
         };
         let blocks: Vec<AnyElement> =
-            item.blocks.iter().map(|block| self.block(block, depth + 1, segment, cx)).collect();
+            item.blocks.iter().map(|block| self.block(block, depth + 1, segment, window, cx)).collect();
         div()
             .w_full()
             .flex()
@@ -591,36 +661,51 @@ impl MarkdownPreview {
             .into_any_element()
     }
 
+    /// A table as tables of the web are laid out: each column as wide as its text on one line if
+    /// the page has room, else no narrower than its widest word, the room there is going to the
+    /// columns that need it most; narrower than its words, the table scrolls sideways. The text is
+    /// measured here, as GPUI knows no least width of text that wraps: every cell of a column
+    /// has the same least, most and share of the room, which keeps the columns straight.
     fn table(
         &mut self,
         columns: &[Align],
         header: &[Vec<Inline>],
         rows: &[Vec<Vec<Inline>>],
         segment: &mut usize,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = theme(cx);
         let count = columns.len().max(1);
-        let all_rows = || std::iter::once(header).chain(rows.iter().map(Vec::as_slice));
-        // Each column takes a share of the width as wide as its longest cell, within limits: GPUI
-        // knows no least width of wrapped text, so columns cannot be sized by it, as tables of the
-        // web are. The same shares in every row keep the columns straight.
-        let weights: Vec<f32> = (0..count)
-            .map(|column| {
-                let longest = all_rows().filter_map(|row| row.get(column)).map(|cell| inline_chars(cell)).max();
-                (longest.unwrap_or(0) as f32).clamp(4., 40.)
-            })
-            .collect();
-        let total: f32 = weights.iter().sum();
+        let all_rows = || std::iter::once((header, true)).chain(rows.iter().map(|row| (row.as_slice(), false)));
+        let style = window.text_style();
+        let size = style.font_size.to_pixels(window.rem_size());
+        let code = monospace(cx);
+        let mut widths = vec![(px(0.), px(0.)); count];
+        for (row, is_header) in all_rows() {
+            let font =
+                Font { weight: if is_header { FontWeight::SEMIBOLD } else { style.font_weight }, ..style.font() };
+            for (width, cell) in widths.iter_mut().zip(row) {
+                let (least, most) = cell_widths(cell, &font, &code, size, window);
+                *width = (width.0.max(least), width.1.max(most));
+            }
+        }
+        // The padding and the border of a cell, and a pixel for rounding.
+        let room = px(2. * CELL_PADDING + 2.);
+        let widths: Vec<(Pixels, Pixels)> =
+            widths.into_iter().map(|(least, most)| (least.ceil() + room, most.max(least).ceil() + room)).collect();
         let mut lines = Vec::with_capacity(rows.len() + 1);
-        for (row, is_header) in std::iter::once((header, true)).chain(rows.iter().map(|row| (row.as_slice(), false))) {
+        for (row, is_header) in all_rows() {
             let mut cells = Vec::with_capacity(count);
-            for (column, weight) in weights.iter().enumerate() {
+            for (column, &(least, most)) in widths.iter().enumerate() {
                 let content = row.get(column).map(|content| self.inlines(content, segment, cx));
                 let cell = div()
-                    .flex_none()
-                    .w(relative(weight / total))
-                    .px(px(12.))
+                    .flex_basis(least)
+                    .flex_grow(f32::from(most - least))
+                    .flex_shrink_0()
+                    .min_w(least)
+                    .max_w(most)
+                    .px(px(CELL_PADDING))
                     .py(px(6.))
                     .border_r_1()
                     .border_color(rgb(theme.border))
@@ -645,11 +730,12 @@ impl MarkdownPreview {
                 .children(cells);
             lines.push(line);
         }
-        // As wide as the page; narrower than 72 pixels a column, it scrolls sideways.
+        let (least, most) = widths.iter().fold((px(1.), px(1.)), |sum, width| (sum.0 + width.0, sum.1 + width.1));
         let table = div()
             .flex_none()
-            .w_full()
-            .min_w(px(72. * count as f32))
+            .w(most)
+            .max_w_full()
+            .min_w(least)
             .border_t_1()
             .border_l_1()
             .border_color(rgb(theme.border))
@@ -837,8 +923,9 @@ impl MarkdownPreview {
             (Some(shown), Some(given)) => shown <= given + px(0.5),
             _ => true,
         };
-        let id = self.area.0 * 1024 + self.area.1;
-        let (widths, bounds, key) = (self.diagram_widths.clone(), self.diagram_bounds.clone(), source.to_owned());
+        let (block, id) = (self.area.0, self.area.0 * 1024 + self.area.1);
+        let (widths, places, key) = (self.diagram_widths.clone(), self.diagram_places.clone(), source.to_owned());
+        let list = self.list.clone();
         let measure = canvas(
             move |area, window, _| {
                 let width = area.size.width;
@@ -849,10 +936,14 @@ impl MarkdownPreview {
                 (key, area)
             },
             move |_, (key, area), _, _| {
-                bounds.borrow_mut().insert(key, area);
+                let below = list.bounds_for_item(block).map_or(px(0.), |item| area.top() - item.top());
+                places.borrow_mut().insert(key, DiagramPlace { bounds: area, below });
             },
         )
+        // Over the diagram: with no place given, it would be below it, where the flow puts it.
         .absolute()
+        .top_0()
+        .left_0()
         .size_full();
         let (area, handle) = self.area(picture, fits, cx);
         let (wheel, pinch, click) = (handle.clone(), handle.clone(), handle);
@@ -864,21 +955,21 @@ impl MarkdownPreview {
             .child(area)
             .child(measure)
             .on_scroll_wheel(cx.listener(move |preview, event: &ScrollWheelEvent, _, cx| {
-                let zooming =
-                    if cfg!(target_os = "macos") { event.modifiers.platform } else { event.modifiers.control };
-                if zooming {
+                if zooming(event) {
                     let delta = f32::from(event.delta.pixel_delta(px(20.)).y);
-                    preview.zoom(&wheel_source, (delta * 0.005).exp(), event.position, &wheel, cx);
+                    let zoom = preview.zooms.get(&wheel_source).copied().unwrap_or(1.) * (delta * 0.005).exp();
+                    preview.zoom(&wheel_source, block, natural, zoom, event.position, &wheel, cx);
                     cx.stop_propagation();
                 }
             }))
             .on_pinch(cx.listener(move |preview, event: &PinchEvent, _, cx| {
-                preview.zoom(&pinch_source, 1. + event.delta, event.position, &pinch, cx);
+                let zoom = preview.zooms.get(&pinch_source).copied().unwrap_or(1.) * (1. + event.delta);
+                preview.zoom(&pinch_source, block, natural, zoom, event.position, &pinch, cx);
                 cx.stop_propagation();
             }))
             .on_click(cx.listener(move |preview, event: &ClickEvent, _, cx| {
                 if event.click_count() == 2 {
-                    preview.unzoom(&click_source, &click, cx);
+                    preview.zoom(&click_source, block, natural, 1., event.position(), &click, cx);
                 }
             }))
             .into_any_element()
@@ -897,7 +988,7 @@ impl Render for MarkdownPreview {
         let theme = theme(cx);
         // Painted before the blocks: the segments and diagrams of the last frame go, those painted now
         // come.
-        let (layouts, diagrams) = (self.layouts.clone(), self.diagram_bounds.clone());
+        let (layouts, diagrams) = (self.layouts.clone(), self.diagram_places.clone());
         let forget = canvas(
             |_, _, _| {},
             move |_, _, _, _| {
@@ -940,7 +1031,8 @@ impl Render for MarkdownPreview {
             .line_height(relative(1.5))
             .child(forget)
             .child(
-                list(self.list.clone(), cx.processor(|preview, index, _, cx| preview.block_at(index, cx))).size_full(),
+                list(self.list.clone(), cx.processor(|preview, index, window, cx| preview.block_at(index, window, cx)))
+                    .size_full(),
             )
             .child(
                 div()
@@ -956,15 +1048,100 @@ impl Render for MarkdownPreview {
     }
 }
 
-/// How many characters the text of `content` has: the width a cell of a table asks for.
-fn inline_chars(content: &[Inline]) -> usize {
-    content
-        .iter()
-        .map(|inline| match inline {
-            Inline::Text(text) => text.text.chars().count(),
-            Inline::Image { alt, .. } => alt.chars().count(),
-        })
-        .sum()
+/// The least width the cell `content` takes — its widest word, which does not break — and the
+/// most, its lines unwrapped: in `font`, and in `code` for code, at `size`.
+fn cell_widths(
+    content: &[Inline],
+    font: &Font,
+    code: &SharedString,
+    size: Pixels,
+    window: &Window,
+) -> (Pixels, Pixels) {
+    let (mut least, mut most) = (px(0.), px(0.));
+    for inline in content {
+        let alt;
+        let (text, styled) = match inline {
+            Inline::Text(text) => (text.text.as_str(), Some(text)),
+            Inline::Image { alt: text, .. } => {
+                alt = format!("[{text}]");
+                (alt.as_str(), None)
+            }
+        };
+        let mut start = 0;
+        for line in text.split('\n') {
+            let range = start..start + line.len();
+            start = range.end + 1;
+            if line.is_empty() {
+                continue;
+            }
+            let runs = match styled {
+                Some(styled) => text_runs(styled, range, font, code),
+                None => vec![text_run(line.len(), font.clone())],
+            };
+            let shaped = window.text_system().shape_line(SharedString::from(line.to_owned()), size, &runs, None);
+            most = most.max(shaped.width);
+            // A line breaks before a word after a space, the space staying with the word before;
+            // and around the characters of Chinese, Japanese and Korean, which have no spaces.
+            let mut word = 0;
+            let mut previous = '\0';
+            for (at, c) in line.char_indices() {
+                if at > 0 && ((previous == ' ' && c != ' ') || wide(c) || wide(previous)) {
+                    least = least.max(shaped.x_for_index(at) - shaped.x_for_index(word));
+                    word = at;
+                }
+                previous = c;
+            }
+            least = least.max(shaped.width - shaped.x_for_index(word));
+        }
+    }
+    (least, most)
+}
+
+/// The runs of the part `range` of `text`: in `font`, bold, italic or code as its styles say.
+fn text_runs(text: &Text, range: Range<usize>, font: &Font, code: &SharedString) -> Vec<TextRun> {
+    let mut runs = Vec::new();
+    let mut at = range.start;
+    for run in &text.runs {
+        let (from, to) = (run.range.start.max(at), run.range.end.min(range.end));
+        if from >= to {
+            continue;
+        }
+        if from > at {
+            runs.push(text_run(from - at, font.clone()));
+        }
+        let mut styled = font.clone();
+        if run.style.strong {
+            styled.weight = FontWeight::BOLD;
+        }
+        if run.style.emphasis {
+            styled.style = FontStyle::Italic;
+        }
+        if run.style.code {
+            styled.family = code.clone();
+        }
+        runs.push(text_run(to - from, styled));
+        at = to;
+    }
+    if range.end > at {
+        runs.push(text_run(range.end - at, font.clone()));
+    }
+    runs
+}
+
+fn text_run(len: usize, font: Font) -> TextRun {
+    TextRun { len, font, color: Hsla::default(), background_color: None, underline: None, strikethrough: None }
+}
+
+/// Whether `c` is of the scripts that break between any two characters: Chinese, Japanese, Korean.
+fn wide(c: char) -> bool {
+    matches!(c,
+        '\u{1100}'..='\u{11FF}' | '\u{2E80}'..='\u{A4CF}' | '\u{AC00}'..='\u{D7AF}' | '\u{F900}'..='\u{FAFF}'
+        | '\u{FE30}'..='\u{FE4F}' | '\u{FF00}'..='\u{FFEF}' | '\u{20000}'..='\u{3FFFD}')
+}
+
+/// Whether the wheel enlarges a diagram: with Cmd on macOS, Ctrl on Windows and Linux.
+fn zooming(event: &ScrollWheelEvent) -> bool {
+    if cfg!(target_os = "macos") { event.modifiers.platform } else { event.modifiers.control }
 }
 
 /// The thumb of the scroll bar of a page in a track `track` high: its top and its height; none if
