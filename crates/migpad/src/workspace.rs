@@ -19,7 +19,7 @@ use migpad_core::state::session::{Rect, WindowMode, WindowState};
 use migpad_core::text::TextStore;
 use migpad_editor::{ContextMenuEvent, EditorView};
 use migpad_ui::notification::NotificationBar;
-use migpad_ui::{Button, ContextMenu, DraggedTab, ItemSpec, MenuBar, TabBar, TabInfo, theme};
+use migpad_ui::{Button, ContextMenu, DraggedTab, ItemSpec, MarkdownPreview, MenuBar, TabBar, TabInfo, theme};
 
 use crate::commands::{self, Registry, refresh_menus};
 use crate::find::FindBar;
@@ -77,6 +77,10 @@ pub struct Tab {
     /// Whether the encoding of its file was chosen by hand rather than guessed: reading the file
     /// again keeps it, and the session remembers it.
     encoding_chosen: bool,
+    /// The page of a Markdown document, made once it shows, and whether it shows rather than the
+    /// text.
+    preview: Option<Entity<MarkdownPreview>>,
+    previewing: bool,
     _observe: Subscription,
     /// Shows the progress of the loading in the status bar.
     _progress: Option<Task<()>>,
@@ -266,7 +270,7 @@ impl Workspace {
             (false, true) => {
                 let had_focus = self.menu_bar.take().is_some_and(|bar| bar.read(cx).is_active());
                 if had_focus {
-                    window.focus(&self.editor().focus_handle(cx), cx);
+                    self.focus_content(window, cx);
                 }
             }
             _ => return,
@@ -288,8 +292,90 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Shows the find bar over the text, made the first time.
+    /// Whether the active tab shows a Markdown document as a page.
+    pub fn previewing(&self, cx: &App) -> bool {
+        let tab = self.tabs.active();
+        tab.previewing && is_markdown(tab.document.read(cx).path.as_deref())
+    }
+
+    /// Whether the document of the active tab is Markdown, which shows as a page or as its text.
+    pub fn is_markdown(&self, cx: &App) -> bool {
+        is_markdown(self.document().read(cx).path.as_deref())
+    }
+
+    /// View ▸ Markdown Preview: the Markdown document of the active tab shows as a page, made of its
+    /// text as it is now, or as its text.
+    pub fn toggle_markdown_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.is_markdown(cx) {
+            return;
+        }
+        let index = self.tabs.active_index();
+        let Some(tab) = self.tabs.get_mut(index) else { return };
+        tab.previewing = !tab.previewing;
+        if tab.previewing {
+            // The bars act on the text, which hides.
+            self.hide_find_bar(cx);
+            self.hide_go_to_bar(cx);
+            self.refresh_preview(index, cx);
+        }
+        self.focus_content(window, cx);
+        refresh_menus(cx);
+        cx.notify();
+    }
+
+    /// The active tab shows its text, if it showed its page.
+    fn show_text(&mut self, cx: &mut Context<Self>) {
+        let index = self.tabs.active_index();
+        if let Some(tab) = self.tabs.get_mut(index)
+            && std::mem::take(&mut tab.previewing)
+        {
+            refresh_menus(cx);
+            cx.notify();
+        }
+    }
+
+    /// The page of the tab at `index`, if it shows one: made, and its text read, the first time.
+    fn preview_of(&mut self, index: usize, cx: &mut Context<Self>) -> Option<Entity<MarkdownPreview>> {
+        let tab = self.tabs.get_mut(index)?;
+        if !tab.previewing || !is_markdown(tab.document.read(cx).path.as_deref()) {
+            return None;
+        }
+        if let Some(preview) = &tab.preview {
+            return Some(preview.clone());
+        }
+        let preview = cx.new(|cx| MarkdownPreview::new(tr(Key::MarkdownDiagramError).into(), cx));
+        tab.preview = Some(preview.clone());
+        self.refresh_preview(index, cx);
+        Some(preview)
+    }
+
+    /// Makes the page of the tab at `index` of its text as it is now, if it shows its page and the
+    /// file has loaded.
+    fn refresh_preview(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(index) else { return };
+        let Some(preview) = tab.preview.clone().filter(|_| tab.previewing) else { return };
+        if tab.document.read(cx).is_preview() {
+            return;
+        }
+        let (text, folder) = tab.document.update(cx, |doc, _| {
+            let folder = doc.path.as_deref().and_then(Path::parent).map(Path::to_path_buf);
+            (String::from_utf8_lossy(doc.contiguous_text()).into_owned(), folder)
+        });
+        preview.update(cx, |preview, cx| preview.set_markdown(text, folder, cx));
+    }
+
+    /// Gives the keyboard to what the active tab shows: its page or its text.
+    fn focus_content(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.preview_of(self.tabs.active_index(), cx) {
+            Some(preview) => window.focus(&preview.focus_handle(cx), cx),
+            None => window.focus(&self.editor().focus_handle(cx), cx),
+        }
+    }
+
+    /// Shows the find bar over the text, made the first time; a page shows its text, which the bar
+    /// acts on.
     pub fn show_find_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<FindBar> {
+        self.show_text(cx);
         let workspace = cx.weak_entity();
         let bar = self.find_bar.get_or_insert_with(|| cx.new(|cx| FindBar::new(workspace, window, cx))).clone();
         if !self.find_shown {
@@ -315,8 +401,9 @@ impl Workspace {
         find.or_else(go_to).unwrap_or_else(|| self.editor().clone())
     }
 
-    /// Shows the bar of Go to Line over the text, made the first time.
+    /// Shows the bar of Go to Line over the text, made the first time; a page shows its text.
     pub fn show_go_to_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<GoToBar> {
+        self.show_text(cx);
         let workspace = cx.weak_entity();
         let bar = self.go_to_bar.get_or_insert_with(|| cx.new(|cx| GoToBar::new(workspace, window, cx))).clone();
         if !self.go_to_shown {
@@ -481,7 +568,7 @@ impl Workspace {
             gone.document.update(cx, |doc, _| doc.remove_journal());
             self.settle(0, tab.selection, tab.notice, window, cx);
             self.reveal_tab = true;
-            window.focus(&self.editor().focus_handle(cx), cx);
+            self.focus_content(window, cx);
             self.update_title(window, cx);
             refresh_menus(cx);
             cx.notify();
@@ -879,7 +966,7 @@ impl Workspace {
             return;
         }
         self.reveal_tab = true;
-        window.focus(&self.editor().focus_handle(cx), cx);
+        self.focus_content(window, cx);
         self.update_title(window, cx);
         refresh_menus(cx);
         cx.notify();
@@ -1917,6 +2004,11 @@ impl Workspace {
             }
             self.check_losses(index, cx);
             self.journal_changed(index, cx);
+            // The page follows the text: loaded, read again, changed by another program — but that
+            // of a large file, which is made again only when asked.
+            if !self.tabs.get(index).is_some_and(|tab| tab.document.read(cx).is_large()) {
+                self.refresh_preview(index, cx);
+            }
         }
         self.update_title(window, cx);
         // The check marks of the encodings and the line breaks follow the document in view, its
@@ -2036,11 +2128,13 @@ impl Workspace {
     }
 
     fn status_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> migpad_ui::StatusBar {
-        let block_dims = self.tabs.active().editor.read(cx).block_dimensions(cx);
-        let selection = if block_dims.is_some() { None } else { self.selection_chars(cx) };
+        let (previewing, markdown) = (self.previewing(cx), self.is_markdown(cx));
+        let block_dims = self.tabs.active().editor.read(cx).block_dimensions(cx).filter(|_| !previewing);
+        let selection = if block_dims.is_some() || previewing { None } else { self.selection_chars(cx) };
         let tab = self.tabs.active();
-        let caret = tab.editor.read(cx).caret_position(cx);
-        if caret.1.is_none() {
+        // A page has no caret.
+        let caret = (!previewing).then(|| tab.editor.read(cx).caret_position(cx));
+        if caret.is_some_and(|caret| caret.1.is_none()) {
             // The column of a caret far into a long line is found a part a frame.
             window.request_animation_frame();
         }
@@ -2053,7 +2147,16 @@ impl Workspace {
                 let _ = line_ending.update(cx, |workspace, cx| workspace.open_line_ending_menu(position, window, cx));
             }),
         };
-        status::status_bar(tab.document.read(cx), caret, selection, block_dims, tab.loading.as_ref(), Some(menus))
+        let bar =
+            status::status_bar(tab.document.read(cx), caret, selection, block_dims, tab.loading.as_ref(), Some(menus));
+        if !markdown {
+            return bar;
+        }
+        let toggle = cx.weak_entity();
+        let mode = if previewing { Key::StatusPreview } else { Key::StatusText };
+        bar.right_menu(tr(mode), tr(Key::StatusPreviewTip), move |_, window, cx| {
+            let _ = toggle.update(cx, |workspace, cx| workspace.toggle_markdown_preview(window, cx));
+        })
     }
 
     /// The menu of the encoding in the status bar: Reopen with Encoding and Save with Encoding.
@@ -2167,6 +2270,8 @@ impl Tab {
                 }
             })
         });
+        // A Markdown document shows as a page; a large one as its text, its page only when asked.
+        let previewing = is_markdown(document.read(cx).path.as_deref()) && !document.read(cx).is_large();
         Tab {
             document,
             editor,
@@ -2181,6 +2286,8 @@ impl Tab {
             journal_sync: None,
             missing: false,
             encoding_chosen,
+            preview: None,
+            previewing,
             _observe: observe,
             _progress: progress,
             _context_menu: context_menu,
@@ -2224,7 +2331,11 @@ impl Tab {
 
 impl Focusable for Workspace {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
-        self.editor().focus_handle(cx)
+        let tab = self.tabs.active();
+        match &tab.preview {
+            Some(preview) if tab.previewing => preview.focus_handle(cx),
+            _ => self.editor().focus_handle(cx),
+        }
     }
 }
 
@@ -2300,6 +2411,10 @@ impl Render for Workspace {
             None => root,
         };
         let status_bar = self.status_bar(window, cx);
+        let content = match self.preview_of(self.tabs.active_index(), cx) {
+            Some(preview) => preview.into_any_element(),
+            None => self.editor().clone().into_any_element(),
+        };
         if !self.drawn {
             // Once the first frame is drawn, the menus know which of their commands can act: until
             // then the window has no elements to ask.
@@ -2334,10 +2449,18 @@ impl Render for Workspace {
             .children(self.find_bar_shown().cloned())
             .children(self.go_to_bar_shown().cloned())
             .children(self.context_menu.as_ref().map(|(menu, ..)| menu.clone()))
-            .child(div().flex_1().min_h_0().child(self.editor().clone()))
+            .child(div().flex_1().min_h_0().child(content))
             .child(status_bar)
             .child(drops)
     }
+}
+
+/// Whether the file `path` is Markdown, by its extension.
+fn is_markdown(path: Option<&Path>) -> bool {
+    let extension = path.and_then(Path::extension).and_then(|extension| extension.to_str());
+    extension.is_some_and(|extension| {
+        ["md", "markdown", "mdown", "mkd", "mkdn"].iter().any(|known| extension.eq_ignore_ascii_case(known))
+    })
 }
 
 fn reveal_in_file_manager(path: &Path) {

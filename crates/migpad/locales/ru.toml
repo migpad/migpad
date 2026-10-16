@@ -126,7 +126,11 @@ menu = "&Вид"
 word_wrap = "&Перенос строк"
 invisibles = "&Спецсимволы"
 indent_guides = "&Направляющие отступов"
+markdown_preview = "Просмот&р Markdown"
 menu_bar = "&Меню в окне"
+
+[markdown]
+diagram_error = "Диаграмму не нарисовать:"
 
 [window]
 menu = "&Окно"
@@ -167,6 +171,9 @@ with_bom = "{encoding} с BOM"
 loading = "Загрузка… {percent}"
 encoding_tip = "Открыть заново или сохранить в другой кодировке"
 line_ending_tip = "Переводы строк"
+preview = "Просмотр"
+text = "Текст"
+preview_tip = "Показать текст документа Markdown или его страницу"
 
 [notice]
 gone_from_disk = "«{file}» больше нет на диске: перечитывать нечего."
