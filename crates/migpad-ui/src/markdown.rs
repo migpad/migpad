@@ -327,11 +327,10 @@ impl MarkdownPreview {
         self.followed = Some((url.to_owned(), now));
         match markdown::link_target(url, self.folder.as_deref()) {
             Some(LinkTarget::Web(url)) => cx.open_url(&url),
-            Some(LinkTarget::Reveal(path)) => cx.reveal_path(&path),
             Some(LinkTarget::File(path)) if is_text_file(&path) => cx.emit(PreviewEvent::OpenFile(path)),
-            Some(LinkTarget::File(path)) if path.exists() => cx.reveal_path(&path),
+            Some(LinkTarget::File(path) | LinkTarget::Reveal(path)) => reveal(&path, cx),
             Some(LinkTarget::Heading(anchor)) => self.go_to_heading(&anchor, cx),
-            Some(LinkTarget::File(_)) | None => {}
+            None => {}
         }
     }
 
@@ -1243,6 +1242,14 @@ fn is_text_file(path: &Path) -> bool {
         return false;
     }
     head.starts_with(&[0xFF, 0xFE]) || head.starts_with(&[0xFE, 0xFF]) || !head.contains(&0)
+}
+
+/// Shows `path` in the file manager if it is a file or a folder: not a pipe or a device, which the
+/// file manager of Linux opens first, waiting for a writer.
+fn reveal(path: &Path, cx: &App) {
+    if std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file() || metadata.is_dir()) {
+        cx.reveal_path(path);
+    }
 }
 
 /// `url` for a tooltip: no longer than a line.
