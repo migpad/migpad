@@ -10,10 +10,12 @@ publish.workspace = true
 chardetng.workspace = true
 encoding_rs.workspace = true
 memchr.workspace = true
-# The Markdown preview: its blocks, and Mermaid diagrams as SVG.
+# The Markdown preview: its blocks, and Mermaid diagrams as SVG, their text measured in the fonts of the system.
+fontdb.workspace = true
 merman.workspace = true
 pulldown-cmark.workspace = true
 regex.workspace = true
+rustybuzz.workspace = true
 serde_json.workspace = true
 # Reads and writes the files of the state: the session, the tabs closed lately.
 toml_edit = { workspace = true, features = ["display"] }

@@ -1,13 +1,18 @@
 //! Mermaid diagrams as SVG for the Markdown preview, drawn by merman — Mermaid.js rewritten in
 //! Rust — in its light theme or its dark one, graphs laid out by ELK, which keeps them tidier than
 //! the dagre of Mermaid. The SVG is made for resvg, which GPUI draws SVG with: the HTML labels of
-//! Mermaid, which resvg does not draw, become SVG text wrapped as a browser wraps them, and the SVG
-//! reads no files.
+//! Mermaid, which resvg does not draw, become SVG text wrapped as a browser wraps them, its text is
+//! measured in the fonts resvg draws it in, and the SVG reads no files.
+
+mod fonts;
 
 use std::sync::LazyLock;
 use std::time::Duration;
 
-use merman::svg::SvgPipeline;
+use merman::svg::{
+    DeterministicTextMeasurer, MeasurementProfileId, SvgEnvironment, SvgPipeline, TextMeasurementPolicy,
+    TextMeasurementProfile, TextMeasurementProfileIdentity, TextMeasurer, TextStyle,
+};
 use merman::{Engine, MermaidConfig, OperationControl, RenderOutput, RenderRequest, Renderer, SvgRequest};
 use serde_json::json;
 
@@ -30,6 +35,33 @@ fn renderer(theme: &str) -> Renderer {
     Renderer::new().with_engine(Engine::new().with_site_config(MermaidConfig::from_value(config)))
 }
 
+/// How merman measures text: in the fonts of the system, as resvg draws it.
+static ENVIRONMENT: LazyLock<SvgEnvironment> = LazyLock::new(|| {
+    let measurer = DeterministicTextMeasurer::default().with_width_callback(measure);
+    let identity =
+        MeasurementProfileId::new("migpad.fonts").and_then(|id| TextMeasurementProfileIdentity::new(id, "1"));
+    match identity {
+        Ok(identity) => SvgEnvironment::deterministic().with_text_measurement_policy(TextMeasurementPolicy::uniform(
+            TextMeasurementProfile::new(identity, measurer),
+        )),
+        Err(_) => SvgEnvironment::deterministic(),
+    }
+});
+
+/// The width of `text` in pixels, in its font; as merman guesses it if the system has no fonts.
+fn measure(text: &str, style: &TextStyle) -> f64 {
+    let family = style.font_family.as_deref().unwrap_or(FONT);
+    let weight = match style.font_weight.as_deref().map(str::trim) {
+        Some("bold" | "bolder") => 700,
+        Some("lighter") => 300,
+        Some(weight) => weight.parse::<u16>().map_or(400, |weight| weight.clamp(1, 1000)),
+        None => 400,
+    };
+    let italic = matches!(style.font_style.as_deref().map(str::trim), Some("italic" | "oblique"));
+    fonts::width(text, family, style.font_size.max(1.0), weight, italic)
+        .unwrap_or_else(|| DeterministicTextMeasurer::default().measure_html_line_width_px(text, style))
+}
+
 /// The longest a diagram is drawn: one that takes longer is told as too large.
 const DEADLINE: Duration = Duration::from_secs(10);
 
@@ -45,7 +77,11 @@ pub struct Svg {
 /// source.
 pub fn render(source: &str, dark: bool) -> Result<Svg, String> {
     let renderer = if dark { &*DARK } else { &*LIGHT };
-    let svg = SvgRequest { pipeline: Some(SvgPipeline::resvg_safe()), ..SvgRequest::default() };
+    let svg = SvgRequest {
+        environment: ENVIRONMENT.clone(),
+        pipeline: Some(SvgPipeline::resvg_safe()),
+        ..SvgRequest::default()
+    };
     let control = OperationControl::new().with_deadline(DEADLINE);
     match renderer.render(RenderRequest::svg(source, control, svg)) {
         Ok(RenderOutput::Svg(Some(svg))) => {
