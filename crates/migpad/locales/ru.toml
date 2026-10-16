@@ -131,6 +131,9 @@ menu_bar = "&Меню в окне"
 
 [markdown]
 diagram_error = "Диаграмму не нарисовать:"
+preview = "Просмотр"
+text = "Текст"
+switch_tip = "Показать страницу документа Markdown или его текст"
 
 [window]
 menu = "&Окно"
@@ -171,9 +174,6 @@ with_bom = "{encoding} с BOM"
 loading = "Загрузка… {percent}"
 encoding_tip = "Открыть заново или сохранить в другой кодировке"
 line_ending_tip = "Переводы строк"
-preview = "Просмотр"
-text = "Текст"
-preview_tip = "Показать текст документа Markdown или его страницу"
 
 [notice]
 gone_from_disk = "«{file}» больше нет на диске: перечитывать нечего."

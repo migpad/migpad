@@ -151,6 +151,10 @@ menu_bar = "&Menu Bar in Window"
 [markdown]
 # Over what is wrong with a Mermaid diagram, as merman tells it, in English.
 diagram_error = "The diagram cannot be drawn:"
+# The switch at the end of the tab bar: a Markdown document as its page, or as its text.
+preview = "Preview"
+text = "Text"
+switch_tip = "Show the page of the Markdown document, or its text"
 
 [window]
 menu = "&Window"
@@ -194,10 +198,6 @@ with_bom = "{encoding} with BOM"
 loading = "Loading… {percent}"
 encoding_tip = "Reopen or save in another encoding"
 line_ending_tip = "Line endings"
-# A Markdown document shown as a page, or as its text; a click shows the other.
-preview = "Preview"
-text = "Text"
-preview_tip = "Show the text of the Markdown document, or its page"
 
 [notice]
 gone_from_disk = "“{file}” is not on disk any more: there is nothing to read again."

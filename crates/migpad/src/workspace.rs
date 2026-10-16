@@ -19,7 +19,9 @@ use migpad_core::state::session::{Rect, WindowMode, WindowState};
 use migpad_core::text::TextStore;
 use migpad_editor::{ContextMenuEvent, EditorView};
 use migpad_ui::notification::NotificationBar;
-use migpad_ui::{Button, ContextMenu, DraggedTab, ItemSpec, MarkdownPreview, MenuBar, TabBar, TabInfo, theme};
+use migpad_ui::{
+    Button, ContextMenu, DraggedTab, ItemSpec, MarkdownPreview, MenuBar, Segmented, TabBar, TabInfo, theme,
+};
 
 use crate::commands::{self, Registry, refresh_menus};
 use crate::find::FindBar;
@@ -30,6 +32,7 @@ use crate::modules::file::{
     CloseOtherTabs, CloseTabAt, CloseTabsToRight, CopyTabPath, NewTab, PinTabAt, RevealTabFile, UnpinTabAt,
 };
 use crate::modules::format;
+use crate::modules::view::ToggleMarkdownPreview;
 use crate::notices::{self, Notice, NoticeAction, Topic};
 use crate::recent;
 use crate::session;
@@ -2157,7 +2160,7 @@ impl Workspace {
     }
 
     fn status_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> migpad_ui::StatusBar {
-        let (previewing, markdown) = (self.previewing(cx), self.is_markdown(cx));
+        let previewing = self.previewing(cx);
         let block_dims = self.tabs.active().editor.read(cx).block_dimensions(cx).filter(|_| !previewing);
         let selection = if block_dims.is_some() || previewing { None } else { self.selection_chars(cx) };
         let tab = self.tabs.active();
@@ -2176,16 +2179,7 @@ impl Workspace {
                 let _ = line_ending.update(cx, |workspace, cx| workspace.open_line_ending_menu(position, window, cx));
             }),
         };
-        let bar =
-            status::status_bar(tab.document.read(cx), caret, selection, block_dims, tab.loading.as_ref(), Some(menus));
-        if !markdown {
-            return bar;
-        }
-        let toggle = cx.weak_entity();
-        let mode = if previewing { Key::StatusPreview } else { Key::StatusText };
-        bar.right_menu(tr(mode), tr(Key::StatusPreviewTip), move |_, window, cx| {
-            let _ = toggle.update(cx, |workspace, cx| workspace.toggle_markdown_preview(window, cx));
-        })
+        status::status_bar(tab.document.read(cx), caret, selection, block_dims, tab.loading.as_ref(), Some(menus))
     }
 
     /// The menu of the encoding in the status bar: Reopen with Encoding and Save with Encoding.
@@ -2260,6 +2254,31 @@ impl Workspace {
             .on_receive(move |(dragged, position), window, cx| {
                 let _ = receive.update(cx, |workspace, cx| workspace.receive_tab(&dragged, position, window, cx));
             })
+            .when_some(self.mode_switch(window, cx), |bar, switch| bar.trailing(switch))
+    }
+
+    /// The switch of a Markdown document between its page and its text, for the end of the tab bar.
+    fn mode_switch(&self, window: &Window, cx: &mut Context<Self>) -> Option<Segmented> {
+        if !self.is_markdown(cx) {
+            return None;
+        }
+        let keys = keys::for_action(&ToggleMarkdownPreview, &self.focus_handle(cx), window).map(SharedString::from);
+        let workspace = cx.weak_entity();
+        let previewing = self.previewing(cx);
+        let switch = Segmented::new(
+            "markdown-mode",
+            [tr(Key::MarkdownPreview), tr(Key::MarkdownText)],
+            usize::from(!previewing),
+        )
+        .tooltip(tr(Key::MarkdownSwitchTip), keys)
+        .on_choose(move |chosen, window, cx| {
+            let _ = workspace.update(cx, |workspace, cx| {
+                if (chosen == 0) != workspace.previewing(cx) {
+                    workspace.toggle_markdown_preview(window, cx);
+                }
+            });
+        });
+        Some(switch)
     }
 }
 

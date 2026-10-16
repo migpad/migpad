@@ -7,7 +7,7 @@ pub mod find;
 pub mod format;
 pub mod go_to;
 pub mod transform;
-mod view;
+pub mod view;
 mod window;
 
 use crate::commands::Module;
