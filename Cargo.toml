@@ -82,6 +82,8 @@ base64 = "0.22"
 bs58 = "0.5"
 percent-encoding = "2.3"
 regex = "1.13"
+# SHA-256 and SHA-512 of the selected text (RustCrypto).
+sha2 = "0.10"
 # The language of the system.
 sys-locale = "0.3"
 # TOML: the tables of interface strings, at build time and translations of the user; the settings and the state

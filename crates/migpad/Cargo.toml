@@ -15,6 +15,7 @@ migpad-core.workspace = true
 migpad-editor.workspace = true
 migpad-ui.workspace = true
 percent-encoding.workspace = true
+sha2.workspace = true
 sys-locale.workspace = true
 # The translations the user puts in the folder of the data.
 toml_edit.workspace = true
