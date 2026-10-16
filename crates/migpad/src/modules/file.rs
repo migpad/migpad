@@ -58,6 +58,11 @@ pub struct PinTabAt(pub usize);
 #[action(namespace = file, no_json)]
 pub struct UnpinTabAt(pub usize);
 
+/// Follows the file of the tab at the given index, or stops following it.
+#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[action(namespace = file, no_json)]
+pub struct FollowTabAt(pub usize);
+
 pub struct FileModule;
 
 impl Module for FileModule {
@@ -151,6 +156,9 @@ impl Module for FileModule {
         });
         registry.on_window_action(|workspace, action: &UnpinTabAt, _, cx| {
             workspace.unpin_tab(action.0, cx);
+        });
+        registry.on_window_action(|workspace, action: &FollowTabAt, window, cx| {
+            workspace.toggle_following(action.0, window, cx);
         });
         registry.on_window_action(|workspace, _: &CloseWindow, window, cx| workspace.close_window(window, cx));
         // Without a window of documents — from the settings window on macOS — and for a new window

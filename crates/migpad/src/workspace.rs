@@ -10,7 +10,7 @@ use gpui::{
     ScrollHandle, SharedString, Subscription, Task, Window, WindowBounds, WindowHandle, WindowId, canvas, div,
     prelude::*, px, rgb,
 };
-use migpad_core::document::{Document, Fingerprint, Format, OpenAs, Opened, open};
+use migpad_core::document::{Change, Document, EditError, Fingerprint, Follower, Format, OpenAs, Opened, open};
 use migpad_core::encoding::Encoding;
 use migpad_core::history::Selection;
 use migpad_core::line_ending::LineEnding;
@@ -30,7 +30,7 @@ use crate::go_to::{self, GoToBar};
 use crate::journals;
 use crate::keys;
 use crate::modules::file::{
-    CloseOtherTabs, CloseTabAt, CloseTabsToRight, CopyTabPath, NewTab, PinTabAt, RevealTabFile, UnpinTabAt,
+    CloseOtherTabs, CloseTabAt, CloseTabsToRight, CopyTabPath, FollowTabAt, NewTab, PinTabAt, RevealTabFile, UnpinTabAt,
 };
 use crate::modules::format;
 use crate::modules::view::ToggleMarkdownPreview;
@@ -51,6 +51,18 @@ pub fn open_options() -> PathPromptOptions {
 
 /// How often the status bar shows how far a file has loaded.
 const PROGRESS_TICK: Duration = Duration::from_millis(100);
+
+/// How often a file followed is looked at.
+const FOLLOW_INTERVAL: Duration = Duration::from_millis(500);
+
+/// What follows the file of a tab, from where its document has it.
+enum Followed {
+    File(Follower),
+    /// The file is loading or being read again: it is looked at once it has been.
+    Wait(Option<Follower>),
+    /// The tab does not follow it any more, or is gone.
+    Stop,
+}
 
 /// What the view of a file that is loading is to do once it has loaded, and its selection when
 /// that was asked: if the selection has moved since — the user has clicked or pressed keys — the
@@ -86,6 +98,9 @@ pub struct Tab {
     /// Where the caret goes once the file has loaded: a line and a column, from zero, that the
     /// command line or Go to Line gave, beyond the beginning shown while loading.
     pending_place: Option<Pending<(usize, usize)>>,
+    /// Whether the caret goes to the end once the file has loaded or been read again — the tab
+    /// follows it — and whether the view goes with it.
+    pending_end: Option<Pending<bool>>,
     /// Notifications over the text, each with its number in the window.
     notices: Vec<(u64, Notice)>,
     /// Whether its changes are to be dropped: the question on closing it was answered so.
@@ -107,6 +122,11 @@ pub struct Tab {
     previewing: bool,
     /// Whether the page waits for the file to load to be made.
     preview_pending: bool,
+    /// Whether the tab follows its file, as `tail -f` does, and what looks at the file meanwhile.
+    following: bool,
+    follow: Option<Task<()>>,
+    /// Whether its file is being read again: what follows it waits.
+    reloading: bool,
     _observe: Subscription,
     /// Shows the progress of the loading in the status bar.
     _progress: Option<Task<()>>,
@@ -256,6 +276,9 @@ impl Workspace {
             _subscriptions: vec![activation, appearance, moved],
         };
         workspace.settle(0, first.selection, first.notice, window, cx);
+        if first.following {
+            workspace.start_following(0, first.selection.is_none(), window, cx);
+        }
         workspace.update_title(window, cx);
         workspace
     }
@@ -472,7 +495,7 @@ impl Workspace {
         let selection = view.selection();
         let text = TextState {
             selected: selection.anchor != selection.head,
-            editable: !doc.is_preview(),
+            editable: !doc.is_preview() && !doc.is_read_only(),
             can_undo: doc.can_undo(),
             can_redo: doc.can_redo(),
             empty: doc.text().is_empty(),
@@ -539,6 +562,7 @@ impl Workspace {
         // Where the view was to go once the file has loaded, it goes here instead.
         tab.pending_selection = None;
         tab.pending_place = None;
+        tab.pending_end = None;
         let doc = tab.document.read(cx);
         if doc.is_preview() && line + 1 >= doc.lines().count() {
             tab.pending_place = Some(Pending::new((line, column), &tab.editor, cx));
@@ -608,6 +632,9 @@ impl Workspace {
             let gone = self.tabs.replace(0, replaced);
             gone.document.update(cx, |doc, _| doc.remove_journal());
             self.settle(0, tab.selection, tab.notice, window, cx);
+            if tab.following {
+                self.start_following(0, tab.selection.is_none(), window, cx);
+            }
             self.reveal_tab = true;
             self.focus_content(window, cx);
             self.update_title(window, cx);
@@ -628,6 +655,10 @@ impl Workspace {
             index = pinned;
         }
         self.settle(index, tab.selection, tab.notice, window, cx);
+        // Without a selection to come back to, a tab that follows its file goes to its end.
+        if tab.following {
+            self.start_following(index, tab.selection.is_none(), window, cx);
+        }
         self.activate(index, window, cx);
     }
 
@@ -777,7 +808,8 @@ impl Workspace {
     pub fn save_with_encoding(&mut self, encoding: Encoding, bom: bool, window: &mut Window, cx: &mut Context<Self>) {
         let index = self.tabs.active_index();
         let doc = self.document().read(cx);
-        if doc.is_preview() {
+        // Not over a file followed: that would drop what is added to it meanwhile.
+        if doc.is_preview() || doc.is_read_only() {
             return;
         }
         let format = Format { encoding, bom, ..doc.format };
@@ -828,8 +860,12 @@ impl Workspace {
         let Some(tab) = self.tabs.get(index) else { return Task::ready(false) };
         let doc = tab.document.read(cx);
         let Some(path) = doc.path.clone() else { return self.save_as(index, format, window, cx) };
-        // Nothing to write: the file is as it was read or saved, and so is the text.
-        if format.is_none() && !doc.is_modified() && doc.disk.is_some() && Fingerprint::of_path(&path).ok() == doc.disk
+        // Nothing to write: the file is as it was read or saved, and so is the text — or it is
+        // followed, and has what the document has, and maybe more.
+        if format.is_none()
+            && !doc.is_modified()
+            && doc.disk.is_some()
+            && (doc.is_read_only() || Fingerprint::of_path(&path).ok() == doc.disk)
         {
             return Task::ready(true);
         }
@@ -1499,8 +1535,17 @@ impl Workspace {
                 action: Box::new(PinTabAt(index)),
             }
         };
+        let follow_item = ItemSpec::Action {
+            label: tr(Key::ViewFollowFile).into(),
+            mnemonic: mnemonic(Key::ViewFollowFile),
+            keys: None,
+            checked: Some(tab.following),
+            enabled: self.can_follow(index, cx),
+            action: Box::new(FollowTabAt(index)),
+        };
         let items = vec![
             pin_item,
+            follow_item,
             ItemSpec::Separator,
             ItemSpec::Action {
                 label: tr(Key::FileCloseTab).into(),
@@ -1576,7 +1621,7 @@ impl Workspace {
         let tab = self.tabs.get(index)?;
         let doc = tab.document.clone();
         let encoding_chosen = tab.encoding_chosen;
-        let (pinned, previewing) = (tab.pinned, Some(tab.previewing));
+        let (pinned, previewing, following) = (tab.pinned, Some(tab.previewing), tab.following);
         let selection = Some(tab.editor.read(cx).selection());
         if self.tabs.len() == 1 {
             window.remove_window();
@@ -1588,6 +1633,7 @@ impl Workspace {
                 encoding_chosen,
                 pinned,
                 previewing,
+                following,
             });
         }
         let was_active = index == self.tabs.active_index();
@@ -1598,7 +1644,16 @@ impl Workspace {
         } else {
             cx.notify();
         }
-        Some(ForTab { document: doc, loading: None, selection, notice: None, encoding_chosen, pinned, previewing })
+        Some(ForTab {
+            document: doc,
+            loading: None,
+            selection,
+            notice: None,
+            encoding_chosen,
+            pinned,
+            previewing,
+            following,
+        })
     }
 
     /// A tab dropped on the window outside the tab bar: if from this window, tear it off into a new
@@ -1809,7 +1864,9 @@ impl Workspace {
             return self.notify_tab(index, notice, cx);
         }
         let chosen = encoding.is_some() || tab.encoding_chosen;
-        let (pinned, previewing) = (tab.pinned, tab.previewing);
+        let (pinned, previewing, following) = (tab.pinned, tab.previewing, tab.following);
+        // A tab that follows its file goes on following it; at its end, if the caret was.
+        let at_end = following && tab.at_end(cx);
         let open_as = match encoding.or(tab.encoding_chosen.then_some(doc.format.encoding)) {
             Some(encoding) => OpenAs::Encoding(encoding),
             None => OpenAs::Detect { tld: None },
@@ -1828,6 +1885,9 @@ impl Workspace {
                 self.tabs.replace(index, replaced);
                 windows::remember_tab(mine, cx);
                 self.settle(index, Some(selection), told, window, cx);
+                if following {
+                    self.start_following(index, at_end, window, cx);
+                }
                 self.activate(index, window, cx);
             }
             Opening::Failed(notice) => self.notify_tab(index, notice, cx),
@@ -1840,6 +1900,8 @@ impl Workspace {
         let files: Vec<(EntityId, PathBuf, Option<Fingerprint>)> = self
             .tabs
             .iter()
+            // A file followed is looked at all the time.
+            .filter(|tab| !tab.following)
             .filter_map(|tab| {
                 let doc = tab.document.read(cx);
                 (!doc.is_preview()).then(|| Some((tab.document.entity_id(), doc.path.clone()?, doc.disk)))?
@@ -1914,8 +1976,9 @@ impl Workspace {
     /// keeps the caret and the scroll. If the document gets changes meanwhile, they stay and the
     /// tab tells of the file instead.
     fn reload(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some(tab) = self.tabs.get(index) else { return };
+        let Some(tab) = self.tabs.get_mut(index) else { return };
         let Some(path) = tab.document.read(cx).path.clone() else { return };
+        tab.reloading = true;
         let document = tab.document.clone();
         // Saved meanwhile, the document is not the one read over.
         let disk = document.read(cx).disk;
@@ -1937,9 +2000,18 @@ impl Workspace {
             let read = read.await;
             let _ = workspace.update(cx, |workspace, cx| {
                 let Some(index) = workspace.tab_of(document.entity_id()) else { return };
+                if let Some(tab) = workspace.tabs.get_mut(index) {
+                    tab.reloading = false;
+                }
                 let mut loaded = match read {
                     Ok(loaded) => loaded,
-                    Err(error) => return workspace.notify_tab(index, notices::open_failed(&path, &error), cx),
+                    Err(error) => {
+                        // Followed, it would be found replaced and read again at each look.
+                        if workspace.is_following(index) {
+                            workspace.stop_following(index, cx);
+                        }
+                        return workspace.notify_tab(index, notices::open_failed(&path, &error), cx);
+                    }
                 };
                 let replaced = document.update(cx, |doc, cx| {
                     if doc.path.as_deref() != Some(path.as_path()) || doc.disk != disk {
@@ -1952,6 +2024,8 @@ impl Workspace {
                     if let Some(dir) = journals {
                         loaded.journal_in(dir);
                     }
+                    // A document followed stays read only.
+                    loaded.set_read_only(doc.is_read_only());
                     *doc = loaded;
                     cx.notify();
                     Some(true)
@@ -1984,6 +2058,206 @@ impl Workspace {
         });
     }
 
+    /// The index of the active tab.
+    pub fn active_index(&self) -> usize {
+        self.tabs.active_index()
+    }
+
+    /// Whether the document of the active tab takes edits: not a file still loading, nor one
+    /// followed.
+    pub fn editable(&self, cx: &App) -> bool {
+        let doc = self.document().read(cx);
+        !doc.is_preview() && !doc.is_read_only()
+    }
+
+    /// Whether the tab at `index` follows its file.
+    pub fn is_following(&self, index: usize) -> bool {
+        self.tabs.get(index).is_some_and(|tab| tab.following)
+    }
+
+    /// Whether the tab at `index` can start or stop following its file: it has one, and no
+    /// changes of its own that what is added to the file would go over.
+    pub fn can_follow(&self, index: usize, cx: &App) -> bool {
+        self.tabs
+            .get(index)
+            .is_some_and(|tab| tab.following || (tab.document.read(cx).path.is_some() && !tab.has_changes(cx)))
+    }
+
+    /// Follows the file of the tab at `index` from its end, as `tail -f` does, or stops following
+    /// it. A document with changes does not follow its file: that is told.
+    pub fn toggle_following(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(index) else { return };
+        if tab.following {
+            self.stop_following(index, cx);
+        } else if tab.document.read(cx).path.is_some() {
+            if tab.has_changes(cx) {
+                let notice = notices::follow_changes(&Self::tab_title(tab, cx));
+                return self.notify_tab(index, notice, cx);
+            }
+            self.start_following(index, true, window, cx);
+        }
+    }
+
+    /// Starts following the file of the tab at `index`: its document is read only meanwhile, and
+    /// what is added to the file goes on its end. With `to_end`, the caret goes to the end, once
+    /// the file has loaded.
+    fn start_following(&mut self, index: usize, to_end: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get_mut(index) else { return };
+        // What is added to the file would go over changes of the document.
+        if tab.has_changes(cx) || tab.document.read(cx).path.is_none() {
+            return;
+        }
+        tab.following = true;
+        tab.document.update(cx, |doc, cx| {
+            doc.set_read_only(true);
+            cx.notify();
+        });
+        if to_end {
+            // In place of where the view was to go once the file has loaded.
+            tab.pending_selection = None;
+            tab.pending_place = None;
+            if tab.document.read(cx).is_preview() {
+                tab.pending_end = Some(Pending::new(true, &tab.editor, cx));
+            } else {
+                tab.to_end(true, window, cx);
+            }
+        }
+        let document = tab.document.entity_id();
+        tab.follow = Some(cx.spawn_in(window, async move |workspace, cx| {
+            let mut follower: Option<Follower> = None;
+            loop {
+                cx.background_executor().timer(FOLLOW_INTERVAL).await;
+                let file = workspace.update(cx, |workspace, cx| workspace.followed_file(document, follower.take(), cx));
+                let mut current = match file {
+                    Ok(Followed::File(current)) => current,
+                    Ok(Followed::Wait(waiting)) => {
+                        follower = waiting;
+                        continue;
+                    }
+                    Ok(Followed::Stop) | Err(_) => break,
+                };
+                let (current, change) = cx
+                    .background_spawn(async move {
+                        let change = current.poll();
+                        (current, change)
+                    })
+                    .await;
+                follower = Some(current);
+                let followed = workspace
+                    .update_in(cx, |workspace, window, cx| workspace.file_followed(document, change, window, cx));
+                if !matches!(followed, Ok(true)) {
+                    break;
+                }
+            }
+        }));
+        refresh_menus(cx);
+        cx.notify();
+    }
+
+    /// Stops following the file of the tab at `index`: its document takes edits again.
+    fn stop_following(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get_mut(index) else { return };
+        tab.following = false;
+        tab.follow = None;
+        tab.pending_end = None;
+        tab.document.update(cx, |doc, cx| {
+            doc.set_read_only(false);
+            cx.notify();
+        });
+        refresh_menus(cx);
+        cx.notify();
+    }
+
+    /// What follows the file of the tab of `document`: `follower`, if it reads on from where the
+    /// document has the file, or another that does — the document was read again, saved, or
+    /// reopened in another encoding.
+    fn followed_file(&self, document: EntityId, follower: Option<Follower>, cx: &App) -> Followed {
+        let Some(tab) = self.tab_of(document).and_then(|index| self.tabs.get(index)) else { return Followed::Stop };
+        let doc = tab.document.read(cx);
+        if !tab.following {
+            return Followed::Stop;
+        }
+        if doc.is_preview() || tab.reloading {
+            return Followed::Wait(follower);
+        }
+        let (Some(path), Some(disk)) = (&doc.path, doc.disk) else { return Followed::Stop };
+        match follower.filter(|follower| follower.follows(path, doc.format, disk)) {
+            Some(follower) => Followed::File(follower),
+            None => Follower::for_document(doc).map_or(Followed::Stop, Followed::File),
+        }
+    }
+
+    /// What a look at the file that the tab of `document` follows found: what was added goes on
+    /// its end — the view goes with it if the caret was at the end — a file replaced is read
+    /// anew, one removed is no longer followed. Tells whether to go on following it.
+    fn file_followed(
+        &mut self,
+        document: EntityId,
+        change: std::io::Result<Change>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(index) = self.tab_of(document) else { return false };
+        let Some(tab) = self.tabs.get(index).filter(|tab| tab.following) else { return false };
+        // A caret at the end stays at the end. The view goes with it if it showed the caret — not
+        // scrolled away from it to read.
+        let at_end = tab.at_end(cx);
+        let reveal = at_end && tab.editor.read(cx).caret_in_view();
+        match change {
+            // An error may be for a moment: the next look tries again.
+            Ok(Change::None) | Err(_) => true,
+            Ok(Change::Appended(appended)) => {
+                let added = tab.document.update(cx, |doc, cx| {
+                    let added = doc.append_from_file(&appended).map(|()| !appended.text.is_empty());
+                    if added == Ok(true) {
+                        cx.notify();
+                    }
+                    added
+                });
+                match added {
+                    Ok(true) if at_end => {
+                        tab.to_end(reveal, window, cx);
+                        true
+                    }
+                    Err(EditError::TooLong) => {
+                        self.stop_following_too_long(index, cx);
+                        false
+                    }
+                    // The document read the file again meanwhile: the next look starts from there.
+                    _ => true,
+                }
+            }
+            Ok(Change::Replaced) => {
+                // Once read anew, the caret goes to its end again.
+                if at_end && let Some(tab) = self.tabs.get_mut(index) {
+                    tab.pending_end = Some(Pending::new(reveal, &tab.editor, cx));
+                }
+                self.reload(index, cx);
+                true
+            }
+            Ok(Change::TooLong) => {
+                self.stop_following_too_long(index, cx);
+                false
+            }
+            // As when another program removes a file not followed.
+            Ok(Change::Deleted) => {
+                self.stop_following(index, cx);
+                self.check_files(cx);
+                false
+            }
+        }
+    }
+
+    /// The file of the tab at `index` has grown beyond what a document holds: it is no longer
+    /// followed, which is told.
+    fn stop_following_too_long(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.stop_following(index, cx);
+        if let Some(tab) = self.tabs.get(index) {
+            let notice = notices::follow_too_long(&Self::tab_title(tab, cx));
+            self.notify_tab(index, notice, cx);
+        }
+    }
+
     /// The window as the session keeps it.
     fn window_state(&self, cx: &App) -> WindowState {
         let tabs = self
@@ -1993,7 +2267,15 @@ impl Workspace {
                 let doc = tab.document.read(cx);
                 let selection = tab.kept_selection(cx);
                 let encoding = tab.encoding_chosen.then_some(doc.format.encoding).filter(|_| doc.path.is_some());
-                TabState { document: Some(doc.id()), path: doc.path.clone(), encoding, selection, pinned: tab.pinned }
+                TabState {
+                    document: Some(doc.id()),
+                    path: doc.path.clone(),
+                    encoding,
+                    selection,
+                    pinned: tab.pinned,
+                    following: tab.following,
+                    at_end: tab.following && tab.at_end(cx),
+                }
             })
             .collect();
         let (bounds, mode, display) = self.place.clone();
@@ -2061,6 +2343,13 @@ impl Workspace {
                 let editor = tab.editor.clone();
                 let pos = editor.read(cx).position_at(line, column, cx);
                 editor.update(cx, |editor, cx| editor.select_centered(Selection::caret(pos), window, cx));
+            }
+            let tab = self.tabs.get_mut(index).expect("found above");
+            if loaded
+                && !tab.reloading
+                && let Some(reveal) = tab.pending_end.take().and_then(|pending| pending.still(&tab.editor, cx))
+            {
+                tab.to_end(reveal, window, cx);
             }
             self.check_losses(index, cx);
             self.journal_changed(index, cx);
@@ -2217,7 +2506,8 @@ impl Workspace {
                 let _ = line_ending.update(cx, |workspace, cx| workspace.open_line_ending_menu(position, window, cx));
             }),
         };
-        status::status_bar(tab.document.read(cx), caret, selection, block_dims, tab.loading.as_ref(), Some(menus))
+        let doc = tab.document.read(cx);
+        status::status_bar(doc, caret, selection, block_dims, tab.loading.as_ref(), tab.following, Some(menus))
     }
 
     /// The menu of the encoding in the status bar: Reopen with Encoding and Save with Encoding.
@@ -2372,6 +2662,7 @@ impl Tab {
             loading,
             pending_selection: None,
             pending_place: None,
+            pending_end: None,
             notices: Vec::new(),
             pinned: false,
             discarded: false,
@@ -2382,6 +2673,9 @@ impl Tab {
             preview,
             previewing,
             preview_pending,
+            following: false,
+            follow: None,
+            reloading: false,
             _observe: observe,
             _progress: progress,
             _context_menu: context_menu,
@@ -2407,6 +2701,27 @@ impl Tab {
             self.document.update(cx, |doc, _| doc.remove_journal());
         }
         closed
+    }
+
+    /// Whether the caret is at the end of the text, or goes there once the file has loaded.
+    fn at_end(&self, cx: &App) -> bool {
+        if self.pending_end.is_some_and(|pending| pending.still(&self.editor, cx).is_some()) {
+            return true;
+        }
+        let (doc, editor) = (self.document.read(cx), self.editor.read(cx));
+        !doc.is_preview() && !editor.is_block_selection() && editor.selection() == Selection::caret(doc.text().len())
+    }
+
+    /// Puts the caret at the end of the text; with `reveal`, the view goes there too.
+    fn to_end(&self, reveal: bool, window: &mut Window, cx: &mut App) {
+        let caret = Selection::caret(self.document.read(cx).text().len());
+        self.editor.update(cx, |editor, cx| {
+            if reveal {
+                editor.select(caret, window, cx);
+            } else {
+                editor.select_in_place(caret, window, cx);
+            }
+        });
     }
 
     /// The selection the tab is to have: that it is to go back to once its file has loaded, or

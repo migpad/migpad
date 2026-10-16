@@ -128,6 +128,8 @@ mod tests {
             encoding: path.map(|_| crate::encoding::Encoding::for_name("windows-1251").unwrap()),
             selection: Selection { anchor, head },
             pinned: false,
+            following: path.is_some(),
+            at_end: false,
         };
         Session {
             windows: vec![
@@ -142,7 +144,11 @@ mod tests {
                     bounds: Rect { x: -1500.0, y: 0.0, width: 640.0, height: 480.0 },
                     mode: WindowMode::FullScreen,
                     display: None,
-                    tabs: vec![TabState { document: None, ..tab(Some("C:\\work\\\"quoted\".txt"), 9, 2) }],
+                    tabs: vec![TabState {
+                        document: None,
+                        at_end: true,
+                        ..tab(Some("C:\\work\\\"quoted\".txt"), 9, 2)
+                    }],
                     active: 0,
                 },
             ],

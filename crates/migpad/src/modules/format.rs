@@ -90,10 +90,9 @@ fn line_ending(workspace: &Workspace, cx: &App) -> LineEnding {
 }
 
 /// Whether the line breaks of the document of the window can be converted: not those of a large
-/// file, nor of one still loading.
+/// file, nor of one still loading or followed.
 pub fn convertible(workspace: &Workspace, cx: &App) -> bool {
-    let doc = workspace.document().read(cx);
-    !doc.is_large() && !doc.is_preview()
+    !workspace.document().read(cx).is_large() && workspace.editable(cx)
 }
 
 /// The groups of the encodings of the scripts, each item made by `item`.
@@ -128,7 +127,8 @@ pub fn reopen_items(workspace: Option<&Workspace>, cx: &App) -> Vec<SubItem> {
 pub fn save_items(workspace: Option<&Workspace>, cx: &App) -> Vec<SubItem> {
     let doc = workspace.map(|workspace| workspace.document().read(cx));
     let format = doc.map(|doc| doc.format);
-    let enabled = doc.is_some_and(|doc| !doc.is_preview());
+    // Not over a file followed: what is added to it meanwhile would be lost.
+    let enabled = doc.is_some_and(|doc| !doc.is_preview() && !doc.is_read_only());
     let is = |encoding: Encoding| format.is_some_and(|format| format.encoding == encoding);
     let choice = |label: String, checked: bool, encoding: Encoding, bom: bool| SubItem::Choice {
         label,

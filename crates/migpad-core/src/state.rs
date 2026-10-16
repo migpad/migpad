@@ -58,6 +58,11 @@ pub struct TabState {
     pub selection: Selection,
     /// Whether the tab is pinned: it does not close and stays across restarts.
     pub pinned: bool,
+    /// Whether the tab follows its file, as `tail -f` does.
+    pub following: bool,
+    /// Whether the caret of a tab that follows its file is at the end: it goes on to the end of
+    /// what is added meanwhile.
+    pub at_end: bool,
 }
 
 /// Writes `text` to `path` whole: through a temporary file next to it, flushed to the disk, which
@@ -136,6 +141,12 @@ fn tab_to_table(tab: &TabState) -> Table {
     if tab.pinned {
         table["pinned"] = value(true);
     }
+    if tab.following {
+        table["following"] = value(true);
+        if tab.at_end {
+            table["at_end"] = value(true);
+        }
+    }
     table
 }
 
@@ -154,7 +165,9 @@ fn tab_from_table(table: &Table) -> Result<TabState, StateError> {
     let encoding = table.get("encoding").and_then(Item::as_str).and_then(Encoding::for_name);
     let selection = Selection { anchor: number(table, "anchor")?, head: number(table, "head")? };
     let pinned = table.get("pinned").and_then(Item::as_bool).unwrap_or(false);
-    Ok(TabState { document, path, encoding, selection, pinned })
+    let following = table.get("following").and_then(Item::as_bool).unwrap_or(false);
+    let at_end = following && table.get("at_end").and_then(Item::as_bool).unwrap_or(false);
+    Ok(TabState { document, path, encoding, selection, pinned, following, at_end })
 }
 
 /// The tables of the array `key` of `table`; none if it has no such key.

@@ -211,6 +211,17 @@ pub fn gone_from_disk(file: &str) -> Notice {
     Notice::new(Severity::Warning, fill(Key::NoticeGoneFromDisk, &[("file", file)]))
 }
 
+/// The file of `file`, which has changes of its own, is not followed: what is added to the file
+/// would go over them.
+pub fn follow_changes(file: &str) -> Notice {
+    Notice::new(Severity::Info, fill(Key::NoticeFollowChanges, &[("file", file)]))
+}
+
+/// `file` has grown beyond what a document holds, and is not followed any more.
+pub fn follow_too_long(file: &str) -> Notice {
+    Notice::new(Severity::Warning, fill(Key::NoticeFollowTooLong, &[("file", file)]))
+}
+
 /// The line breaks of the large file `file` are not converted: that would take a walk over all of
 /// it, and its undo step would keep two copies of it.
 pub fn too_large_to_convert(file: &str) -> Notice {

@@ -218,6 +218,19 @@ impl EditorView {
         self.center_pending = true;
     }
 
+    /// Selects as [`EditorView::select`] does, but the view stays where it is: the caret may be
+    /// out of view.
+    pub fn select_in_place(&mut self, selection: Selection, window: &mut Window, cx: &mut Context<Self>) {
+        let reveal = self.reveal_pending;
+        self.select(selection, window, cx);
+        self.reveal_pending = reveal;
+    }
+
+    /// Whether the caret was in view when the view was last laid out.
+    pub fn caret_in_view(&self) -> bool {
+        self.geometry.caret.is_some_and(|caret| self.geometry.text_area.intersects(&caret))
+    }
+
     /// The place at `column` of `line`, both from zero, as the status bar counts columns: a tab
     /// reaches to its stop, any other character takes one column. A column inside a tab is the
     /// place before it; past the end of the line, its end. A line past the last is the last.
@@ -320,7 +333,10 @@ impl EditorView {
         if doc.version() != self.version {
             self.version = doc.version();
             self.marked = None;
-            self.block_columns = None;
+            // What is added to a file followed goes on the end, and leaves a block where it was.
+            if !doc.is_read_only() {
+                self.block_columns = None;
+            }
         }
         let snap = |pos| movement::snap(doc.text(), doc.lines(), pos);
         self.selection = Selection { anchor: snap(self.selection.anchor), head: snap(self.selection.head) };

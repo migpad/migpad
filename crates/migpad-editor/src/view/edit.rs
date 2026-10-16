@@ -26,9 +26,11 @@ pub(crate) enum Deletion {
 }
 
 impl EditorView {
-    /// Whether the document takes no edits: the preview of a file that is still loading.
+    /// Whether the document takes no edits: the preview of a file that is still loading, or a
+    /// document whose file is followed.
     pub(super) fn read_only(&self, cx: &App) -> bool {
-        self.document.read(cx).is_preview()
+        let doc = self.document.read(cx);
+        doc.is_preview() || doc.is_read_only()
     }
 
     /// Replaces the current stream selection with `text`, keeping the selection over the result.

@@ -102,6 +102,8 @@ mod tests {
             encoding: Some(crate::encoding::Encoding::UTF_16LE),
             selection: Selection::caret(4),
             pinned: false,
+            following: false,
+            at_end: false,
         };
         let kept = TabState {
             document: Some(DocumentId::random()),
@@ -109,6 +111,8 @@ mod tests {
             encoding: None,
             selection: Selection { anchor: 1, head: 0 },
             pinned: false,
+            following: false,
+            at_end: false,
         };
         let pinned = TabState { pinned: true, ..tab("/pinned.txt") };
         let closed = vec![
@@ -132,6 +136,8 @@ mod tests {
             encoding: None,
             selection: Selection::caret(0),
             pinned,
+            following: false,
+            at_end: false,
         };
         let closed = vec![
             ClosedState::Tab(tab("/a.txt", false)),

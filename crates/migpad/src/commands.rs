@@ -786,6 +786,7 @@ mod tests {
                 for reveal in [Key::FileRevealWindows, Key::FileRevealLinux] {
                     let labels = [
                         pin,
+                        Key::ViewFollowFile,
                         Key::FileCloseTab,
                         Key::FileCloseOtherTabs,
                         Key::FileCloseTabsToRight,

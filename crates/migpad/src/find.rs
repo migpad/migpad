@@ -529,7 +529,7 @@ pub fn replace_one(workspace: &mut Workspace, window: &mut Window, cx: &mut Cont
     let Some(search) = search(workspace, window, cx) else { return };
     workspace.show_text(cx);
     let (document, editor) = (workspace.document().clone(), workspace.editor().clone());
-    if document.read(cx).is_preview() {
+    if !workspace.editable(cx) {
         return;
     }
     let replacement = cx.default_global::<LastQuery>().replacement.clone();
@@ -558,7 +558,7 @@ pub fn replace_all(workspace: &mut Workspace, window: &mut Window, cx: &mut Cont
     }
     let Some(search) = search(workspace, window, cx) else { return };
     let (document, editor) = (workspace.document().clone(), workspace.editor().clone());
-    if document.read(cx).is_preview() {
+    if !workspace.editable(cx) {
         return;
     }
     let replacement = cx.default_global::<LastQuery>().replacement.clone();

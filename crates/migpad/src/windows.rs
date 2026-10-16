@@ -68,6 +68,8 @@ impl ClosedTab {
             encoding: self.encoding,
             selection: self.selection,
             pinned: self.pinned,
+            following: false,
+            at_end: false,
         }
     }
 
@@ -333,12 +335,23 @@ pub struct ForTab {
     /// Whether a Markdown document shows as a page or as its text, as it showed before; `None` for
     /// as a new tab shows it.
     pub previewing: Option<bool>,
+    /// Whether the tab follows its file: restored from the session, or moved from another window.
+    pub following: bool,
 }
 
 impl ForTab {
     /// A tab for `document`, which tells nothing.
     pub fn new(document: Entity<Document>, loading: Option<Loading>, selection: Option<Selection>) -> Self {
-        ForTab { document, loading, selection, notice: None, encoding_chosen: false, pinned: false, previewing: None }
+        ForTab {
+            document,
+            loading,
+            selection,
+            notice: None,
+            encoding_chosen: false,
+            pinned: false,
+            previewing: None,
+            following: false,
+        }
     }
 }
 
