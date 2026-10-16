@@ -3,6 +3,7 @@
 //! the language `mermaid` is a diagram, which [`mermaid`] draws. HTML is not interpreted: a block
 //! of it shows as it is written; inline tags go, the text between them stays.
 
+mod autolink;
 pub mod mermaid;
 
 use std::collections::HashMap;
@@ -198,6 +199,7 @@ impl Inlines {
                 close_link(&mut self.text, *start, url.clone());
                 *start = 0;
             }
+            autolink::add_autolinks(&mut self.text);
             self.inlines.push(Inline::Text(std::mem::take(&mut self.text)));
         }
     }
@@ -805,6 +807,66 @@ mod tests {
         assert_eq!(before.links, [Link { range: 0..7, url: "https://l".to_owned() }]);
         assert_eq!(after.text, " after out");
         assert_eq!(after.links, [Link { range: 0..6, url: "https://l".to_owned() }]);
+    }
+
+    #[test]
+    fn addresses_without_brackets_are_links() {
+        let text = |markdown: &str| {
+            let blocks = parse(markdown);
+            let [Block::Paragraph(content)] = &blocks[..] else { panic!("one paragraph: {blocks:?}") };
+            let [Inline::Text(text)] = &content[..] else { panic!("one text: {content:?}") };
+            text.clone()
+        };
+        let links = |text: &Text| -> Vec<(String, String)> {
+            text.links.iter().map(|link| (text.text[link.range.clone()].to_owned(), link.url.clone())).collect()
+        };
+        let pair = |written: &str, url: &str| (written.to_owned(), url.to_owned());
+        let found = text("See https://migpad.com, **www.migpad.com** or me@migpad.com.");
+        assert_eq!(found.text, "See https://migpad.com, www.migpad.com or me@migpad.com.");
+        assert_eq!(
+            links(&found),
+            [
+                pair("https://migpad.com", "https://migpad.com"),
+                pair("www.migpad.com", "http://www.migpad.com"),
+                pair("me@migpad.com", "mailto:me@migpad.com"),
+            ]
+        );
+        let styles: Vec<(&str, Style)> =
+            found.runs.iter().map(|run| (&found.text[run.range.clone()], run.style)).collect();
+        let link = Style { link: true, ..Style::default() };
+        assert_eq!(
+            styles,
+            [
+                ("See ", Style::default()),
+                ("https://migpad.com", link),
+                (", ", Style::default()),
+                ("www.migpad.com", Style { strong: true, ..link }),
+                (" or ", Style::default()),
+                ("me@migpad.com", link),
+                (".", Style::default()),
+            ]
+        );
+        // Not in code, nor in links, which lead where they are written.
+        let found = text("`https://a.b` [https://c.d](https://e.f) <https://g.h> [x](https://i.j)");
+        assert_eq!(
+            links(&found),
+            [pair("https://c.d", "https://e.f"), pair("https://g.h", "https://g.h"), pair("x", "https://i.j"),]
+        );
+        assert!(
+            parse("```\nhttps://a.b\n```\n\n<div>https://c.d</div>\n")
+                .iter()
+                .all(|block| matches!(block, Block::Code { .. } | Block::Html(_)))
+        );
+        // Entities are text: the address goes on after `&amp;`; `&hl;` that is not one ends it.
+        assert_eq!(links(&text("www.a.b/?q=1&amp;hl=en")), [pair("www.a.b/?q=1&hl=en", "http://www.a.b/?q=1&hl=en")]);
+        assert_eq!(links(&text("www.a.b/?q=1&hl;")), [pair("www.a.b/?q=1", "http://www.a.b/?q=1")]);
+        // In headings and cells too.
+        let blocks = parse("# www.a.b\n\n| x |\n| - |\n| me@a.b |\n");
+        let [Block::Heading { content, .. }, Block::Table { rows, .. }] = &blocks[..] else { panic!("{blocks:?}") };
+        let [Inline::Text(heading)] = &content[..] else { panic!("{content:?}") };
+        let [Inline::Text(cell)] = &rows[0][0][..] else { panic!("{rows:?}") };
+        assert_eq!(links(heading), [pair("www.a.b", "http://www.a.b")]);
+        assert_eq!(links(cell), [pair("me@a.b", "mailto:me@a.b")]);
     }
 
     #[test]
