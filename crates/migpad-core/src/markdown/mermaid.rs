@@ -48,8 +48,16 @@ static ENVIRONMENT: LazyLock<SvgEnvironment> = LazyLock::new(|| {
     }
 });
 
-/// The width of `text` in pixels, in its font; as merman guesses it if the system has no fonts.
+/// The longest text measured in its font: merman measures a label again for each place it could
+/// wrap at, and a label of a document as long as a book would take minutes.
+const MOST_MEASURED: usize = 4096;
+
+/// The width of `text` in pixels, in its font; as merman guesses it if the system has no fonts, or
+/// for a text longer than any label.
 fn measure(text: &str, style: &TextStyle) -> f64 {
+    if text.len() > MOST_MEASURED {
+        return DeterministicTextMeasurer::default().measure_html_line_width_px(text, style);
+    }
     let family = style.font_family.as_deref().unwrap_or(FONT);
     let weight = match style.font_weight.as_deref().map(str::trim) {
         Some("bold" | "bolder") => 700,

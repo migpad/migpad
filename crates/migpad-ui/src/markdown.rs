@@ -434,7 +434,7 @@ impl MarkdownPreview {
         let given = self.diagram_widths.borrow().get(source).copied();
         let place = self.diagram_places.borrow().get(source).copied();
         let (Some(given), Some(place)) = (given, place) else { return };
-        if (new - old).abs() < 0.001 || natural.width <= 0. {
+        if (new - old).abs() < 0.001 || natural.width <= 0. || given <= px(0.) {
             return;
         }
         if new > 1. {
