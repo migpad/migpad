@@ -3478,6 +3478,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "merman-elk-layered"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eb341bdb8ec28ff38bf8b24502134d6c7135747fc63c0d2b3a1b1245c04b6311"
+dependencies = [
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "merman-layout-elk"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aed37c29165d50294ba497e36d4bfa74103dc11545baaf7f0fd114480b379357"
+dependencies = [
+ "merman-elk-layered",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "merman-render"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3491,6 +3510,7 @@ dependencies = [
  "kurbo",
  "libm",
  "merman-core",
+ "merman-layout-elk",
  "merman-unicode-linebreak",
  "pulldown-cmark",
  "quick-xml 0.42.0",

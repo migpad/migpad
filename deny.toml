@@ -18,14 +18,16 @@ targets = [
 unmaintained = "workspace"
 
 [licenses]
-# Permissive licenses compatible with MIT. MPL-2.0 is weak file-level copyleft: allowed for
-# unmodified dependencies, whose source code stays available.
+# Permissive licenses compatible with MIT. MPL-2.0 and EPL-2.0 are weak file-level copyleft:
+# allowed for unmodified dependencies, whose source code stays available — EPL-2.0 for the ELK
+# layout of the Mermaid diagrams (merman-elk-layered).
 allow = [
     "Apache-2.0",
     "BSD-2-Clause",
     "BSD-3-Clause",
     "bzip2-1.0.6",
     "CC0-1.0",
+    "EPL-2.0",
     "ISC",
     "MIT",
     "MPL-2.0",

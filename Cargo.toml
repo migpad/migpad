@@ -32,9 +32,10 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 libc = "0.2"
 memchr = "2.8"
 # Mermaid diagrams of the Markdown preview as SVG: Mermaid.js rewritten in Rust. Only the diagrams of the preview,
-# without the ELK layout (EPL-2.0).
+# and the ELK layout (EPL-2.0), which lays out the graphs more tidily than dagre.
 merman = { version = "0.9", default-features = false, features = [
     "svg",
+    "layout-elk",
     "diagram-class",
     "diagram-er",
     "diagram-flowchart",
