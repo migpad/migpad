@@ -2,6 +2,13 @@
 
 What changed in each version of MigPad. MigPad follows [Semantic Versioning](https://semver.org/).
 
+## [0.1.3] — 2026-10-17
+
+### Features
+
+- More case modes, UTF-16 without a byte order mark, autolinks in the Markdown preview ([#38](https://github.com/migpad/migpad/pull/38))
+- Follow File, Go to Line in a file that is still loading ([#39](https://github.com/migpad/migpad/pull/39))
+
 ## [0.1.2] — 2026-10-16
 
 ### Features
