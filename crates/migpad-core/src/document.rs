@@ -1,18 +1,20 @@
 //! Documents: the text with its line index, the format of its file and the state of the file
 //! on disk.
 
+mod follow;
 pub mod journal;
 mod journaling;
 mod load;
 mod save;
 
 use std::fmt;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime};
 
+pub use follow::{Appended, Change, Follower};
 pub use journaling::{RecoverError, Recovered};
 pub use load::{LARGE_FILE, Loader, OpenAs, OpenError, Opened, PREVIEW_LEN, open};
 pub use save::SaveError;
@@ -93,6 +95,8 @@ pub struct Document {
     large: bool,
     /// The beginning of a larger file, shown while the rest loads.
     preview: bool,
+    /// Whether it takes no edits: its file is followed.
+    read_only: bool,
     decode_losses: Losses,
     history: History,
     id: DocumentId,
@@ -121,6 +125,7 @@ impl Document {
             disk: None,
             large: false,
             preview: false,
+            read_only: false,
             decode_losses: Losses::default(),
             history: History::new(),
             id: DocumentId::random(),
@@ -163,6 +168,16 @@ impl Document {
         self.preview
     }
 
+    /// Whether the document takes no edits, undo and redo included: its file is followed, and what
+    /// is added to it goes on its end.
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+
+    pub fn set_read_only(&mut self, read_only: bool) {
+        self.read_only = read_only;
+    }
+
     /// Bytes of the file that could not be decoded when it was loaded: they became U+FFFD,
     /// so saving would not restore them.
     pub fn decode_losses(&self) -> Losses {
@@ -171,7 +186,8 @@ impl Document {
 
     /// Applies `edits` as one undo step: each replaces a range of the text that the previous ones
     /// left. `before` and `after` are the selections that undo and redo restore. Nothing is applied
-    /// to a preview, or if the text would grow beyond [`MAX_LEN`] on the way.
+    /// to a preview or a document that is read only, or if the text would grow beyond [`MAX_LEN`]
+    /// on the way.
     ///
     /// # Panics
     ///
@@ -184,9 +200,7 @@ impl Document {
         kind: EditKind,
         now: Instant,
     ) -> Result<(), EditError> {
-        if self.preview {
-            return Err(EditError::Preview);
-        }
+        self.check_editable()?;
         let mut len = self.text.len();
         for (range, text) in edits {
             len = len.saturating_sub(range.len()) + text.len();
@@ -218,7 +232,7 @@ impl Document {
 
     /// Reverts the last undo step; returns the selection it started with.
     pub fn undo(&mut self) -> Option<Selection> {
-        if !self.history.can_undo() {
+        if !self.history.can_undo() || self.read_only {
             return None;
         }
         self.journal_before_edit();
@@ -238,7 +252,7 @@ impl Document {
 
     /// Applies the last undone step again; returns the selection it ended with.
     pub fn redo(&mut self) -> Option<Selection> {
-        if !self.history.can_redo() {
+        if !self.history.can_redo() || self.read_only {
             return None;
         }
         self.journal_before_edit();
@@ -278,9 +292,7 @@ impl Document {
         selection: Selection,
         now: Instant,
     ) -> Result<Option<Selection>, EditError> {
-        if self.preview {
-            return Err(EditError::Preview);
-        }
+        self.check_editable()?;
         let target = to.as_bytes();
         let points = [selection.anchor, selection.head];
         let mut mapped = points;
@@ -326,11 +338,22 @@ impl Document {
     }
 
     pub fn can_undo(&self) -> bool {
-        self.history.can_undo()
+        self.history.can_undo() && !self.read_only
     }
 
     pub fn can_redo(&self) -> bool {
-        self.history.can_redo()
+        self.history.can_redo() && !self.read_only
+    }
+
+    /// Whether the document takes edits: it is neither a preview nor read only.
+    fn check_editable(&self) -> Result<(), EditError> {
+        if self.preview {
+            Err(EditError::Preview)
+        } else if self.read_only {
+            Err(EditError::ReadOnly)
+        } else {
+            Ok(())
+        }
     }
 
     /// Ends the current undo step, so that the next edit does not join it: the caret moved
@@ -382,7 +405,12 @@ impl Fingerprint {
         Ok(Fingerprint { len: metadata.len(), modified: metadata.modified().ok(), id: crate::platform::file_id(file) })
     }
 
+    /// The fingerprint of the file at `path`. A folder or a pipe there — which opening would wait
+    /// on — is not found: there is no file to read.
     pub fn of_path(path: &Path) -> io::Result<Self> {
+        if !fs::metadata(path)?.is_file() {
+            return Err(io::ErrorKind::NotFound.into());
+        }
         Self::of_file(&File::open(path)?)
     }
 }
@@ -394,6 +422,11 @@ pub enum EditError {
     TooLong,
     /// The document is a preview, see [`Document::is_preview`].
     Preview,
+    /// The document is read only, see [`Document::is_read_only`].
+    ReadOnly,
+    /// Text read from the file does not go on the document: it has changes of its own, or was
+    /// read from the file as it was not then.
+    Changed,
 }
 
 impl fmt::Display for EditError {
@@ -401,6 +434,8 @@ impl fmt::Display for EditError {
         match self {
             EditError::TooLong => write!(f, "the text would be longer than {MAX_LEN} bytes"),
             EditError::Preview => f.write_str("the file is still loading"),
+            EditError::ReadOnly => f.write_str("the document is read only"),
+            EditError::Changed => f.write_str("the document is not as the file was"),
         }
     }
 }

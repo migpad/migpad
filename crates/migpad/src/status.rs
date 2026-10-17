@@ -27,7 +27,8 @@ pub struct Loading {
     pub read: Arc<AtomicU64>,
     pub total: u64,
     pub stopped: Rc<Cell<bool>>,
-    /// What to tell over the text of a load that stopped short: taken once it is told.
+    /// What to tell over the text of a load that stopped short: each tab that shows the document
+    /// tells it, once — that of a tab moved to another window too.
     pub failure: Rc<RefCell<Option<Notice>>>,
 }
 
@@ -81,14 +82,15 @@ pub struct Menus {
 /// the column `None` while it is found; none for a page, which has no caret — the characters of
 /// the selection, `None` while they are
 /// counted, and how far the file has loaded, if it is loading. `block` is the dimensions of a
-/// block selection: `(lines, left_col, right_col)`. With `menus`, the encoding and the line
-/// breaks open them.
+/// block selection: `(lines, left_col, right_col)`. `following` tells that the tab follows its
+/// file. With `menus`, the encoding and the line breaks open them.
 pub fn status_bar(
     doc: &Document,
     caret: Option<(usize, Option<usize>)>,
     selection: Option<Option<usize>>,
     block: Option<(usize, usize, usize)>,
     loading: Option<&Loading>,
+    following: bool,
     menus: Option<Menus>,
 ) -> StatusBar {
     let mut bar = StatusBar::new();
@@ -111,6 +113,9 @@ pub fn status_bar(
         }
         _ => fill(Key::StatusLines, &[("count", &number(doc.lines().count() as u64))]),
     };
+    if following {
+        bar = bar.right(tr(Key::StatusFollowing));
+    }
     let bar = bar.right(lines);
     let (encoding, line_ending) = (encoding(doc.format), line_ending(doc.format.line_ending));
     match menus {
@@ -180,11 +185,11 @@ mod tests {
         doc.format = Format { encoding: Encoding::UTF_8, bom: true, line_ending: LineEnding::CrLf };
         let fields = |bar: StatusBar| bar.fields().map(str::to_owned).collect::<Vec<_>>();
         set_language(Language::English);
-        let english = fields(status_bar(&doc, Some((1233, Some(4))), Some(Some(15000)), None, None, None));
+        let english = fields(status_bar(&doc, Some((1233, Some(4))), Some(Some(15000)), None, None, false, None));
         set_language(Language::Russian);
-        let russian = fields(status_bar(&doc, Some((1233, None)), Some(None), None, None, None));
+        let russian = fields(status_bar(&doc, Some((1233, None)), Some(None), None, None, true, None));
         set_language(Language::English);
         assert_eq!(english, ["Ln 1,234, Col 5", "Selected: 15,000", "Lines: 1", "UTF-8 with BOM", "CRLF"]);
-        assert_eq!(russian, ["Стр 1\u{202f}234, стлб …", "Выделено: …", "Строк: 1", "UTF-8 с BOM", "CRLF"]);
+        assert_eq!(russian, ["Стр 1\u{202f}234, стлб …", "Выделено: …", "Слежение", "Строк: 1", "UTF-8 с BOM", "CRLF"]);
     }
 }

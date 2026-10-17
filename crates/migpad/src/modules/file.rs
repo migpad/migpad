@@ -58,6 +58,11 @@ pub struct PinTabAt(pub usize);
 #[action(namespace = file, no_json)]
 pub struct UnpinTabAt(pub usize);
 
+/// Follows the file of the tab at the given index, or stops following it.
+#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[action(namespace = file, no_json)]
+pub struct FollowTabAt(pub usize);
+
 pub struct FileModule;
 
 impl Module for FileModule {
@@ -93,9 +98,10 @@ impl Module for FileModule {
             .keys(by_os(&["cmd-s"], &["ctrl-s"], &["ctrl-s"]))
             .enabled(|workspace, cx| !workspace.document().read(cx).is_preview());
         registry.add(save, menu(2));
+        // Nor a file followed: the tab would follow the copy.
         let save_as = Command::new("file.save_as", Key::FileSaveAs, SaveAs)
             .keys(by_os(&["cmd-shift-s"], &["ctrl-shift-s"], &["ctrl-shift-s"]))
-            .enabled(|workspace, cx| !workspace.document().read(cx).is_preview());
+            .enabled(|workspace, cx| workspace.editable(cx));
         registry.add(save_as, menu(2));
         let close_tab = Command::new("file.close_tab", Key::FileCloseTab, CloseTab).keys(by_os(
             &["cmd-w"],
@@ -118,7 +124,7 @@ impl Module for FileModule {
             }
         });
         registry.on_window_action(|workspace, _: &SaveAs, window, cx| {
-            if !workspace.document().read(cx).is_preview() {
+            if workspace.editable(cx) {
                 workspace.save_as_active(window, cx);
             }
         });
@@ -151,6 +157,9 @@ impl Module for FileModule {
         });
         registry.on_window_action(|workspace, action: &UnpinTabAt, _, cx| {
             workspace.unpin_tab(action.0, cx);
+        });
+        registry.on_window_action(|workspace, action: &FollowTabAt, window, cx| {
+            workspace.toggle_following(action.0, window, cx);
         });
         registry.on_window_action(|workspace, _: &CloseWindow, window, cx| workspace.close_window(window, cx));
         // Without a window of documents — from the settings window on macOS — and for a new window

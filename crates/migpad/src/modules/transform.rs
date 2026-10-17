@@ -42,7 +42,7 @@ impl Module for TransformModule {
         // A page shows no selection of the text: what would be replaced is not seen.
         let has_selection = |workspace: &Workspace, cx: &gpui::App| {
             let editor = workspace.editor().read(cx);
-            !workspace.previewing(cx) && !editor.is_block_selection() && {
+            workspace.editable(cx) && !workspace.previewing(cx) && !editor.is_block_selection() && {
                 let sel = editor.selection();
                 sel.anchor != sel.head
             }
@@ -94,7 +94,7 @@ fn apply_transform(
     let editor = workspace.editor().clone();
     let sel = editor.read(cx).selection();
     let range = sel.anchor.min(sel.head)..sel.anchor.max(sel.head);
-    if range.is_empty() || workspace.previewing(cx) {
+    if range.is_empty() || workspace.previewing(cx) || !workspace.editable(cx) {
         return;
     }
     let bytes = editor.read(cx).document().read(cx).text().to_vec(range.clone());

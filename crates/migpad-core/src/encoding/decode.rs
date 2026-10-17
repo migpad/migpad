@@ -12,6 +12,8 @@ pub struct Decoder {
     /// Bytes of text produced so far.
     written: usize,
     losses: Losses,
+    /// How much text was produced when the losses were last taken.
+    taken_at: usize,
 }
 
 impl Decoder {
@@ -22,7 +24,12 @@ impl Decoder {
     /// If `encoding` is UTF-8: UTF-8 files are loaded as they are, invalid bytes included.
     pub fn new(encoding: Encoding) -> Self {
         assert!(!encoding.is_utf8(), "UTF-8 files are not decoded");
-        Decoder { inner: encoding.0.new_decoder_without_bom_handling(), written: 0, losses: Losses::default() }
+        Decoder {
+            inner: encoding.0.new_decoder_without_bom_handling(),
+            written: 0,
+            losses: Losses::default(),
+            taken_at: 0,
+        }
     }
 
     /// Decodes the next chunk of the file and appends the text to `out`; `last` marks the final
@@ -50,6 +57,15 @@ impl Decoder {
     /// Malformed sequences met so far; positions are offsets in the decoded text.
     pub fn losses(&self) -> Losses {
         self.losses
+    }
+
+    /// Malformed sequences met since the last time, their positions offsets in the text decoded
+    /// since then; they are not met again.
+    pub fn take_losses(&mut self) -> Losses {
+        let mut losses = std::mem::take(&mut self.losses);
+        losses.first = losses.first.map(|first| first - self.taken_at);
+        self.taken_at = self.written;
+        losses
     }
 }
 

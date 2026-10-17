@@ -50,6 +50,8 @@ pub enum Topic {
     Disk,
     /// The file of the settings.
     Settings,
+    /// Bytes of the file that could not be decoded.
+    Losses,
 }
 
 /// What a button of a notification does.
@@ -146,7 +148,15 @@ pub fn save_failed(doc: &Document, path: &Path, format: Format, error: &SaveErro
             actions: vec![NoticeAction::SaveAs],
             target: None,
         },
-        SaveError::Preview => return None,
+        SaveError::NotAFile => Notice {
+            severity: Severity::Error,
+            message: fill(Key::NoticeSaveFailed, &[("file", &file), ("reason", tr(Key::NoticeNotAFile))]),
+            topic: Some(Topic::Save),
+            actions: vec![NoticeAction::SaveAs],
+            target: None,
+        },
+        // Nothing is written then, and nothing asks to be.
+        SaveError::Preview | SaveError::ReadOnly => return None,
     };
     Some(Notice { target: Some(SaveTarget { path: path.to_owned(), format }), ..notice })
 }
@@ -209,6 +219,17 @@ pub fn changes_kept(file: &str) -> Notice {
 /// The file `file` is not on disk any more: there is nothing to read again.
 pub fn gone_from_disk(file: &str) -> Notice {
     Notice::new(Severity::Warning, fill(Key::NoticeGoneFromDisk, &[("file", file)]))
+}
+
+/// The file of `file`, which has changes of its own, is not followed: what is added to the file
+/// would go over them.
+pub fn follow_changes(file: &str) -> Notice {
+    Notice::new(Severity::Info, fill(Key::NoticeFollowChanges, &[("file", file)]))
+}
+
+/// `file` has grown beyond what a document holds, and is not followed any more.
+pub fn follow_too_long(file: &str) -> Notice {
+    Notice::new(Severity::Warning, fill(Key::NoticeFollowTooLong, &[("file", file)]))
 }
 
 /// The line breaks of the large file `file` are not converted: that would take a walk over all of
@@ -388,7 +409,8 @@ pub fn decode_losses(doc: &Document) -> Option<Notice> {
     let count = number(losses.count as u64);
     let values = [("encoding", doc.format.encoding.name()), ("count", count.as_str()), ("line", &number(line))];
     let message = fill(Key::NoticeDecodeLosses, &values);
-    Some(Notice::new(Severity::Warning, message))
+    // Read again — a file followed is, as it is rotated — the file tells anew in its place.
+    Some(Notice { topic: Some(Topic::Losses), ..Notice::new(Severity::Warning, message) })
 }
 
 #[cfg(test)]
@@ -443,6 +465,7 @@ mod tests {
         let notice = save_failed(&doc, path, format("UTF-8"), &denied).unwrap();
         assert_eq!((notice.severity, notice.actions), (Severity::Error, vec![NoticeAction::SaveAs]));
         assert_eq!(save_failed(&doc, path, format("UTF-8"), &SaveError::Preview), None);
+        assert_eq!(save_failed(&doc, path, format("UTF-8"), &SaveError::ReadOnly), None);
         set_language(Language::Russian);
         let error = SaveError::Losses { encoding: Losses::default(), decoding: lost };
         let notice = save_failed(&doc, path, format("UTF-16LE"), &error).unwrap();

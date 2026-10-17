@@ -100,6 +100,17 @@ impl Encoding {
         self == Self::UTF_16LE || self == Self::UTF_16BE
     }
 
+    /// Whether each byte is a character of its own.
+    pub fn is_single_byte(self) -> bool {
+        self.0.is_single_byte()
+    }
+
+    /// Whether it keeps a state from one character to the next, as the escapes of ISO-2022-JP do:
+    /// how bytes that follow a text are to be read, its end does not tell.
+    pub fn is_stateful(self) -> bool {
+        self.0 == encoding_rs::ISO_2022_JP
+    }
+
     /// The byte order mark; empty for encodings that have none.
     pub fn bom(self) -> &'static [u8] {
         if self == Self::UTF_8 {

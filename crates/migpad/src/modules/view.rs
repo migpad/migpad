@@ -1,6 +1,6 @@
 //! How documents show: word wrap, invisible characters, indent guides — each a setting, the same
-//! in every tab and window, which acts even while an input field has the focus — and a Markdown
-//! document as a page or as its text, each tab apart.
+//! in every tab and window, which acts even while an input field has the focus — and, each tab
+//! apart, a Markdown document as a page or as its text, and a file followed as `tail -f` does.
 
 use gpui::actions;
 use migpad_core::settings::Setting;
@@ -10,7 +10,17 @@ use crate::settings;
 use crate::strings::Key;
 use crate::view_options;
 
-actions!(view, [ToggleWordWrap, ToggleInvisibles, ToggleIndentGuides, ToggleMenuBarInWindow, ToggleMarkdownPreview]);
+actions!(
+    view,
+    [
+        ToggleWordWrap,
+        ToggleInvisibles,
+        ToggleIndentGuides,
+        ToggleMenuBarInWindow,
+        ToggleMarkdownPreview,
+        ToggleFollowFile
+    ]
+);
 
 pub struct ViewModule;
 
@@ -37,6 +47,10 @@ impl Module for ViewModule {
             .checked(|workspace, cx| workspace.previewing(cx))
             .enabled(|workspace, cx| workspace.is_markdown(cx));
         registry.add(preview, menu(2));
+        let follow = Command::new("view.follow_file", Key::ViewFollowFile, ToggleFollowFile)
+            .checked(|workspace, _| workspace.is_following(workspace.active_index()))
+            .enabled(|workspace, cx| workspace.can_follow(workspace.active_index(), cx));
+        registry.add(follow, menu(2));
         // The menu bar of Windows and Linux in each window, besides that of the system.
         if cfg!(target_os = "macos") {
             let menu_bar = Command::new("view.menu_bar", Key::ViewMenuBar, ToggleMenuBarInWindow)
@@ -55,6 +69,9 @@ impl Module for ViewModule {
         });
         registry.on_window_action(|workspace, _: &ToggleMarkdownPreview, window, cx| {
             workspace.toggle_markdown_preview(window, cx);
+        });
+        registry.on_window_action(|workspace, _: &ToggleFollowFile, window, cx| {
+            workspace.toggle_following(workspace.active_index(), window, cx);
         });
         registry.on_window_action(|_, _: &ToggleInvisibles, _, cx| {
             let shown = settings::get(cx).invisibles;

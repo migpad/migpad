@@ -38,7 +38,9 @@ impl Module for EditModule {
         let has_selection = |workspace: &crate::workspace::Workspace, cx: &gpui::App| {
             let editor = workspace.editor();
             let sel = editor.read(cx).selection();
-            !workspace.previewing(cx) && (sel.anchor != sel.head || editor.read(cx).is_block_selection())
+            workspace.editable(cx)
+                && !workspace.previewing(cx)
+                && (sel.anchor != sel.head || editor.read(cx).is_block_selection())
         };
         let upper = Command::new("edit.upper_case", Key::EditUpperCase, UpperCase)
             .keys(by_os(&["cmd-shift-u"], &["ctrl-shift-u"], &["ctrl-shift-u"]))

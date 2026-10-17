@@ -127,6 +127,14 @@ impl Document {
         }
     }
 
+    /// The journal refers to the file as it was, and the document has nothing it has not: it goes,
+    /// and starts anew from the file as it is with the next edit.
+    pub(super) fn restart_journal(&mut self) {
+        let dir = self.journal.dir.clone();
+        self.remove_journal();
+        self.journal.dir = dir;
+    }
+
     /// Makes sure the changes of the document are in a journal, so that the next start brings
     /// them back: after an error stopped the journal, it is written anew with the text, if it can
     /// be now. Tells whether the changes are kept — a document without changes has nothing to keep.

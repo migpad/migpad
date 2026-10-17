@@ -27,6 +27,9 @@ pub enum OpenAs<'a> {
     /// Use this encoding: "Reopen in encoding", or the one remembered for a recent file.
     /// A byte order mark of this encoding is still recognized.
     Encoding(Encoding),
+    /// Use this encoding, which the file had, unless a byte order mark tells another: a file another
+    /// program writes anew, as a log rotated, may be too short yet to tell its own.
+    Kept(Encoding),
 }
 
 /// A file opened by [`open`].
@@ -94,14 +97,17 @@ impl Limits {
 
 fn open_with(path: &Path, open_as: OpenAs, limits: Limits) -> Result<Opened, OpenError> {
     let mut file = File::open(path)?;
-    let metadata = file.metadata()?;
-    if metadata.len() > limits.max as u64 {
+    // The file as it is before reading: what another program adds to it meanwhile is not read,
+    // and the next look at the file finds it changed.
+    let disk = Fingerprint::of_file(&file)?;
+    if disk.len > limits.max as u64 {
         return Err(OpenError::TooLarge);
     }
-    let len = metadata.len() as usize;
+    let len = disk.len as usize;
     let mut sample = Vec::with_capacity(len.min(limits.preview) + 1);
     // One byte more than the preview tells whether the sample is the whole file.
     (&mut file).take(limits.preview as u64 + 1).read_to_end(&mut sample)?;
+    sample.truncate(len);
     let complete = sample.len() <= limits.preview;
     sample.truncate(limits.preview);
     let (Detected { encoding, bom }, tld) = match open_as {
@@ -110,8 +116,15 @@ fn open_with(path: &Path, open_as: OpenAs, limits: Limits) -> Result<Opened, Ope
             let bom = !encoding.bom().is_empty() && sample.starts_with(encoding.bom());
             (Detected { encoding, bom }, None)
         }
+        OpenAs::Kept(kept) => {
+            let marked = [Encoding::UTF_8, Encoding::UTF_16LE, Encoding::UTF_16BE]
+                .into_iter()
+                .find(|encoding| sample.starts_with(encoding.bom()));
+            let detected =
+                marked.map_or(Detected { encoding: kept, bom: false }, |encoding| Detected { encoding, bom: true });
+            (detected, None)
+        }
     };
-    let disk = Fingerprint::of_file(&file)?;
     let loader = Loader {
         file,
         path: path.to_owned(),
@@ -121,7 +134,7 @@ fn open_with(path: &Path, open_as: OpenAs, limits: Limits) -> Result<Opened, Ope
         bom,
         detected: matches!(open_as, OpenAs::Detect { .. }),
         tld,
-        large: metadata.len() >= limits.large,
+        large: disk.len >= limits.large,
         progress: Arc::new(AtomicU64::new(0)),
         cancel: Arc::new(AtomicBool::new(false)),
         limits,
@@ -457,6 +470,17 @@ mod tests {
         let file = TempFile::new("chosen-bom", b"\xFF\xFEh\0i\0");
         let doc = complete(open_with(&file.0, OpenAs::Encoding(Encoding::UTF_16LE), Limits::DEFAULT).unwrap());
         assert_eq!((doc.format.bom, text(&doc)), (true, b"hi".to_vec()));
+    }
+
+    #[test]
+    fn a_kept_encoding_gives_way_to_a_byte_order_mark() {
+        // A log rotated: one line, too little to guess windows-1251 by.
+        let file = TempFile::new("kept", &cp1251("Пуск\n"));
+        let doc = complete(open_with(&file.0, OpenAs::Kept(windows_1251()), Limits::DEFAULT).unwrap());
+        assert_eq!((doc.format.encoding, doc.format.bom, text(&doc)), (windows_1251(), false, "Пуск\n".into()));
+        let file = TempFile::new("kept-bom", b"\xFE\xFF\0h\0i");
+        let doc = complete(open_with(&file.0, OpenAs::Kept(windows_1251()), Limits::DEFAULT).unwrap());
+        assert_eq!((doc.format.encoding, doc.format.bom, text(&doc)), (Encoding::UTF_16BE, true, b"hi".to_vec()));
     }
 
     #[test]

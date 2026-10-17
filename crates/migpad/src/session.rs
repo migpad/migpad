@@ -336,8 +336,10 @@ enum Restored {
 }
 
 fn restore_tab(tab: &TabState, cx: &mut App) -> Restored {
-    let selection = Some(tab.selection);
-    let pinned = tab.pinned;
+    // A tab that followed its file with the caret at the end goes on to the end of what was added
+    // to it meanwhile.
+    let selection = (!tab.at_end).then_some(tab.selection);
+    let (pinned, following) = (tab.pinned, tab.following);
     let mut failure = None;
     if let Some(id) = tab.document {
         match recover(id, tab.path.as_deref(), cx) {
@@ -347,6 +349,7 @@ fn restore_tab(tab: &TabState, cx: &mut App) -> Restored {
                     notice,
                     encoding_chosen,
                     pinned,
+                    following,
                     ..ForTab::new(document, None, selection)
                 });
             }
@@ -367,6 +370,7 @@ fn restore_tab(tab: &TabState, cx: &mut App) -> Restored {
                 notice: failure,
                 encoding_chosen,
                 pinned,
+                following,
                 ..ForTab::new(document, loading, selection)
             })
         }

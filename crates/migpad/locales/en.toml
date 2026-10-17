@@ -148,6 +148,8 @@ invisibles = "&Invisibles"
 indent_guides = "Indent &Guides"
 # A Markdown document shows as a page, or as its text.
 markdown_preview = "Markdown &Preview"
+# Reads what another program adds to the file, as tail -f does.
+follow_file = "&Follow File"
 # On macOS: the menu bar of Windows and Linux in each window.
 menu_bar = "&Menu Bar in Window"
 
@@ -201,15 +203,19 @@ with_bom = "{encoding} with BOM"
 loading = "Loading… {percent}"
 encoding_tip = "Reopen or save in another encoding"
 line_ending_tip = "Line endings"
+following = "Following"
 
 [notice]
 gone_from_disk = "“{file}” is not on disk any more: there is nothing to read again."
 too_large_to_convert = "“{file}” is a large file: its line endings are not converted."
 changes_kept = "Your changes to “{file}” are in File ▸ Recently Closed."
+follow_changes = "Save the changes to “{file}” to follow its file."
+follow_too_long = "“{file}” has grown larger than MigPad opens: it is not followed any more."
 close = "Close"
 open_failed = "Could not open “{file}”: {reason}."
 no_permission = "no permission to read it"
 is_folder = "it is a folder"
+not_a_file = "it is not a file"
 too_large = "it is larger than 4 GiB"
 load_failed = "Could not read all of “{file}”: {reason}. Its beginning shows, and it cannot be edited."
 decode_losses = "Places not valid {encoding}: {count}. They show as “�”; the first is on line {line}."

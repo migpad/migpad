@@ -68,6 +68,8 @@ impl ClosedTab {
             encoding: self.encoding,
             selection: self.selection,
             pinned: self.pinned,
+            following: false,
+            at_end: false,
         }
     }
 
@@ -333,12 +335,27 @@ pub struct ForTab {
     /// Whether a Markdown document shows as a page or as its text, as it showed before; `None` for
     /// as a new tab shows it.
     pub previewing: Option<bool>,
+    /// Whether the tab follows its file: restored from the session, or moved from another window.
+    pub following: bool,
+    /// Where the caret goes once the file has loaded, a line and a column from zero: Go to Line in
+    /// a tab moved from another window while its file loads.
+    pub place: Option<(usize, usize)>,
 }
 
 impl ForTab {
     /// A tab for `document`, which tells nothing.
     pub fn new(document: Entity<Document>, loading: Option<Loading>, selection: Option<Selection>) -> Self {
-        ForTab { document, loading, selection, notice: None, encoding_chosen: false, pinned: false, previewing: None }
+        ForTab {
+            document,
+            loading,
+            selection,
+            notice: None,
+            encoding_chosen: false,
+            pinned: false,
+            previewing: None,
+            following: false,
+            place: None,
+        }
     }
 }
 
@@ -398,11 +415,17 @@ pub fn open_document_as(path: &Path, open_as: OpenAs, cx: &mut App) -> Opening {
             cx.spawn(async move |cx| {
                 match loading.await {
                     Ok(mut loaded) => {
-                        // The preview could not be edited; the whole text can, with a journal.
+                        // The preview could not be edited; the whole text can, with a journal —
+                        // unless its file is followed.
                         if let Some(dir) = journals {
                             loaded.journal_in(dir);
                         }
                         let _ = target.update(cx, |doc, cx| {
+                            // Read whole again meanwhile, it is newer.
+                            if !doc.is_preview() {
+                                return;
+                            }
+                            loaded.set_read_only(doc.is_read_only());
                             *doc = loaded;
                             cx.notify();
                         });
