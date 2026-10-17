@@ -337,6 +337,9 @@ pub struct ForTab {
     pub previewing: Option<bool>,
     /// Whether the tab follows its file: restored from the session, or moved from another window.
     pub following: bool,
+    /// Where the caret goes once the file has loaded, a line and a column from zero: Go to Line in
+    /// a tab moved from another window while its file loads.
+    pub place: Option<(usize, usize)>,
 }
 
 impl ForTab {
@@ -351,6 +354,7 @@ impl ForTab {
             pinned: false,
             previewing: None,
             following: false,
+            place: None,
         }
     }
 }
@@ -417,6 +421,10 @@ pub fn open_document_as(path: &Path, open_as: OpenAs, cx: &mut App) -> Opening {
                             loaded.journal_in(dir);
                         }
                         let _ = target.update(cx, |doc, cx| {
+                            // Read whole again meanwhile, it is newer.
+                            if !doc.is_preview() {
+                                return;
+                            }
                             loaded.set_read_only(doc.is_read_only());
                             *doc = loaded;
                             cx.notify();

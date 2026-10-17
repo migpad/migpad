@@ -27,7 +27,8 @@ pub struct Loading {
     pub read: Arc<AtomicU64>,
     pub total: u64,
     pub stopped: Rc<Cell<bool>>,
-    /// What to tell over the text of a load that stopped short: taken once it is told.
+    /// What to tell over the text of a load that stopped short: each tab that shows the document
+    /// tells it, once — that of a tab moved to another window too.
     pub failure: Rc<RefCell<Option<Notice>>>,
 }
 

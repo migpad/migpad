@@ -482,6 +482,24 @@ mod tests {
     }
 
     #[test]
+    fn what_is_not_a_file_is_not_written_over() {
+        use crate::document::SaveError;
+
+        let (_dir, path, mut doc, _) = followed("save-not-a-file", b"one\n");
+        let format = doc.format;
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert!(matches!(doc.save(&path, format, false), Err(SaveError::NotAFile)));
+        // A pipe: opening it to write would wait for a program to read it.
+        #[cfg(unix)]
+        {
+            fs::remove_dir(&path).unwrap();
+            assert!(std::process::Command::new("mkfifo").arg(&path).status().unwrap().success());
+            assert!(matches!(doc.save(&path, format, false), Err(SaveError::NotAFile)));
+        }
+    }
+
+    #[test]
     fn a_folder_in_place_of_the_file_is_as_gone() {
         let (_dir, path, _doc, mut follower) = followed("follow-folder", b"one\n");
         fs::remove_file(&path).unwrap();

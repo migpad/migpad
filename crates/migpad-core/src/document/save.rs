@@ -36,6 +36,8 @@ pub enum SaveError {
     /// The document is read only: its file is followed, and has what the document has and maybe
     /// more, which writing it would drop; see [`Document::is_read_only`].
     ReadOnly,
+    /// Something other than a file is there: a folder, or a pipe, which opening would wait on.
+    NotAFile,
 }
 
 impl From<io::Error> for SaveError {
@@ -57,6 +59,7 @@ impl fmt::Display for SaveError {
             SaveError::PermissionDenied(error) | SaveError::Io(error) => error.fmt(f),
             SaveError::Preview => f.write_str("the file is still loading"),
             SaveError::ReadOnly => f.write_str("the document is read only"),
+            SaveError::NotAFile => f.write_str("it is not a file"),
         }
     }
 }
@@ -79,6 +82,9 @@ impl Document {
             return Err(SaveError::ReadOnly);
         }
         let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
+        if fs::metadata(&target).is_ok_and(|metadata| !metadata.is_file()) {
+            return Err(SaveError::NotAFile);
+        }
         // Bytes lost in decoding are gone for good once the file they came from is overwritten,
         // in whatever encoding.
         let source = self.path.as_deref().and_then(|source| fs::canonicalize(source).ok());

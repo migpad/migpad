@@ -148,6 +148,13 @@ pub fn save_failed(doc: &Document, path: &Path, format: Format, error: &SaveErro
             actions: vec![NoticeAction::SaveAs],
             target: None,
         },
+        SaveError::NotAFile => Notice {
+            severity: Severity::Error,
+            message: fill(Key::NoticeSaveFailed, &[("file", &file), ("reason", tr(Key::NoticeNotAFile))]),
+            topic: Some(Topic::Save),
+            actions: vec![NoticeAction::SaveAs],
+            target: None,
+        },
         // Nothing is written then, and nothing asks to be.
         SaveError::Preview | SaveError::ReadOnly => return None,
     };
