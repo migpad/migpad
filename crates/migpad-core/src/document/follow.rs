@@ -54,8 +54,8 @@ pub struct Appended {
     pub losses: Losses,
     /// Whether more of the file is to be read at once: it grew by more than a look reads.
     pub more: bool,
-    /// Whether bytes read wait for those after them — the end of a character, a CR that a LF may
-    /// follow: the text lacks them until those come.
+    /// Whether bytes read may wait for those after them — the end of a character, a CR that a LF
+    /// may follow: the text lacks them until those come.
     pub held: bool,
 }
 
@@ -173,7 +173,10 @@ impl Follower {
         tail.extend_from_slice(&bytes[bytes.len().saturating_sub(TAIL)..]);
         self.tail = Some(tail);
         let (text, losses) = self.decode(&bytes);
-        let (more, held) = (self.read < now.len, !self.held.is_empty() || self.held_cr);
+        // A decoder keeps the start of a character itself, which it does not tell: but one of single
+        // bytes has none.
+        let decoding = self.decoder.is_some() && !self.format.encoding.is_single_byte();
+        let (more, held) = (self.read < now.len, !self.held.is_empty() || self.held_cr || decoding);
         Ok(Change::Appended(Appended { from, disk: self.disk, text, losses, more, held }))
     }
 

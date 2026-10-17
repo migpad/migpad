@@ -876,12 +876,13 @@ impl Workspace {
         let Some(tab) = self.tabs.get(index) else { return Task::ready(false) };
         let doc = tab.document.read(cx);
         let Some(path) = doc.path.clone() else { return self.save_as(index, format, window, cx) };
-        // Nothing to write: the file is as it was read or saved, and so is the text — or it is
-        // followed, and has what the document has, and maybe more.
+        // Nothing to write: the text is as it was read or saved. The file may have changed since —
+        // another program writes it, as a log followed — which writing would undo; reading it again
+        // brings that in. A file gone is written anew, but not one followed.
         if format.is_none()
             && !doc.is_modified()
             && doc.disk.is_some()
-            && (doc.is_read_only() || Fingerprint::of_path(&path).ok() == doc.disk)
+            && (doc.is_read_only() || Fingerprint::of_path(&path).is_ok())
         {
             return Task::ready(true);
         }
@@ -1642,12 +1643,15 @@ impl Workspace {
         let doc = tab.document.clone();
         let encoding_chosen = tab.encoding_chosen;
         let (pinned, previewing, following) = (tab.pinned, Some(tab.previewing), tab.following);
-        let selection = Some(tab.editor.read(cx).selection());
+        // A tab that follows its file with the caret at the end goes on at the end, once loaded.
+        let selection = (!(following && tab.at_end(cx))).then(|| tab.kept_selection(cx));
+        // Still loading, it shows how far, and tells if the rest does not come.
+        let loading = tab.loading.clone();
         if self.tabs.len() == 1 {
             window.remove_window();
             return Some(ForTab {
                 document: doc,
-                loading: None,
+                loading,
                 selection,
                 notice: None,
                 encoding_chosen,
@@ -1664,16 +1668,7 @@ impl Workspace {
         } else {
             cx.notify();
         }
-        Some(ForTab {
-            document: doc,
-            loading: None,
-            selection,
-            notice: None,
-            encoding_chosen,
-            pinned,
-            previewing,
-            following,
-        })
+        Some(ForTab { document: doc, loading, selection, notice: None, encoding_chosen, pinned, previewing, following })
     }
 
     /// A tab dropped on the window outside the tab bar: if from this window, tear it off into a new
@@ -1976,7 +1971,7 @@ impl Workspace {
             if tab.document.read(cx).is_modified() {
                 self.tell_changed(index, cx);
             } else {
-                self.reload(index, cx);
+                self.reload(index, None, cx);
             }
         }
     }
@@ -1994,8 +1989,10 @@ impl Workspace {
 
     /// Reads the file of the tab at `index` again, in the background, into its document: the view
     /// keeps the caret and the scroll. If the document gets changes meanwhile, they stay and the
-    /// tab tells of the file instead.
-    fn reload(&mut self, index: usize, cx: &mut Context<Self>) {
+    /// tab tells of the file instead. The file is read in the encoding chosen for it; in `kept`,
+    /// unless a byte order mark tells another; or in one guessed anew: another program may have
+    /// written it in another one.
+    fn reload(&mut self, index: usize, kept: Option<Encoding>, cx: &mut Context<Self>) {
         let Some(tab) = self.tabs.get_mut(index) else { return };
         let Some(path) = tab.document.read(cx).path.clone() else { return };
         tab.reloading = true;
@@ -2003,17 +2000,14 @@ impl Workspace {
         // Saved meanwhile, the document is not the one read over.
         let disk = document.read(cx).disk;
         let journals = journals::dir(cx);
-        // In the encoding chosen for it, or guessed anew: another program may have written it in
-        // another one. A file followed is read in the one its text told.
-        let chosen = if tab.encoding_chosen {
-            Some(document.read(cx).format.encoding)
-        } else {
-            tab.follow_encoding.filter(|_| tab.following)
+        let open_as = match (tab.encoding_chosen, kept) {
+            (true, _) => OpenAs::Encoding(document.read(cx).format.encoding),
+            (false, Some(kept)) => OpenAs::Kept(kept),
+            (false, None) => OpenAs::Detect { tld: None },
         };
         let read = cx.background_spawn({
             let path = path.clone();
             async move {
-                let open_as = chosen.map_or(OpenAs::Detect { tld: None }, OpenAs::Encoding);
                 match open(&path, open_as)? {
                     Opened::Complete(doc) => Ok(doc),
                     Opened::Partial { loader, .. } => loader.load(),
@@ -2122,11 +2116,14 @@ impl Workspace {
     pub fn toggle_following(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.tabs.get(index) else { return };
         if tab.following {
-            // The document takes edits now: it is to have all of the file first.
-            let behind = tab.behind.is_some() && tab.behind == tab.document.read(cx).disk;
+            // The document takes edits now: it is to have all of the file first, in its encoding.
+            let doc = tab.document.read(cx);
+            let behind = tab.behind.is_some() && tab.behind == doc.disk;
+            let grown = doc.path.as_deref().and_then(|path| Fingerprint::of_path(path).ok()) != doc.disk;
+            let encoding = doc.format.encoding;
             self.stop_following(index, cx);
-            if behind {
-                self.reload(index, cx);
+            if behind || grown {
+                self.reload(index, Some(encoding), cx);
             }
         } else if tab.document.read(cx).path.is_some() {
             if tab.has_changes(cx) {
@@ -2294,7 +2291,6 @@ impl Workspace {
                 match added {
                     Ok(shows) => {
                         tab.behind = (appended.more || appended.held).then_some(appended.disk);
-                        tab.learn_encoding(cx);
                         if shows && at_end {
                             tab.to_end(reveal, window, cx);
                         }
@@ -2320,7 +2316,8 @@ impl Workspace {
                 if at_end && let Some(tab) = self.tabs.get_mut(index) {
                     tab.pending_end = Some(Pending::new(reveal, &tab.editor, cx));
                 }
-                self.reload(index, cx);
+                let encoding = self.tabs.get(index).and_then(|tab| tab.follow_encoding);
+                self.reload(index, encoding, cx);
                 true
             }
             Change::TooLong => {
@@ -2420,6 +2417,7 @@ impl Workspace {
             if tab.following && !tab.document.read(cx).is_read_only() {
                 tab.document.update(cx, |doc, _| doc.set_read_only(true));
             }
+            tab.learn_encoding(cx);
             // A reopened tab goes back to where it was once its file has loaded, and the caret to
             // the place it was sent to — unless the selection has moved meanwhile.
             let loaded = !tab.document.read(cx).is_preview();
@@ -2799,11 +2797,23 @@ impl Tab {
         closed
     }
 
-    /// Keeps the encoding of the file followed, if its text tells it: there is some.
+    /// Keeps the encoding of the file followed, once its text tells it: a byte order mark, UTF-16,
+    /// or characters of a legacy encoding before the end — of a character cut off at the end, a
+    /// guess makes anything. UTF-8 without a mark tells itself again. Not the guess of the
+    /// beginning shown while a file loads, which the whole text may change.
     fn learn_encoding(&mut self, cx: &App) {
         let doc = self.document.read(cx);
-        if self.follow_encoding.is_none() && !doc.text().is_empty() {
-            self.follow_encoding = Some(doc.format.encoding);
+        if !self.following || self.follow_encoding.is_some() || doc.is_preview() {
+            return;
+        }
+        let Format { encoding, bom, .. } = doc.format;
+        let text = doc.text();
+        let before_end = text.len().saturating_sub(8);
+        let told = bom
+            || encoding.is_utf16()
+            || (!encoding.is_utf8() && text.chunks(0..before_end).any(|chunk| !chunk.is_ascii()));
+        if told {
+            self.follow_encoding = Some(encoding);
         }
     }
 

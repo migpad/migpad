@@ -50,6 +50,8 @@ pub enum Topic {
     Disk,
     /// The file of the settings.
     Settings,
+    /// Bytes of the file that could not be decoded.
+    Losses,
 }
 
 /// What a button of a notification does.
@@ -400,7 +402,8 @@ pub fn decode_losses(doc: &Document) -> Option<Notice> {
     let count = number(losses.count as u64);
     let values = [("encoding", doc.format.encoding.name()), ("count", count.as_str()), ("line", &number(line))];
     let message = fill(Key::NoticeDecodeLosses, &values);
-    Some(Notice::new(Severity::Warning, message))
+    // Read again — a file followed is, as it is rotated — the file tells anew in its place.
+    Some(Notice { topic: Some(Topic::Losses), ..Notice::new(Severity::Warning, message) })
 }
 
 #[cfg(test)]

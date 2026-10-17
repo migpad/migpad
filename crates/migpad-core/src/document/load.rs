@@ -27,6 +27,9 @@ pub enum OpenAs<'a> {
     /// Use this encoding: "Reopen in encoding", or the one remembered for a recent file.
     /// A byte order mark of this encoding is still recognized.
     Encoding(Encoding),
+    /// Use this encoding, which the file had, unless a byte order mark tells another: a file another
+    /// program writes anew, as a log rotated, may be too short yet to tell its own.
+    Kept(Encoding),
 }
 
 /// A file opened by [`open`].
@@ -112,6 +115,14 @@ fn open_with(path: &Path, open_as: OpenAs, limits: Limits) -> Result<Opened, Ope
         OpenAs::Encoding(encoding) => {
             let bom = !encoding.bom().is_empty() && sample.starts_with(encoding.bom());
             (Detected { encoding, bom }, None)
+        }
+        OpenAs::Kept(kept) => {
+            let marked = [Encoding::UTF_8, Encoding::UTF_16LE, Encoding::UTF_16BE]
+                .into_iter()
+                .find(|encoding| sample.starts_with(encoding.bom()));
+            let detected =
+                marked.map_or(Detected { encoding: kept, bom: false }, |encoding| Detected { encoding, bom: true });
+            (detected, None)
         }
     };
     let loader = Loader {
@@ -459,6 +470,17 @@ mod tests {
         let file = TempFile::new("chosen-bom", b"\xFF\xFEh\0i\0");
         let doc = complete(open_with(&file.0, OpenAs::Encoding(Encoding::UTF_16LE), Limits::DEFAULT).unwrap());
         assert_eq!((doc.format.bom, text(&doc)), (true, b"hi".to_vec()));
+    }
+
+    #[test]
+    fn a_kept_encoding_gives_way_to_a_byte_order_mark() {
+        // A log rotated: one line, too little to guess windows-1251 by.
+        let file = TempFile::new("kept", &cp1251("Пуск\n"));
+        let doc = complete(open_with(&file.0, OpenAs::Kept(windows_1251()), Limits::DEFAULT).unwrap());
+        assert_eq!((doc.format.encoding, doc.format.bom, text(&doc)), (windows_1251(), false, "Пуск\n".into()));
+        let file = TempFile::new("kept-bom", b"\xFE\xFF\0h\0i");
+        let doc = complete(open_with(&file.0, OpenAs::Kept(windows_1251()), Limits::DEFAULT).unwrap());
+        assert_eq!((doc.format.encoding, doc.format.bom, text(&doc)), (Encoding::UTF_16BE, true, b"hi".to_vec()));
     }
 
     #[test]
